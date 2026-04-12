@@ -12,6 +12,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 add_mlir_dialect_library(PTOTransforms
+  HIVMIntrinsicNaming.cpp
+  VPTOLLVMEmitter.cpp
+  PTOVPTOExpandBridgeOps.cpp
+  PTOVPTOPtrBoundary.cpp
+  PTOToVPTO.cpp
+  PTOToVPTOLowering.cpp
+  PTOValidateVPTOIR.cpp
+
   InsertSync/PTOInsertSync.cpp
   PTOInjectBarrierAllSync.cpp
   InsertSync/InsertSyncDebug.cpp
@@ -60,6 +68,9 @@ add_mlir_dialect_library(PTOTransforms
   PTOPassesIncGen
   PTOOpsIncGen
 
+  LINK_COMPONENTS
+  Analysis
+
   LINK_LIBS PUBLIC
   PTOIR
   MLIRIR
@@ -73,8 +84,13 @@ add_mlir_dialect_library(PTOTransforms
   MLIRTransformUtils
   MLIRTransforms
   MLIRTensorDialect
+  MLIRSCFDialect
   MLIRSCFToEmitC
   MLIRSCFDialect
+  MLIRSCFToControlFlow
+  MLIRConvertToLLVMPass
+  MLIRTargetLLVMIRExport
+  MLIRToLLVMIRTranslationRegistration
 )
 
 install(TARGETS PTOTransforms
