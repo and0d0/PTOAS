@@ -22,7 +22,8 @@ module {
 
 // IR: PTOAS IR before EmitC
 // IR: arith.addi
-// IR: pto.alloc_tile addr = %{{.*}} {pto.view_semantics = "subview"} : !pto.tile_buf<right, 64x256xf32, valid=64x128, slayout=col_major>
+// IR: pto.alloc_tile addr = %{{.*}} : !pto.tile_buf<right, 64x256xf32, valid=64x128, slayout=col_major>
+// IR-NOT: pto.view_semantics
 // IR-NOT: pto.materialize_tile
 
 // EMITC: Tile<TileType::Right, float, 64, 256, BLayout::RowMajor, 64, 128, SLayout::ColMajor, 512, PadValue::Null, CompactMode::Null>
