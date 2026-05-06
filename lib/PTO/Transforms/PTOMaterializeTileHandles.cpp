@@ -512,6 +512,78 @@ static Value computeExplicitAddress(Value value, OpBuilder &builder,
   return Value();
 }
 
+static bool isControlFlowAddressProducer(Operation *op) {
+  if (!op)
+    return false;
+
+  StringRef name = op->getName().getStringRef();
+  return name == "scf.if" || name == "scf.for" || name == "scf.while" ||
+         name == "scf.execute_region" || name == "scf.index_switch";
+}
+
+static Value peelAddressSource(Value value) {
+  while (true) {
+    if (auto bind = value.getDefiningOp<BindTileOp>()) {
+      value = bind.getSource();
+      continue;
+    }
+
+    if (auto subview = value.getDefiningOp<memref::SubViewOp>()) {
+      value = subview.getSource();
+      continue;
+    }
+
+    if (auto cast = value.getDefiningOp<memref::CastOp>()) {
+      value = cast.getSource();
+      continue;
+    }
+
+    return value;
+  }
+}
+
+static bool isFunctionEntryBlockArgument(BlockArgument arg) {
+  Operation *parent = arg.getOwner()->getParentOp();
+  auto func = dyn_cast_or_null<func::FuncOp>(parent);
+  return func && arg.getOwner() == &func.getBody().front();
+}
+
+static bool isUnsupportedControlFlowAddress(Value value) {
+  value = peelAddressSource(value);
+
+  if (auto arg = dyn_cast<BlockArgument>(value))
+    return !isFunctionEntryBlockArgument(arg);
+
+  return isControlFlowAddressProducer(value.getDefiningOp());
+}
+
+static void emitMissingExplicitAddressError(Operation *owner, Value value) {
+  value = peelAddressSource(value);
+  auto diag = owner->emitOpError()
+              << "cannot materialize tile handle for local memref because its "
+                 "explicit byte address cannot be recovered";
+
+  if (isa<BlockArgument>(value)) {
+    diag << "; region block arguments and loop-carried memref values are "
+            "unsupported here";
+    return;
+  }
+
+  Operation *def = value.getDefiningOp();
+  if (!def) {
+    diag << "; value has no defining op";
+    return;
+  }
+
+  if (isControlFlowAddressProducer(def)) {
+    diag << "; control-flow result '" << def->getName()
+         << "' cannot carry a local memref into tile materialization";
+    return;
+  }
+
+  diag << "; unsupported defining op is '" << def->getName() << "'";
+}
+
 static Value getAllocValidOperand(TileBufType tileTy, Value operand,
                                   unsigned dim, OpBuilder &builder,
                                   Location loc) {
@@ -552,7 +624,8 @@ static void updateResultTypesAfterMaterializingOperand(Operation *op,
 
 static Value materializeAnchorResult(Operation *anchor, Value anchoredValue,
                                      OpBuilder &builder, MLIRContext *ctx,
-                                     DenseMap<Value, Value> &tileHandles) {
+                                     DenseMap<Value, Value> &tileHandles,
+                                     bool &failedMaterialization) {
   auto memTy = dyn_cast<MemRefType>(anchoredValue.getType());
   if (!memTy || !isLocalTileMemRef(memTy))
     return Value();
@@ -592,6 +665,11 @@ static Value materializeAnchorResult(Operation *anchor, Value anchoredValue,
             .getResult();
   } else {
     Value addr = computeExplicitAddress(anchoredValue, builder, anchor->getLoc());
+    if (!addr && isUnsupportedControlFlowAddress(anchoredValue)) {
+      emitMissingExplicitAddressError(anchor, anchoredValue);
+      failedMaterialization = true;
+      return Value();
+    }
     auto alloc = builder.create<AllocTileOp>(
         anchor->getLoc(), tileTy, addr ? addr : Value(),
         getAllocValidOperand(tileTy, meta.validRow, 0, builder,
@@ -622,6 +700,7 @@ struct PTOMaterializeTileHandlesPass
 
     OpBuilder builder(ctx);
     DenseMap<Value, Value> tileHandles;
+    bool failedMaterialization = false;
 
     SmallVector<Operation *, 32> anchors;
     module.walk([&](Operation *op) {
@@ -634,7 +713,12 @@ struct PTOMaterializeTileHandlesPass
       if (anchor->getNumResults() != 1)
         continue;
       materializeAnchorResult(anchor, anchor->getResult(0), builder, ctx,
-                              tileHandles);
+                              tileHandles, failedMaterialization);
+    }
+
+    if (failedMaterialization) {
+      signalPassFailure();
+      return;
     }
 
     SmallVector<std::pair<Operation *, unsigned>, 32> operandsToRewrite;
@@ -662,6 +746,11 @@ struct PTOMaterializeTileHandlesPass
       builder.setInsertionPoint(op);
       Value materialized;
       Value addr = computeExplicitAddress(oldValue, builder, op->getLoc());
+      if (!addr && isUnsupportedControlFlowAddress(oldValue)) {
+        emitMissingExplicitAddressError(op, oldValue);
+        failedMaterialization = true;
+        continue;
+      }
       auto alloc = builder.create<AllocTileOp>(
           op->getLoc(), tileTy, addr ? addr : Value(),
           getAllocValidOperand(tileTy, meta.validRow, 0, builder,
@@ -673,6 +762,11 @@ struct PTOMaterializeTileHandlesPass
       tileHandles[oldValue] = materialized;
       op->setOperand(operandNo, materialized);
       updateResultTypesAfterMaterializingOperand(op, operandNo, tileTy);
+    }
+
+    if (failedMaterialization) {
+      signalPassFailure();
+      return;
     }
 
     bool erasedBind = true;
