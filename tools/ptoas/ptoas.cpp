@@ -1415,13 +1415,7 @@ int main(int argc, char **argv) {
       cliArchSpecified = true;
   }
 
-  // Register all passes so that --mlir-print-ir-after/before can resolve
-  // pass names like 'cse' at option-parse time.
-  mlir::registerAllPasses();
-  registerPTOPasses();
-
   // Parse command line options
-  mlir::registerPassManagerCLOptions();
   llvm::cl::ParseCommandLineOptions(argc, argv, "PTO Assembler (ptoas)\n");
 
   PTOBackend effectiveBackend = PTOBackend::EmitC;
