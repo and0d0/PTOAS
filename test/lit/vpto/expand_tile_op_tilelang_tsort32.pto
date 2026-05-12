@@ -12,7 +12,7 @@
 //
 // Pipeline: MemrefToTileBuf -> ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
 
 // After the full tile-op-expand path on the VPTO backend, the original
 // pto.tsort32 should be lowered to vector-style VPTO IR.
@@ -24,7 +24,7 @@
 // CHECK-NOT: pto.tsort32 ins
 // CHECK: pto.vbitsort
 
-module {
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   // Case 1: aligned cols (valid_cols % 32 == 0), no tmp needed
   func.func @TSORT32_no_tmp() {
     %src = pto.alloc_tile : !pto.tile_buf<vec, 1x32xf16>

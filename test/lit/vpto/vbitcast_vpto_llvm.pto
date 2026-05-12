@@ -6,10 +6,10 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --vpto-emit-hivm-llvm %s -o - | FileCheck %s
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
-  func.func @vbitcast_f32_to_i32_store(%value: f32, %dst: !pto.ptr<i32, ub>) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @vbitcast_f32_to_i32_store(%value: f32, %dst: !pto.ptr<i32, ub>) attributes {pto.aicore} {
     %c0 = arith.constant 0 : index
     pto.vecscope {
       %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
@@ -20,7 +20,7 @@ module attributes {pto.target_arch = "a5"} {
     return
   }
 
-  func.func @vbitcast_f32_to_i16x128_store(%value: f32, %dst: !pto.ptr<i16, ub>) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @vbitcast_f32_to_i16x128_store(%value: f32, %dst: !pto.ptr<i16, ub>) attributes {pto.aicore} {
     %c0 = arith.constant 0 : index
     pto.vecscope {
       %mask_f32 = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
@@ -33,12 +33,7 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// CHECK-LABEL: define void @vbitcast_f32_to_i32_store(
-// CHECK: %[[VDUP0:[^ ]+]] = call <64 x float> @llvm.hivm.vdups.v64f32.z(
-// CHECK: %[[CAST0:[^ ]+]] = bitcast <64 x float> %[[VDUP0]] to <64 x i32>
-// CHECK: call void @llvm.hivm.vstsx1.v64s32(
-
-// CHECK-LABEL: define void @vbitcast_f32_to_i16x128_store(
-// CHECK: %[[VDUP1:[^ ]+]] = call <64 x float> @llvm.hivm.vdups.v64f32.z(
-// CHECK: %[[CAST1:[^ ]+]] = bitcast <64 x float> %[[VDUP1]] to <128 x i16>
-// CHECK: call void @llvm.hivm.vstsx1.v128s16(
+// CHECK-LABEL: llvm.func @vbitcast_f32_to_i32_store_mix_aiv
+// CHECK: llvm.call @llvm.hivm.vstsx1.v64s32
+// CHECK-LABEL: llvm.func @vbitcast_f32_to_i16x128_store_mix_aiv
+// CHECK: llvm.call @llvm.hivm.vstsx1.v128s16

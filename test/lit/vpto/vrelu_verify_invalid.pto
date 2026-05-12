@@ -13,7 +13,7 @@
 // CHECK: error: 'pto.vrelu' op requires si32/i32/f16/f32 vector element type
 
 func.func @vrelu_bf16_invalid(%src: !pto.ptr<bf16, ub>, %dst: !pto.ptr<bf16, ub>)
-    attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    {
   %c0 = arith.constant 0 : index
   pto.vecscope {
     %mask = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>

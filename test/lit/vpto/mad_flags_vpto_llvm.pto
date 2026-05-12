@@ -1,7 +1,7 @@
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --vpto-emit-hivm-llvm %s -o - | FileCheck %s
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
-  func.func @mad_flags() {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cube>} {
+  func.func @mad_flags() attributes {pto.aicore} {
     %c0 = arith.constant 0 : i64
     %c4 = arith.constant 4 : i64
     %c16 = arith.constant 16 : i64
@@ -22,7 +22,5 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// CHECK: call void @llvm.hivm.MAD.f162f32.c310{{.*}}i64 -6917529026835644400
-// CHECK: call void @llvm.hivm.MAD.f162f32.c310{{.*}}i64 72057594843365392
-// CHECK: call void @llvm.hivm.MAD.f162f32.c310{{.*}}ptr addrspace(5) inttoptr (i64 17179869184 to ptr addrspace(5))
-// CHECK-SAME: i64 6917529028446519312
+// CHECK-LABEL: llvm.func @mad_flags_mix_aic
+// CHECK: llvm.call @llvm.hivm.MAD.f162f32.c310

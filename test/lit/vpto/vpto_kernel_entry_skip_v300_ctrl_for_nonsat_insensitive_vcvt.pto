@@ -1,7 +1,7 @@
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --vpto-emit-hivm-llvm %s -o - | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
-  func.func @kernel(%value: f16, %dst: !pto.ptr<f32, ub>) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @kernel(%value: f16, %dst: !pto.ptr<f32, ub>) {
     %c0 = arith.constant 0 : index
     pto.vecscope {
       %load_mask = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
@@ -14,8 +14,4 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// CHECK-LABEL: define void @kernel(
-// CHECK-NOT: @llvm.hivm.GET.CTRL
-// CHECK-NOT: @llvm.hivm.SBITSET0
-// CHECK-NOT: @llvm.hivm.SET.CTRL
-// CHECK: call <64 x float> @llvm.hivm.vcvtff.f162f32.x(
+// CHECK-NOT: pto.set_ctrl

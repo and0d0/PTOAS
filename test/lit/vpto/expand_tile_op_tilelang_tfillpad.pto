@@ -12,7 +12,7 @@
 //
 // Pipeline: MemrefToTileBuf -> ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
 
 // After the full tile-op-expand path on the VPTO backend, the original
 // pto.tfillpad should be lowered to vector-style VPTO IR.
@@ -25,7 +25,7 @@
 // CHECK-DAG: pto.vsts
 // Note: vstus is not supported in TileLang DSL v1, so padding uses vsts instead
 
-module {
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TFILLPAD() {
     // Source Tile: valid region 8x48, total capacity 16x64
     %src = pto.alloc_tile

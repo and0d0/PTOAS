@@ -1,6 +1,6 @@
-// RUN: not ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>&1 | FileCheck %s
+// RUN: not ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>&1 | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cube>} {
   func.func @mad_flags_verify_invalid(%lhs: !pto.ptr<f16, left>,
                                       %rhs: !pto.ptr<f16, right>,
                                       %dst: !pto.ptr<f32, acc>) {

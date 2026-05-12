@@ -3,7 +3,7 @@
 // IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
 // TORS has a scalar operand (i32), so it uses the PTOToVPTO lowering path.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s
 
 // After PTOToVPTO lowering, pto.tors should use vbr + vor.
 // CHECK: func.func @TORS
@@ -14,7 +14,7 @@
 // CHECK: pto.vor
 // CHECK: pto.vsts
 
-module {
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TORS() {
     %a = pto.alloc_tile
       : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,

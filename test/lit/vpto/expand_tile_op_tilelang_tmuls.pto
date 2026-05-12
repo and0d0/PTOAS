@@ -3,7 +3,7 @@
 // IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
 // TMULS has a scalar operand (f32), so it uses the PTOToVPTO lowering path.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s
 
 // After PTOToVPTO lowering, pto.tmuls should use vmuls (vector multiply scalar).
 // CHECK: func.func @TMULS
@@ -13,7 +13,7 @@
 // CHECK: pto.vmuls
 // CHECK: pto.vsts
 
-module {
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TMULS() {
     %a = pto.alloc_tile
       : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,

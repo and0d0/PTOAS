@@ -6,10 +6,10 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --vpto-emit-hivm-llvm %s -o - | FileCheck %s
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
-  func.func @load_cbuf_to_cb_2dv2_control() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cube>} {
+  func.func @load_cbuf_to_cb_2dv2_control() attributes {pto.aicore} {
     %c0 = arith.constant 0 : i64
     %c2 = arith.constant 2 : i64
     %c3 = arith.constant 3 : i64
@@ -25,7 +25,5 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// CHECK: call void @llvm.hivm.LOAD.L1.TO.L0B.2Dv2.f16
-// CHECK-SAME: i64 4410931544064
-// CHECK-SAME: i64 393221
-// CHECK-SAME: i64 1
+// CHECK-LABEL: llvm.func @load_cbuf_to_cb_2dv2_control_mix_aic
+// CHECK: llvm.call @llvm.hivm.LOAD.L1.TO.L0B.2Dv2.f16

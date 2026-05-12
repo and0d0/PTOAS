@@ -12,7 +12,7 @@
 //
 // Pipeline: MemrefToTileBuf -> ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
 
 // After the full tile-op-expand path on the VPTO backend, the original
 // pto.tsels should be lowered to vector-style VPTO IR.
@@ -26,7 +26,7 @@
 // CHECK-DAG: pto.vsel
 // CHECK-DAG: pto.vsts
 
-module {
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TSELS_test() {
     %mask = pto.alloc_tile
       : !pto.tile_buf<loc=vec, dtype=i8, rows=2, cols=32, v_row=2, v_col=32,

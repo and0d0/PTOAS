@@ -12,7 +12,7 @@
 //
 // Pipeline: MemrefToTileBuf -> ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
 
 // After the full tile-op-expand path on the VPTO backend, the original
 // pto.trowexpand should be lowered to vector-style VPTO IR.
@@ -23,7 +23,7 @@
 // CHECK: pto.vdup
 // CHECK: pto.vsts
 
-module {
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TROWEXPAND() {
     // Source tile: 32x8 (32-byte aligned, cols=32/sizeof(f32)=8)
     // Only column 0 contains valid data (v_col=8 for alignment, actual valid=1)

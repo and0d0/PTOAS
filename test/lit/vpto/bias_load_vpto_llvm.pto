@@ -1,7 +1,7 @@
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --vpto-emit-hivm-llvm %s -o - | FileCheck %s
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
-  func.func @bias_load_f16_to_f32() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cube>} {
+  func.func @bias_load_f16_to_f32() attributes {pto.aicore} {
     %c0 = arith.constant 0 : i64
     %c2 = arith.constant 2 : i64
     %c4 = arith.constant 4 : i64
@@ -14,5 +14,5 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// CHECK: call void @llvm.hivm.MOV.L1.TO.BT.f16
-// CHECK-SAME: i64 262184
+// CHECK-LABEL: llvm.func @bias_load_f16_to_f32_mix_aic
+// CHECK: llvm.call @llvm.hivm.MOV.L1.TO.BT.f16

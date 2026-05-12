@@ -1,6 +1,6 @@
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @kernel(%arg0: i32) attributes { pto.tilelang.instance } {
     %0 = func.call @__tl_inline_add1_i32(%arg0) : (i32) -> i32
     func.call @__tl_inline_sink_i32(%0) : (i32) -> ()

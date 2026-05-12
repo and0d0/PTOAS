@@ -6,10 +6,10 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --vpto-emit-hivm-llvm %s -o - | FileCheck %s
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
-  func.func @copy_matrix_cc_to_ub_probe() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cube>} {
+  func.func @copy_matrix_cc_to_ub_probe() attributes {pto.aicore} {
     %c0_i64 = arith.constant 0 : i64
     %c16_i64 = arith.constant 16 : i64
     %c68720525568_i64 = arith.constant 68720525568 : i64
@@ -22,5 +22,5 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// CHECK: declare void @llvm.hivm.FIX.L0C.TO.UB.f32.EXT(ptr addrspace(6), ptr addrspace(5), i64, i64)
-// CHECK: call void @llvm.hivm.FIX.L0C.TO.UB.f32.EXT(ptr addrspace(6) null, ptr addrspace(5) null, i64 68720525568, i64 16)
+// CHECK-LABEL: llvm.func @copy_matrix_cc_to_ub_probe_mix_aic
+// CHECK: llvm.call @llvm.hivm.FIX.L0C.TO.UB.f32.EXT

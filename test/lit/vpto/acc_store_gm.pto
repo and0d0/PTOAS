@@ -1,7 +1,7 @@
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-before=pto-vpto-expand-bridge-ops %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=ROUNDTRIP
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-vpto-expand-bridge-ops %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=EXPAND
 
-module attributes {"pto.target_arch" = "a5"} {
+module attributes {"pto.target_arch" = "a5", pto.kernel_kind = #pto.kernel_kind<cube>} {
   func.func @acc_store_gm_probe(%src: !pto.ptr<f32, acc>,
                                 %dst: !pto.ptr<f32, gm>,
                                 %fpc: !pto.ptr<ui64, scaling>) {

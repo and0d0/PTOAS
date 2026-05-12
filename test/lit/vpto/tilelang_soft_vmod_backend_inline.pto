@@ -1,6 +1,6 @@
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s --emit-vpto -o - | FileCheck %s
 
-module attributes {pto.target_arch = "a5"} {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @kernel(%arg0: !pto.tile_buf<loc=vec, dtype=i16, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>, %arg1: !pto.tile_buf<loc=vec, dtype=i16, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>) attributes { pto.tilelang.instance } {
     %c0 = arith.constant 0 : index
     %tmp_0 = pto.tile_buf_addr %arg0 : !pto.tile_buf<loc=vec, dtype=i16, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0> -> memref<8x16xi16, #pto.address_space<vec>>
