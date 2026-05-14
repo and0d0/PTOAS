@@ -12,6 +12,7 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 #include "PTO/Transforms/InsertSync/PTOIRTranslator.h"
+#include "PTO/IR/PTOTypeUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -22,11 +23,167 @@
 #include "mlir/IR/Matchers.h"
 // [P0 新增] 引入副作用接口和 PTO 接口
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+
+#include <optional>
  
 #define DEBUG_TYPE "pto-ir-translator"
  
 using namespace mlir;
 using namespace mlir::pto;
+
+static bool getConstIndexValue(Value value, int64_t &out) {
+  while (true) {
+    if (auto castOp = value.getDefiningOp<arith::IndexCastOp>()) {
+      value = castOp.getIn();
+      continue;
+    }
+    if (auto extOp = value.getDefiningOp<arith::ExtSIOp>()) {
+      value = extOp.getIn();
+      continue;
+    }
+    if (auto extOp = value.getDefiningOp<arith::ExtUIOp>()) {
+      value = extOp.getIn();
+      continue;
+    }
+    if (auto truncOp = value.getDefiningOp<arith::TruncIOp>()) {
+      value = truncOp.getIn();
+      continue;
+    }
+    break;
+  }
+  if (auto constIndex = value.getDefiningOp<arith::ConstantIndexOp>()) {
+    out = constIndex.value();
+    return true;
+  }
+  if (auto constInt = value.getDefiningOp<arith::ConstantIntOp>()) {
+    out = constInt.value();
+    return true;
+  }
+  auto constOp = value.getDefiningOp<arith::ConstantOp>();
+  auto intAttr =
+      constOp ? dyn_cast<IntegerAttr>(constOp.getValue()) : IntegerAttr();
+  if (!intAttr) return false;
+  out = intAttr.getInt();
+  return true;
+}
+
+static bool isStaticRank2Shape(ArrayRef<int64_t> shape) {
+  return shape.size() == 2 &&
+         llvm::none_of(shape, [](int64_t dim) {
+           return dim == ShapedType::kDynamic;
+         });
+}
+
+static int64_t getTileMajorStride(pto::TileBufType type) {
+  ArrayRef<int64_t> shape = type.getShape();
+  int64_t rows = shape[0];
+  int64_t cols = shape[1];
+  bool rowMajor =
+      type.getBLayoutValueI32() == static_cast<int32_t>(pto::BLayout::RowMajor);
+  int64_t stride = rowMajor ? cols : rows;
+  if (type.getCompactModeI32() == static_cast<int32_t>(pto::CompactMode::RowPlusOne))
+    ++stride;
+  return stride;
+}
+
+static std::optional<SmallVector<uint64_t>>
+getPtoSubViewBaseAddresses(pto::SubViewOp op, pto::TileBufType sourceType,
+                           int64_t elemBytes) {
+  if (!isStaticRank2Shape(sourceType.getShape())) return std::nullopt;
+  if (sourceType.getSLayoutValueI32() !=
+      static_cast<int32_t>(pto::SLayout::NoneBox))
+    return std::nullopt;
+  if (op.getOffsets().size() != 2) return std::nullopt;
+
+  int64_t rowOffset = 0;
+  int64_t colOffset = 0;
+  if (!getConstIndexValue(op.getOffsets()[0], rowOffset) ||
+      !getConstIndexValue(op.getOffsets()[1], colOffset))
+    return std::nullopt;
+  if (rowOffset < 0 || colOffset < 0) return std::nullopt;
+
+  auto sizesAttr = op.getSizes();
+  if (!sizesAttr || sizesAttr.size() != 2) return std::nullopt;
+  int64_t rowSize = cast<IntegerAttr>(sizesAttr[0]).getInt();
+  int64_t colSize = cast<IntegerAttr>(sizesAttr[1]).getInt();
+  if (rowSize <= 0 || colSize <= 0) return std::nullopt;
+
+  bool rowMajor =
+      sourceType.getBLayoutValueI32() == static_cast<int32_t>(pto::BLayout::RowMajor);
+  int64_t majorStride = getTileMajorStride(sourceType);
+
+  SmallVector<uint64_t> addresses;
+  if (rowMajor) {
+    addresses.reserve(static_cast<size_t>(rowSize));
+    for (int64_t row = 0; row < rowSize; ++row) {
+      int64_t elemOffset = (rowOffset + row) * majorStride + colOffset;
+      addresses.push_back(static_cast<uint64_t>(elemOffset * elemBytes));
+    }
+  } else {
+    addresses.reserve(static_cast<size_t>(colSize));
+    for (int64_t col = 0; col < colSize; ++col) {
+      int64_t elemOffset = (colOffset + col) * majorStride + rowOffset;
+      addresses.push_back(static_cast<uint64_t>(elemOffset * elemBytes));
+    }
+  }
+
+  return addresses;
+}
+
+static std::optional<SmallVector<uint64_t>>
+getMemrefSubViewBaseAddresses(memref::SubViewOp op, MemRefType sourceType,
+                              int64_t elemBytes) {
+  if (!sourceType.hasStaticShape() || sourceType.getRank() != 2)
+    return std::nullopt;
+
+  SmallVector<int64_t> strides;
+  int64_t baseOffset = ShapedType::kDynamic;
+  if (failed(mlir::getStridesAndOffset(sourceType, strides, baseOffset)) ||
+      strides.size() != 2 ||
+      llvm::is_contained(strides, ShapedType::kDynamic))
+    return std::nullopt;
+
+  ArrayRef<int64_t> staticOffsets = op.getStaticOffsets();
+  ArrayRef<int64_t> staticSizes = op.getStaticSizes();
+  ArrayRef<int64_t> staticSubViewStrides = op.getStaticStrides();
+  if (staticOffsets.size() != 2 || staticSizes.size() != 2 ||
+      staticSubViewStrides.size() != 2)
+    return std::nullopt;
+  if (llvm::is_contained(staticOffsets, ShapedType::kDynamic) ||
+      llvm::is_contained(staticSizes, ShapedType::kDynamic) ||
+      llvm::is_contained(staticSubViewStrides, ShapedType::kDynamic))
+    return std::nullopt;
+  if (staticSubViewStrides[0] != 1 || staticSubViewStrides[1] != 1)
+    return std::nullopt;
+
+  int64_t rowOffset = staticOffsets[0];
+  int64_t colOffset = staticOffsets[1];
+  int64_t rowSize = staticSizes[0];
+  int64_t colSize = staticSizes[1];
+  if (rowOffset < 0 || colOffset < 0 || rowSize <= 0 || colSize <= 0)
+    return std::nullopt;
+
+  SmallVector<uint64_t> addresses;
+  if (strides[1] == 1) {
+    addresses.reserve(static_cast<size_t>(rowSize));
+    for (int64_t row = 0; row < rowSize; ++row) {
+      int64_t elemOffset =
+          (rowOffset + row) * strides[0] + colOffset * strides[1];
+      addresses.push_back(static_cast<uint64_t>(elemOffset * elemBytes));
+    }
+  } else if (strides[0] == 1) {
+    addresses.reserve(static_cast<size_t>(colSize));
+    for (int64_t col = 0; col < colSize; ++col) {
+      int64_t elemOffset =
+          rowOffset * strides[0] + (colOffset + col) * strides[1];
+      addresses.push_back(static_cast<uint64_t>(elemOffset * elemBytes));
+    }
+  } else {
+    return std::nullopt;
+  }
+
+  return addresses;
+}
  
 // [辅助函数] 尝试从 Operation 中计算相对于 Source 的字节偏移量和新大小
 // 返回值: pair<offsetInBytes, sizeInBytes>
@@ -159,8 +316,11 @@ void PTOIRTranslator::RecursionIR(Region *region) {
     else if (auto subViewOp = dyn_cast<pto::PartitionViewOp>(op)) {
       UpdateAliasBufferInfo(subViewOp.getResult(), subViewOp.getSource());
     } 
+    else if (auto subViewOp = dyn_cast<pto::SubViewOp>(op)) {
+      UpdateTileSubViewAliasBufferInfo(subViewOp);
+    }
     else if (auto memrefSubView = dyn_cast<memref::SubViewOp>(op)) {
-      UpdateAliasBufferInfo(memrefSubView.getResult(), memrefSubView.getSource());
+      UpdateMemrefSubViewAliasBufferInfo(memrefSubView);
     }
     else if (auto castOp = dyn_cast<memref::ReinterpretCastOp>(op)) {
       UpdateAliasBufferInfo(castOp.getResult(), castOp.getSource());
@@ -578,6 +738,134 @@ void PTOIRTranslator::UpdateAliasBufferInfo(Value result, Value source) {
         newInfo->allocateSize = newSize;
     }
  
+    resultMemInfoVec.emplace_back(std::move(newInfo));
+  }
+}
+
+void PTOIRTranslator::UpdateConservativeAliasBufferInfo(Value result,
+                                                        Value source) {
+  if (!result || !source) return;
+  if (!buffer2MemInfoMap_.contains(source)) return;
+
+  auto &resultMemInfoVec = buffer2MemInfoMap_[result];
+  for (auto &parentInfo : buffer2MemInfoMap_[source])
+    resultMemInfoVec.emplace_back(parentInfo->clone(result));
+}
+
+void PTOIRTranslator::UpdateMemrefSubViewAliasBufferInfo(memref::SubViewOp op) {
+  Value result = op.getResult();
+  Value source = op.getSource();
+  if (!result || !source) return;
+  if (!buffer2MemInfoMap_.contains(source)) return;
+
+  auto sourceType = dyn_cast<MemRefType>(source.getType());
+  if (!sourceType) {
+    UpdateConservativeAliasBufferInfo(result, source);
+    return;
+  }
+
+  unsigned elemBytes = pto::getPTOStorageElemByteSize(sourceType.getElementType());
+  auto subViewAddresses =
+      elemBytes == 0 ? std::nullopt
+                     : getMemrefSubViewBaseAddresses(
+                           op, sourceType, static_cast<int64_t>(elemBytes));
+  if (!subViewAddresses || subViewAddresses->empty()) {
+    UpdateConservativeAliasBufferInfo(result, source);
+    return;
+  }
+
+  SmallVector<int64_t> strides;
+  int64_t baseOffset = ShapedType::kDynamic;
+  if (failed(mlir::getStridesAndOffset(sourceType, strides, baseOffset)) ||
+      strides.size() != 2) {
+    UpdateConservativeAliasBufferInfo(result, source);
+    return;
+  }
+
+  ArrayRef<int64_t> staticSizes = op.getStaticSizes();
+  uint64_t segmentSize = 0;
+  if (strides[1] == 1) {
+    segmentSize = static_cast<uint64_t>(
+        staticSizes[1] * static_cast<int64_t>(elemBytes));
+  } else if (strides[0] == 1) {
+    segmentSize = static_cast<uint64_t>(
+        staticSizes[0] * static_cast<int64_t>(elemBytes));
+  } else {
+    UpdateConservativeAliasBufferInfo(result, source);
+    return;
+  }
+
+  for (auto &parentInfo : buffer2MemInfoMap_[source]) {
+    if (!parentInfo || parentInfo->baseAddresses.size() != 1 ||
+        parentInfo->allocateSize == 0) {
+      UpdateConservativeAliasBufferInfo(result, source);
+      return;
+    }
+  }
+
+  auto &resultMemInfoVec = buffer2MemInfoMap_[result];
+  for (auto &parentInfo : buffer2MemInfoMap_[source]) {
+    auto newInfo = parentInfo->clone(result);
+    SmallVector<uint64_t> addresses;
+    addresses.reserve(subViewAddresses->size());
+    uint64_t parentBase = parentInfo->baseAddresses[0];
+    for (uint64_t offset : *subViewAddresses)
+      addresses.push_back(parentBase + offset);
+    newInfo->baseAddresses = std::move(addresses);
+    newInfo->allocateSize = segmentSize;
+    resultMemInfoVec.emplace_back(std::move(newInfo));
+  }
+}
+
+void PTOIRTranslator::UpdateTileSubViewAliasBufferInfo(pto::SubViewOp op) {
+  Value result = op.getResult();
+  Value source = op.getSource();
+  if (!result || !source) return;
+  if (!buffer2MemInfoMap_.contains(source)) return;
+
+  auto sourceType = dyn_cast<pto::TileBufType>(source.getType());
+  if (!sourceType) {
+    UpdateConservativeAliasBufferInfo(result, source);
+    return;
+  }
+
+  unsigned elemBytes = pto::getPTOStorageElemByteSize(sourceType.getElementType());
+  auto subViewAddresses =
+      elemBytes == 0 ? std::nullopt
+                     : getPtoSubViewBaseAddresses(
+                           op, sourceType, static_cast<int64_t>(elemBytes));
+  if (!subViewAddresses || subViewAddresses->empty()) {
+    UpdateConservativeAliasBufferInfo(result, source);
+    return;
+  }
+
+  auto sizesAttr = op.getSizes();
+  int64_t rowSize = cast<IntegerAttr>(sizesAttr[0]).getInt();
+  int64_t colSize = cast<IntegerAttr>(sizesAttr[1]).getInt();
+  bool rowMajor =
+      sourceType.getBLayoutValueI32() == static_cast<int32_t>(pto::BLayout::RowMajor);
+  uint64_t segmentSize =
+      static_cast<uint64_t>((rowMajor ? colSize : rowSize) *
+                            static_cast<int64_t>(elemBytes));
+
+  for (auto &parentInfo : buffer2MemInfoMap_[source]) {
+    if (!parentInfo || parentInfo->baseAddresses.size() != 1 ||
+        parentInfo->allocateSize == 0) {
+      UpdateConservativeAliasBufferInfo(result, source);
+      return;
+    }
+  }
+
+  auto &resultMemInfoVec = buffer2MemInfoMap_[result];
+  for (auto &parentInfo : buffer2MemInfoMap_[source]) {
+    auto newInfo = parentInfo->clone(result);
+    SmallVector<uint64_t> addresses;
+    addresses.reserve(subViewAddresses->size());
+    uint64_t parentBase = parentInfo->baseAddresses[0];
+    for (uint64_t offset : *subViewAddresses)
+      addresses.push_back(parentBase + offset);
+    newInfo->baseAddresses = std::move(addresses);
+    newInfo->allocateSize = segmentSize;
     resultMemInfoVec.emplace_back(std::move(newInfo));
   }
 }

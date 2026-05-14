@@ -36,6 +36,17 @@ static bool isValidPipeIndex(PipelineType pipe) {
   return static_cast<unsigned>(pipe) < kPipeStateSize;
 }
 
+static bool isTLoadCompound(const CompoundInstanceElement *compound) {
+  return compound && compound->elementOp && isa<pto::TLoadOp>(compound->elementOp);
+}
+
+static bool isTLoadToTLoadWAWExempt(const CompoundInstanceElement *nowCompound,
+                                    const CompoundInstanceElement *frontCompound) {
+  return isTLoadCompound(nowCompound) && isTLoadCompound(frontCompound) &&
+         nowCompound->kPipeValue == PipelineType::PIPE_MTE2 &&
+         frontCompound->kPipeValue == PipelineType::PIPE_MTE2;
+}
+
 // ==============================================================================
 // 1. Entry Point
 // ==============================================================================
@@ -317,8 +328,10 @@ bool InsertSyncAnalysis::IsMemInfoHasDependency(
                                           depBaseMemInfosVec);
   hasDependency |= memAnalyzer_.DepBetween(nowCompound->defVec, frontCompound->useVec,
                                           depBaseMemInfosVec);
-  hasDependency |= memAnalyzer_.DepBetween(nowCompound->defVec, frontCompound->defVec,
-                                          depBaseMemInfosVec);
+  if (!isTLoadToTLoadWAWExempt(nowCompound, frontCompound)) {
+    hasDependency |= memAnalyzer_.DepBetween(nowCompound->defVec, frontCompound->defVec,
+                                            depBaseMemInfosVec);
+  }
 
   // Special hazard: ACC (L0C) read/read cross-pipe ordering.
   //

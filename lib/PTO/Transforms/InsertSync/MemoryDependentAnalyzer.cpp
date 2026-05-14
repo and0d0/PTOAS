@@ -158,6 +158,7 @@ bool MemoryDependentAnalyzer::MemAlias(const BaseMemInfo *a,
   
   if (a->rootBuffer == b->rootBuffer) {
     if (a->baseAddresses.empty() || b->baseAddresses.empty()) return true;
+    if (a->allocateSize == 0 || b->allocateSize == 0) return true;
     return isBufferAddressRangeOverlap(a, b);
   }
  
@@ -174,7 +175,11 @@ bool MemoryDependentAnalyzer::MemAlias(const BaseMemInfo *a,
   if (realRootA == realRootB && realRootA != nullptr) {
       if (isTraceEnabled())
         llvm::errs() << "      -> MATCH! Real roots are the same.\n";
-      return true;
+      if (a->baseAddresses.empty() || b->baseAddresses.empty())
+        return true;
+      if (a->allocateSize == 0 || b->allocateSize == 0)
+        return true;
+      return isBufferAddressRangeOverlap(a, b);
   } else {
       if (isTraceEnabled())
         llvm::errs() << "      -> Mismatch. Real roots differ.\n";
@@ -192,7 +197,9 @@ bool MemoryDependentAnalyzer::isGMBufferOverlap(const BaseMemInfo *a,
     if (realRootA != realRootB) {
         return false;
     }
-    return true; 
+    if (a->baseAddresses.empty() || b->baseAddresses.empty()) return true;
+    if (a->allocateSize == 0 || b->allocateSize == 0) return true;
+    return isBufferAddressRangeOverlap(a, b);
   }
  
   if (a->baseAddresses.empty() || b->baseAddresses.empty()) return true; 
