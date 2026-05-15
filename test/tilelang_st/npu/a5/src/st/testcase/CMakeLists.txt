@@ -115,6 +115,8 @@ set(ALL_TESTCASES
     tdiv
     tmax
     tmin
+    tmov
+    tmrgsort
     tshl
     tshr
     tand
