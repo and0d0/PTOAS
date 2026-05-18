@@ -430,9 +430,28 @@ void Encoder::encodeKnownOpOperands(
     for (auto value : op.getOperands())
       writeULEB128(getValueId(value), out.bytes);
   };
+  auto emitLegacyIndexedTscatterOperands = [&]() {
+    auto tscatter = llvm::dyn_cast<mlir::pto::TScatterOp>(&op);
+    if (!tscatter || tscatter.getMaskPatternAttr() ||
+        variantInfo.opcode != 0x1056) {
+      return false;
+    }
+    if (op.getNumOperands() != 3) {
+      throw std::runtime_error("operand count mismatch for op: " +
+                               op.getName().getStringRef().str());
+    }
+    // Preserve the historical v0 wire layout for indexed tscatter:
+    //   (src, indexes, dst)
+    writeULEB128(getValueId(tscatter.getSrc()), out.bytes);
+    writeULEB128(getValueId(tscatter.getIndexes()), out.bytes);
+    writeULEB128(getValueId(tscatter.getDst()), out.bytes);
+    return true;
+  };
 
   switch (info.operand_mode) {
   case 0x00:
+    if (emitLegacyIndexedTscatterOperands())
+      return;
     emitOperands(info.num_operands);
     return;
   case 0x01: {

@@ -40,7 +40,7 @@ from pathlib import Path
 import sys
 
 data = Path(sys.argv[1]).read_bytes()
-if b"\x56\x10\x00" not in data:
+if b"\x56\x10\x00\x02\x04\x03" not in data:
     raise SystemExit("missing legacy indexed tscatter opcode encoding")
 if b"\x9c\x10" not in data:
     raise SystemExit("missing mask-pattern tscatter opcode encoding")
