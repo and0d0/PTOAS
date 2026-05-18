@@ -63,6 +63,50 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 
 static Type convertPTOTypeToMemRef(Type t);
 
+constexpr size_t kTileRank2D = 2;
+constexpr unsigned kShapeVectorInlineCapacity = 4;
+constexpr unsigned kOperationVectorInlineCapacity = 8;
+
+constexpr int64_t kElementBytes1 = 1;
+constexpr int64_t kElementBytes2 = 2;
+constexpr int64_t kElementBytes4 = 4;
+constexpr int64_t kElementBytes8 = 8;
+constexpr int64_t kElementBytes16 = 16;
+constexpr int64_t kElementBytes32 = 32;
+
+constexpr int64_t kInnerExtent1 = 1;
+constexpr int64_t kInnerExtent2 = 2;
+constexpr int64_t kInnerExtent4 = 4;
+constexpr int64_t kInnerExtent8 = 8;
+constexpr int64_t kInnerExtent16 = 16;
+constexpr int64_t kInnerExtent32 = 32;
+
+constexpr int32_t kFractalSize32 = 32;
+constexpr int32_t kFractalSize512 = 512;
+constexpr int32_t kFractalSize1024 = 1024;
+
+constexpr int32_t kBLayoutColMajor =
+    static_cast<int32_t>(BLayout::ColMajor);
+constexpr int32_t kSLayoutNoneBox =
+    static_cast<int32_t>(SLayout::NoneBox);
+constexpr int32_t kSLayoutRowMajor =
+    static_cast<int32_t>(SLayout::RowMajor);
+constexpr int32_t kSLayoutColMajor =
+    static_cast<int32_t>(SLayout::ColMajor);
+constexpr int32_t kCompactModeRowPlusOne =
+    static_cast<int32_t>(CompactMode::RowPlusOne);
+
+constexpr unsigned kThirdOperandIndex = 2;
+constexpr unsigned kFourthOperandIndex = 3;
+constexpr unsigned kFifthOperandIndex = 4;
+constexpr unsigned kSixthOperandIndex = 5;
+
+template <typename T>
+using SmallInlineVector = SmallVector<T, kShapeVectorInlineCapacity>;
+
+template <typename T>
+using DefaultInlineVector = SmallVector<T, kOperationVectorInlineCapacity>;
+
 // =============================================================================
 // Helper: Metadata Backtracking (核心机制)
 // =============================================================================
@@ -141,7 +185,7 @@ struct TileLayoutInfo {
 struct TileLayoutConfig {
   int32_t bLayout = 0;
   int32_t sLayout = 0;
-  int32_t fractalSize = 512;
+  int32_t fractalSize = kFractalSize512;
   int32_t compactMode = 0;
 };
 
@@ -228,23 +272,23 @@ static TileLayoutConfig getTileLayoutConfig(mlir::pto::TileBufConfigAttr cfg) {
 
 static bool getFractal512InnerExtent(int64_t elemBytes, int64_t &extent) {
   switch (elemBytes) {
-  case 1:
-    extent = 32;
+  case kElementBytes1:
+    extent = kInnerExtent32;
     return true;
-  case 2:
-    extent = 16;
+  case kElementBytes2:
+    extent = kInnerExtent16;
     return true;
-  case 4:
-    extent = 8;
+  case kElementBytes4:
+    extent = kInnerExtent8;
     return true;
-  case 8:
-    extent = 4;
+  case kElementBytes8:
+    extent = kInnerExtent4;
     return true;
-  case 16:
-    extent = 2;
+  case kElementBytes16:
+    extent = kInnerExtent2;
     return true;
-  case 32:
-    extent = 1;
+  case kElementBytes32:
+    extent = kInnerExtent1;
     return true;
   default:
     return false;
@@ -253,10 +297,10 @@ static bool getFractal512InnerExtent(int64_t elemBytes, int64_t &extent) {
 
 static bool computeBoxInnerShape(const TileLayoutConfig &config, Type elemTy,
                                  TileLayoutInfo &info) {
-  info.boxed = config.sLayout != 0;
+  info.boxed = config.sLayout != kSLayoutNoneBox;
   if (!info.boxed) {
-    info.innerRows = 1;
-    info.innerCols = 1;
+    info.innerRows = kInnerExtent1;
+    info.innerCols = kInnerExtent1;
     return true;
   }
 
@@ -265,23 +309,23 @@ static bool computeBoxInnerShape(const TileLayoutConfig &config, Type elemTy,
     return false;
 
   switch (config.fractalSize) {
-  case 1024:
-    info.innerRows = 16;
-    info.innerCols = 16;
+  case kFractalSize1024:
+    info.innerRows = kInnerExtent16;
+    info.innerCols = kInnerExtent16;
     return true;
-  case 32:
-    info.innerRows = 16;
-    info.innerCols = 2;
+  case kFractalSize32:
+    info.innerRows = kInnerExtent16;
+    info.innerCols = kInnerExtent2;
     return true;
-  case 512:
-    if (config.sLayout == 1) {
-      info.innerRows = 16;
+  case kFractalSize512:
+    if (config.sLayout == kSLayoutRowMajor) {
+      info.innerRows = kInnerExtent16;
       return getFractal512InnerExtent(elemBytes, info.innerCols);
     }
-    if (config.sLayout == 2) {
+    if (config.sLayout == kSLayoutColMajor) {
       if (!getFractal512InnerExtent(elemBytes, info.innerRows))
         return false;
-      info.innerCols = 16;
+      info.innerCols = kInnerExtent16;
       return true;
     }
     return false;
@@ -296,23 +340,23 @@ static bool computeTilePointerStrides(const TileLayoutConfig &config,
   int64_t rows = shape[0];
   int64_t cols = shape[1];
   auto applyCompactToMajorStride = [&](int64_t majorStride) -> int64_t {
-    if (config.compactMode == 2)
-      return majorStride + 1;
+    if (config.compactMode == kCompactModeRowPlusOne)
+      return majorStride + kInnerExtent1;
     return majorStride;
   };
   if (!info.boxed) {
-    if (config.bLayout == 1) {
-      info.rowStride = 1;
+    if (config.bLayout == kBLayoutColMajor) {
+      info.rowStride = kInnerExtent1;
       info.colStride = applyCompactToMajorStride(rows);
       return true;
     }
     info.rowStride = applyCompactToMajorStride(cols);
-    info.colStride = 1;
+    info.colStride = kInnerExtent1;
     return true;
   }
 
-  if (config.bLayout == 1) {
-    if (config.sLayout != 1)
+  if (config.bLayout == kBLayoutColMajor) {
+    if (config.sLayout != kSLayoutRowMajor)
       return false;
     info.rowStride = info.innerCols;
     info.colStride = applyCompactToMajorStride(rows);
@@ -327,7 +371,8 @@ static bool computeTilePointerStrides(const TileLayoutConfig &config,
 static bool computeTileLayoutInfo(mlir::pto::TileBufConfigAttr cfg, Type elemTy,
                                   ArrayRef<int64_t> shape,
                                   TileLayoutInfo &info) {
-  if (shape.size() != 2 || llvm::is_contained(shape, ShapedType::kDynamic))
+  if (shape.size() != kTileRank2D ||
+      llvm::is_contained(shape, ShapedType::kDynamic))
     return false;
 
   TileLayoutConfig config = getTileLayoutConfig(cfg);
@@ -337,7 +382,7 @@ static bool computeTileLayoutInfo(mlir::pto::TileBufConfigAttr cfg, Type elemTy,
 
 static void collectAffineAddTerms(AffineExpr root,
                                   SmallVectorImpl<AffineExpr> &terms) {
-  SmallVector<AffineExpr, 4> pending{root};
+  SmallInlineVector<AffineExpr> pending{root};
   while (!pending.empty()) {
     AffineExpr current = pending.pop_back_val();
     auto addExpr = llvm::dyn_cast<AffineBinaryOpExpr>(current);
@@ -380,7 +425,7 @@ static bool tryAssignAffineStride(AffineExpr expr,
   if (map.getNumResults() != 1)
     return;
 
-  SmallVector<AffineExpr, 4> terms;
+  SmallInlineVector<AffineExpr> terms;
   collectAffineAddTerms(map.getResult(0), terms);
   for (AffineExpr term : terms)
     (void)tryAssignAffineStride(term, strides);
@@ -548,7 +593,7 @@ static Type convertPTOTypeToMemRef(Type t) {
 // PTOViewToMemref rewrites tile values to memref in branch bodies, but scf.if
 // result types are not auto-updated by those op-local rewrites.
 static LogicalResult reconcileSCFIfResultTypes(func::FuncOp func) {
-  SmallVector<scf::IfOp, 8> ifOps;
+  DefaultInlineVector<scf::IfOp> ifOps;
   func.walk([&](scf::IfOp ifOp) { ifOps.push_back(ifOp); });
 
   for (scf::IfOp ifOp : ifOps) {
@@ -587,7 +632,7 @@ static LogicalResult reconcileSCFIfResultTypes(func::FuncOp func) {
 }
 
 static LogicalResult reconcileSCFForResultTypes(func::FuncOp func) {
-  SmallVector<scf::ForOp, 8> forOps;
+  DefaultInlineVector<scf::ForOp> forOps;
   func.walk([&](scf::ForOp forOp) { forOps.push_back(forOp); });
 
   for (scf::ForOp forOp : forOps) {
@@ -674,7 +719,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 }
 
 [[maybe_unused]] static LogicalResult lowerAllocTileOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::AllocTileOp, 8> allocTiles;
+  DefaultInlineVector<mlir::pto::AllocTileOp> allocTiles;
   func.walk([&](mlir::pto::AllocTileOp op) { allocTiles.push_back(op); });
 
   for (auto op : allocTiles) {
@@ -686,7 +731,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
     if (!tbTy)
       continue;
 
-    SmallVector<int64_t, 4> shape(tbTy.getShape().begin(),
+    SmallInlineVector<int64_t> shape(tbTy.getShape().begin(),
                                   tbTy.getShape().end());
     Type elemTy = tbTy.getElementType();
     SmallVector<int64_t> strides = buildTileMemRefStrides(tbTy);
@@ -731,7 +776,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 }
 
 [[maybe_unused]] static LogicalResult lowerDeclareTileOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::DeclareTileOp, 8> declaredTiles;
+  DefaultInlineVector<mlir::pto::DeclareTileOp> declaredTiles;
   func.walk([&](mlir::pto::DeclareTileOp op) { declaredTiles.push_back(op); });
 
   for (auto op : declaredTiles) {
@@ -771,7 +816,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 }
 
 [[maybe_unused]] static LogicalResult lowerMakeTensorViewOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::MakeTensorViewOp, 8> makeViews;
+  DefaultInlineVector<mlir::pto::MakeTensorViewOp> makeViews;
   func.walk([&](mlir::pto::MakeTensorViewOp op) { makeViews.push_back(op); });
 
   for (auto op : makeViews) {
@@ -813,10 +858,10 @@ static void markForceDynamicValidShape(Operation *op, bool force,
     auto mrTy = MemRefType::get(dynShape, baseMr.getElementType(), layout,
                                 baseMr.getMemorySpace());
 
-    SmallVector<OpFoldResult, 4> sizes;
+    SmallInlineVector<OpFoldResult> sizes;
     for (Value value : op.getShape())
       sizes.push_back(ensureIndex(rewriter, loc, value, op));
-    SmallVector<OpFoldResult, 4> strides;
+    SmallInlineVector<OpFoldResult> strides;
     for (Value value : op.getStrides())
       strides.push_back(ensureIndex(rewriter, loc, value, op));
 
@@ -832,7 +877,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 }
 
 [[maybe_unused]] static LogicalResult lowerTensorViewDimOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::GetTensorViewDimOp, 8> tvDims;
+  DefaultInlineVector<mlir::pto::GetTensorViewDimOp> tvDims;
   func.walk([&](mlir::pto::GetTensorViewDimOp op) { tvDims.push_back(op); });
 
   for (auto op : tvDims) {
@@ -849,7 +894,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 }
 
 [[maybe_unused]] static LogicalResult foldAddPtrIntoScalarOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::LoadScalarOp, 8> loadScalars;
+  DefaultInlineVector<mlir::pto::LoadScalarOp> loadScalars;
   func.walk([&](mlir::pto::LoadScalarOp op) { loadScalars.push_back(op); });
   for (auto op : loadScalars) {
     IRRewriter rewriter(ctx);
@@ -867,7 +912,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
     }
   }
 
-  SmallVector<mlir::pto::StoreScalarOp, 8> storeScalars;
+  DefaultInlineVector<mlir::pto::StoreScalarOp> storeScalars;
   func.walk([&](mlir::pto::StoreScalarOp op) { storeScalars.push_back(op); });
   for (auto op : storeScalars) {
     IRRewriter rewriter(ctx);
@@ -883,7 +928,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
     }
   }
 
-  SmallVector<Operation *, 8> addPtrs;
+  DefaultInlineVector<Operation *> addPtrs;
   func.walk([&](mlir::pto::AddPtrOp op) { addPtrs.push_back(op.getOperation()); });
   bool changed = true;
   while (changed) {
@@ -909,7 +954,7 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 }
 
 static LogicalResult lowerPartitionViewOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::PartitionViewOp, 8> partitionViews;
+  DefaultInlineVector<mlir::pto::PartitionViewOp> partitionViews;
   func.walk([&](mlir::pto::PartitionViewOp op) { partitionViews.push_back(op); });
 
   for (auto op : partitionViews) {
@@ -968,7 +1013,7 @@ static LogicalResult lowerPartitionViewOps(func::FuncOp func, MLIRContext *ctx) 
 }
 
 static LogicalResult lowerSubViewOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::SubViewOp, 8> subViews;
+  DefaultInlineVector<mlir::pto::SubViewOp> subViews;
   func.walk([&](mlir::pto::SubViewOp op) { subViews.push_back(op); });
 
   for (auto op : subViews) {
@@ -1010,7 +1055,8 @@ static LogicalResult lowerSubViewOps(func::FuncOp func, MLIRContext *ctx) {
     }
 
     if (layoutInfo.boxed) {
-      if (staticSizes.size() != 2 || op.getOffsets().size() != 2) {
+      if (staticSizes.size() != kTileRank2D ||
+          op.getOffsets().size() != kTileRank2D) {
         op.emitError("boxed layout subview expects 2D sizes/offsets");
         return failure();
       }
@@ -1126,7 +1172,7 @@ static Value buildTileBufViewLikeValue(Operation *anchorOp, Value src,
 }
 
 static LogicalResult lowerTileBufViewLikeOps(func::FuncOp func, MLIRContext *ctx) {
-  SmallVector<mlir::pto::TReshapeOp, 8> reshapes;
+  DefaultInlineVector<mlir::pto::TReshapeOp> reshapes;
   func.walk([&](mlir::pto::TReshapeOp op) { reshapes.push_back(op); });
   for (auto op : reshapes) {
     auto tbTy = dyn_cast<mlir::pto::TileBufType>(op.getResult().getType());
@@ -1142,7 +1188,7 @@ static LogicalResult lowerTileBufViewLikeOps(func::FuncOp func, MLIRContext *ctx
     rewriter.replaceOp(op, lowered);
   }
 
-  SmallVector<mlir::pto::BitcastOp, 8> bitcasts;
+  DefaultInlineVector<mlir::pto::BitcastOp> bitcasts;
   func.walk([&](mlir::pto::BitcastOp op) { bitcasts.push_back(op); });
   for (auto op : bitcasts) {
     auto tbTy = dyn_cast<mlir::pto::TileBufType>(op.getResult().getType());
@@ -1200,7 +1246,7 @@ struct PTOViewToMemrefPass
       // ------------------------------------------------------------------
       // Stage 0.5: lower pto.alloc_tile -> memref.alloc + pto.bind_tile
       // ------------------------------------------------------------------
-      SmallVector<mlir::pto::AllocTileOp, 8> allocTiles;
+      DefaultInlineVector<mlir::pto::AllocTileOp> allocTiles;
       func.walk([&](mlir::pto::AllocTileOp op) { allocTiles.push_back(op); });
 
       for (auto op : allocTiles) {
@@ -1212,7 +1258,7 @@ struct PTOViewToMemrefPass
         if (!tbTy) continue;
 
         // 1. 获取 Shape 和 ElementType
-        SmallVector<int64_t, 4> shape(tbTy.getShape().begin(), tbTy.getShape().end());
+        SmallInlineVector<int64_t> shape(tbTy.getShape().begin(), tbTy.getShape().end());
         Type elemTy = tbTy.getElementType();
 
         // 2. 计算 Strides (layout-aware when possible)
@@ -1308,7 +1354,7 @@ struct PTOViewToMemrefPass
       // Stage 0.75: lower pto.declare_tile -> pto.declare_tile_memref +
       //             pto.bind_tile
       // ------------------------------------------------------------------
-      SmallVector<mlir::pto::DeclareTileOp, 8> declaredTiles;
+      DefaultInlineVector<mlir::pto::DeclareTileOp> declaredTiles;
       func.walk([&](mlir::pto::DeclareTileOp op) { declaredTiles.push_back(op); });
 
       for (auto op : declaredTiles) {
@@ -1366,7 +1412,7 @@ struct PTOViewToMemrefPass
       // Stage 0.8: normalize pto.tassign result type to match tile operand
       // after tile_buf -> memref lowering (required for verifier consistency).
       // ------------------------------------------------------------------
-      SmallVector<mlir::pto::TAssignOp, 8> tassignOps;
+      DefaultInlineVector<mlir::pto::TAssignOp> tassignOps;
       func.walk([&](mlir::pto::TAssignOp op) { tassignOps.push_back(op); });
       for (auto op : tassignOps) {
         Type targetTy = op.getTile().getType();
@@ -1383,7 +1429,7 @@ struct PTOViewToMemrefPass
       // ------------------------------------------------------------------
       // Stage 1: Lower pto.make_tensor_view -> memref.reinterpret_cast
       // ------------------------------------------------------------------
-      SmallVector<mlir::pto::MakeTensorViewOp, 8> makeViews;
+      DefaultInlineVector<mlir::pto::MakeTensorViewOp> makeViews;
       func.walk([&](mlir::pto::MakeTensorViewOp op) { makeViews.push_back(op); });
 
       for (auto op : makeViews) {
@@ -1435,10 +1481,10 @@ struct PTOViewToMemrefPass
         SmallVector<int64_t> dynShape(rank, dyn);
         auto mrTy = MemRefType::get(dynShape, elemTy, layout, baseMr.getMemorySpace());
 
-        SmallVector<OpFoldResult, 4> sizes;
+        SmallInlineVector<OpFoldResult> sizes;
         for (Value v : op.getShape()) sizes.push_back(ensureIndex(rewriter, loc, v, op));
 
-        SmallVector<OpFoldResult, 4> strides;
+        SmallInlineVector<OpFoldResult> strides;
         for (Value v : op.getStrides()) strides.push_back(ensureIndex(rewriter, loc, v, op));
 
         auto rc = rewriter.create<memref::ReinterpretCastOp>(
@@ -1456,7 +1502,7 @@ struct PTOViewToMemrefPass
       // ------------------------------------------------------------------
       // Stage 1.25: Lower pto.get_tensor_view_dim -> memref.dim
       // ------------------------------------------------------------------
-      SmallVector<mlir::pto::GetTensorViewDimOp, 8> tvDims;
+      DefaultInlineVector<mlir::pto::GetTensorViewDimOp> tvDims;
       func.walk([&](mlir::pto::GetTensorViewDimOp op) { tvDims.push_back(op); });
 
       for (auto op : tvDims) {
@@ -1501,7 +1547,7 @@ struct PTOViewToMemrefPass
       // ------------------------------------------------------------------
       // Stage 1.5: Fold pto.addptr chains into load/store_scalar.
       // ------------------------------------------------------------------
-      SmallVector<mlir::pto::LoadScalarOp, 8> loadScalars;
+      DefaultInlineVector<mlir::pto::LoadScalarOp> loadScalars;
       func.walk([&](mlir::pto::LoadScalarOp op) { loadScalars.push_back(op); });
 
       for (auto op : loadScalars) {
@@ -1530,7 +1576,7 @@ struct PTOViewToMemrefPass
         }
       }
 
-      SmallVector<mlir::pto::StoreScalarOp, 8> storeScalars;
+      DefaultInlineVector<mlir::pto::StoreScalarOp> storeScalars;
       func.walk([&](mlir::pto::StoreScalarOp op) { storeScalars.push_back(op); });
 
       for (auto op : storeScalars) {
@@ -1567,7 +1613,7 @@ struct PTOViewToMemrefPass
       bool foldedPipeInitAddPtr = true;
       while (foldedPipeInitAddPtr) {
         foldedPipeInitAddPtr = false;
-        SmallVector<mlir::pto::AddPtrOp, 8> addPtrsForPipeInit;
+        DefaultInlineVector<mlir::pto::AddPtrOp> addPtrsForPipeInit;
         func.walk([&](mlir::pto::AddPtrOp op) {
           bool eligible = !op->use_empty();
           for (Operation *user : op->getUsers()) {
@@ -1613,7 +1659,7 @@ struct PTOViewToMemrefPass
       }
 
       // Clean up: addptr should be folded into make_tensor_view.
-      SmallVector<Operation *, 8> addPtrs;
+      DefaultInlineVector<Operation *> addPtrs;
       func.walk([&](mlir::pto::AddPtrOp op) { addPtrs.push_back(op.getOperation()); });
       bool changed = true;
       while (changed) {
@@ -1642,7 +1688,7 @@ struct PTOViewToMemrefPass
       // ------------------------------------------------------------------
       
       // --- TLoadOp [Src, Dst] ---
-      SmallVector<mlir::pto::TLoadOp, 8> loads;
+      DefaultInlineVector<mlir::pto::TLoadOp> loads;
       func.walk([&](mlir::pto::TLoadOp op) { loads.push_back(op); });
       for (auto op : loads) {
           IRRewriter rewriter(ctx);
@@ -1658,7 +1704,7 @@ struct PTOViewToMemrefPass
       }
 
       // --- TStoreOp [Src, Dst] ---
-      SmallVector<mlir::pto::TStoreOp, 8> storeops;
+      DefaultInlineVector<mlir::pto::TStoreOp> storeops;
       func.walk([&](mlir::pto::TStoreOp op) { storeops.push_back(op); });
       for (auto op : storeops) {
         IRRewriter rewriter(ctx);
@@ -1681,17 +1727,18 @@ struct PTOViewToMemrefPass
       }
 
        // --- TTransOp [Src, Tmp, Dst] ---
-      SmallVector<mlir::pto::TTransOp, 8> trans;
+      DefaultInlineVector<mlir::pto::TTransOp> trans;
       func.walk([&](mlir::pto::TTransOp op) { trans.push_back(op); });
       for (auto op : trans) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TTransOp>(
-            op, TypeRange{}, op->getOperand(0), op->getOperand(1), op->getOperand(2));
+            op, TypeRange{}, op->getOperand(0), op->getOperand(1),
+            op->getOperand(kThirdOperandIndex));
       }
 
       // --- TExpOp [Src, Dst] ---
-      SmallVector<mlir::pto::TExpOp, 8> exp;
+      DefaultInlineVector<mlir::pto::TExpOp> exp;
       func.walk([&](mlir::pto::TExpOp op) { exp.push_back(op); });
       for (auto op : exp) {
         IRRewriter rewriter(ctx);
@@ -1701,27 +1748,29 @@ struct PTOViewToMemrefPass
       }
 
       // --- TMulOp [Src, Scalar, Dst] ---
-      SmallVector<mlir::pto::TMulOp, 8> mul;
+      DefaultInlineVector<mlir::pto::TMulOp> mul;
       func.walk([&](mlir::pto::TMulOp op) { mul.push_back(op); });
       for (auto op : mul) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMulOp>(
-            op, op->getOperand(0), op.getOperand(1), op->getOperand(2));
+            op, op->getOperand(0), op.getOperand(1),
+            op->getOperand(kThirdOperandIndex));
       }
 
       // --- TMulSOp [Src, Scalar, Dst] ---
-      SmallVector<mlir::pto::TMulSOp, 8> muls;
+      DefaultInlineVector<mlir::pto::TMulSOp> muls;
       func.walk([&](mlir::pto::TMulSOp op) { muls.push_back(op); });
       for (auto op : muls) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMulSOp>(
-            op, op->getOperand(0), op.getScalar(), op->getOperand(2));
+            op, op->getOperand(0), op.getScalar(),
+            op->getOperand(kThirdOperandIndex));
       }
 
       // --- TAddOp [Src0, Src1, Dst] ---
-      SmallVector<mlir::pto::TAddOp, 8> addops;
+      DefaultInlineVector<mlir::pto::TAddOp> addops;
       func.walk([&](mlir::pto::TAddOp op) { addops.push_back(op); });
       for (auto op : addops) {
           IRRewriter rewriter(ctx);
@@ -1729,81 +1778,96 @@ struct PTOViewToMemrefPass
           
           rewriter.replaceOpWithNewOp<pto::TAddOp>(
               op, TypeRange{}, 
-              op->getOperand(0), op->getOperand(1), op->getOperand(2));
+              op->getOperand(0), op->getOperand(1),
+              op->getOperand(kThirdOperandIndex));
       }
 
       // --- TMatmulOp [Lhs, Rhs, Dst] (no optional bias in ODS) ---
-      SmallVector<mlir::pto::TMatmulOp , 8> matmuls;
+      DefaultInlineVector<mlir::pto::TMatmulOp > matmuls;
       func.walk([&](mlir::pto::TMatmulOp  op) { matmuls.push_back(op); });
       for (auto op : matmuls) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         Value lhs = op->getOperand(0);
         Value rhs = op->getOperand(1);
-        Value dst = op->getOperand(2);
+        Value dst = op->getOperand(kThirdOperandIndex);
 
         rewriter.replaceOpWithNewOp<pto::TMatmulOp>(
             op, TypeRange{}, lhs, rhs, dst, op.getAccPhaseAttr());
       }
 
       // --- TMatmulAccOp [Acc, Lhs, Rhs, Dst] ---
-      SmallVector<mlir::pto::TMatmulAccOp , 8> matmulAccs;
+      DefaultInlineVector<mlir::pto::TMatmulAccOp > matmulAccs;
       func.walk([&](mlir::pto::TMatmulAccOp  op) { matmulAccs.push_back(op); });
       for (auto op : matmulAccs) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMatmulAccOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2),
-          op->getOperand(3), op.getAccPhaseAttr());
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TMatmulBiasOp [Acc, Lhs, Rhs, Bias, Dst] ---
-      SmallVector<mlir::pto::TMatmulBiasOp , 8> matmulBiass;
+      DefaultInlineVector<mlir::pto::TMatmulBiasOp > matmulBiass;
       func.walk([&](mlir::pto::TMatmulBiasOp  op) { matmulBiass.push_back(op); });
       for (auto op : matmulBiass) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMatmulBiasOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex));
       }
 
       // --- TMatmulMxOp---
-      SmallVector<mlir::pto::TMatmulMxOp , 8> matmulMxs;
+      DefaultInlineVector<mlir::pto::TMatmulMxOp > matmulMxs;
       func.walk([&](mlir::pto::TMatmulMxOp  op) { matmulMxs.push_back(op); });
       for (auto op : matmulMxs) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMatmulMxOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3), op->getOperand(4));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex),
+          op->getOperand(kFifthOperandIndex));
       }
 
       // --- TMatmulMxAccOp  ---
-      SmallVector<mlir::pto::TMatmulMxAccOp , 8> matmulMxAccs;
+      DefaultInlineVector<mlir::pto::TMatmulMxAccOp > matmulMxAccs;
       func.walk([&](mlir::pto::TMatmulMxAccOp  op) { matmulMxAccs.push_back(op); });
       for (auto op : matmulMxAccs) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMatmulMxAccOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3), op->getOperand(4), op->getOperand(5));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex),
+          op->getOperand(kFifthOperandIndex),
+          op->getOperand(kSixthOperandIndex));
       }
 
       // --- TMatmulMxBiasOp ---
-      SmallVector<mlir::pto::TMatmulMxBiasOp , 8> matmulMxBiass;
+      DefaultInlineVector<mlir::pto::TMatmulMxBiasOp > matmulMxBiass;
       func.walk([&](mlir::pto::TMatmulMxBiasOp  op) { matmulMxBiass.push_back(op); });
       for (auto op : matmulMxBiass) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMatmulMxBiasOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3), op->getOperand(4), op->getOperand(5));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex),
+          op->getOperand(kFifthOperandIndex),
+          op->getOperand(kSixthOperandIndex));
       }
 
       // --- TGemvOp [Lhs, Rhs, Dst] ---
-      SmallVector<mlir::pto::TGemvOp , 8> gemvs;
+      DefaultInlineVector<mlir::pto::TGemvOp > gemvs;
       func.walk([&](mlir::pto::TGemvOp  op) { gemvs.push_back(op); });
       for (auto op : gemvs) {
         IRRewriter rewriter(ctx);
@@ -1811,71 +1875,84 @@ struct PTOViewToMemrefPass
         
         Value lhs = op->getOperand(0);
         Value rhs = op->getOperand(1);
-        Value dst = op->getOperand(2);
+        Value dst = op->getOperand(kThirdOperandIndex);
 
         rewriter.replaceOpWithNewOp<pto::TGemvOp>(
           op, TypeRange{}, lhs, rhs, dst);
       }
 
       // --- TGemvAccOp [Acc, Lhs, Rhs, Dst] ---
-      SmallVector<mlir::pto::TGemvAccOp , 8> gemvAccs;
+      DefaultInlineVector<mlir::pto::TGemvAccOp > gemvAccs;
       func.walk([&](mlir::pto::TGemvAccOp  op) { gemvAccs.push_back(op); });
       for (auto op : gemvAccs) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TGemvAccOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex));
       }
 
       // --- TGemvBiasOp [Acc, Lhs, Rhs, Bias, Dst] ---
-      SmallVector<mlir::pto::TGemvBiasOp , 8> gemvBiass;
+      DefaultInlineVector<mlir::pto::TGemvBiasOp > gemvBiass;
       func.walk([&](mlir::pto::TGemvBiasOp  op) { gemvBiass.push_back(op); });
       for (auto op : gemvBiass) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TGemvBiasOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex));
       }
 
       // --- TGemvMxOp [A, AScale, B, BScale, Dst] ---
-      SmallVector<mlir::pto::TGemvMxOp , 8> gemvMxs;
+      DefaultInlineVector<mlir::pto::TGemvMxOp > gemvMxs;
       func.walk([&](mlir::pto::TGemvMxOp  op) { gemvMxs.push_back(op); });
       for (auto op : gemvMxs) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TGemvMxOp>(
           op, TypeRange{},
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3), op->getOperand(4));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex),
+          op->getOperand(kFifthOperandIndex));
       }
 
       // --- TGemvMxAccOp [CIn, A, AScale, B, BScale, Dst] ---
-      SmallVector<mlir::pto::TGemvMxAccOp , 8> gemvMxAccs;
+      DefaultInlineVector<mlir::pto::TGemvMxAccOp > gemvMxAccs;
       func.walk([&](mlir::pto::TGemvMxAccOp  op) { gemvMxAccs.push_back(op); });
       for (auto op : gemvMxAccs) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TGemvMxAccOp>(
           op, TypeRange{},
-          op->getOperand(0), op->getOperand(1), op->getOperand(2),
-          op->getOperand(3), op->getOperand(4), op->getOperand(5));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex),
+          op->getOperand(kFifthOperandIndex),
+          op->getOperand(kSixthOperandIndex));
       }
 
       // --- TGemvMxBiasOp [A, AScale, B, BScale, Bias, Dst] ---
-      SmallVector<mlir::pto::TGemvMxBiasOp , 8> gemvMxBiass;
+      DefaultInlineVector<mlir::pto::TGemvMxBiasOp > gemvMxBiass;
       func.walk([&](mlir::pto::TGemvMxBiasOp  op) { gemvMxBiass.push_back(op); });
       for (auto op : gemvMxBiass) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TGemvMxBiasOp>(
           op, TypeRange{},
-          op->getOperand(0), op->getOperand(1), op->getOperand(2),
-          op->getOperand(3), op->getOperand(4), op->getOperand(5));
+          op->getOperand(0), op->getOperand(1),
+          op->getOperand(kThirdOperandIndex),
+          op->getOperand(kFourthOperandIndex),
+          op->getOperand(kFifthOperandIndex),
+          op->getOperand(kSixthOperandIndex));
       }
 
       // --- TMovOp [Src, Dst] ---
-      SmallVector<mlir::pto::TMovOp , 8> movs;
+      DefaultInlineVector<mlir::pto::TMovOp > movs;
       func.walk([&](mlir::pto::TMovOp  op) { movs.push_back(op); });
       for (auto op : movs) {
         IRRewriter rewriter(ctx);
@@ -1886,7 +1963,7 @@ struct PTOViewToMemrefPass
             op.getReluPreModeAttr());
       }
 
-      SmallVector<mlir::pto::TAbsOp, 8> abseops;
+      DefaultInlineVector<mlir::pto::TAbsOp> abseops;
       func.walk([&](mlir::pto::TAbsOp op) { abseops.push_back(op); });
 
       for (auto op : abseops) {
@@ -1911,7 +1988,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TAddCOp, 8> addcops;
+      DefaultInlineVector<mlir::pto::TAddCOp> addcops;
       func.walk([&](mlir::pto::TAddCOp op) { addcops.push_back(op); });
 
       for (auto op : addcops) {
@@ -1942,7 +2019,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TAddSOp, 8> addsops;
+      DefaultInlineVector<mlir::pto::TAddSOp> addsops;
       func.walk([&](mlir::pto::TAddSOp op) { addsops.push_back(op); });
 
       for (auto op : addsops) {
@@ -1969,7 +2046,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TAddSCOp, 8> addscops;
+      DefaultInlineVector<mlir::pto::TAddSCOp> addscops;
       func.walk([&](mlir::pto::TAddSCOp op) { addscops.push_back(op); });
 
       for (auto op : addscops) {
@@ -1999,7 +2076,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TAndOp, 8> andops;
+      DefaultInlineVector<mlir::pto::TAndOp> andops;
       func.walk([&](mlir::pto::TAndOp op) { andops.push_back(op); });
 
       for (auto op : andops) {
@@ -2027,7 +2104,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TConcatOp, 8> concats;
+      DefaultInlineVector<mlir::pto::TConcatOp> concats;
       func.walk([&](mlir::pto::TConcatOp op) { concats.push_back(op); });
 
       for (auto op : concats) {
@@ -2055,7 +2132,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TConcatidxOp, 8> concatIdxs;
+      DefaultInlineVector<mlir::pto::TConcatidxOp> concatIdxs;
       func.walk([&](mlir::pto::TConcatidxOp op) { concatIdxs.push_back(op); });
 
       IRRewriter rewriter(ctx);
@@ -2089,7 +2166,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TAndSOp, 8> andsops;
+      DefaultInlineVector<mlir::pto::TAndSOp> andsops;
       func.walk([&](mlir::pto::TAndSOp op) { andsops.push_back(op); });
 
       for (auto op : andsops) {
@@ -2116,7 +2193,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TCIOp, 8> ciops;
+      DefaultInlineVector<mlir::pto::TCIOp> ciops;
       func.walk([&](mlir::pto::TCIOp op) { ciops.push_back(op); });
 
       for (auto op : ciops) {
@@ -2143,7 +2220,7 @@ struct PTOViewToMemrefPass
             descending);
       }
 
-      SmallVector<mlir::pto::TCmpOp, 8> cmpops;
+      DefaultInlineVector<mlir::pto::TCmpOp> cmpops;
       func.walk([&](mlir::pto::TCmpOp op) { cmpops.push_back(op); });
 
       for (auto op : cmpops) {
@@ -2176,7 +2253,7 @@ struct PTOViewToMemrefPass
         rewriter.replaceOp(op, newOp->getResults()); // 0 results -> OK
       }
 
-      SmallVector<mlir::pto::TCmpSOp, 8> cmpsops;
+      DefaultInlineVector<mlir::pto::TCmpSOp> cmpsops;
       func.walk([&](mlir::pto::TCmpSOp op) { cmpsops.push_back(op); });
 
       for (auto op : cmpsops) {
@@ -2215,7 +2292,7 @@ struct PTOViewToMemrefPass
         rewriter.replaceOp(op, newOp->getResults()); // 0 results -> OK
       }
 
-      SmallVector<mlir::pto::TColExpandOp, 8> colexpand;
+      DefaultInlineVector<mlir::pto::TColExpandOp> colexpand;
       func.walk([&](mlir::pto::TColExpandOp op) { colexpand.push_back(op); });
 
       for (auto op : colexpand) {
@@ -2240,7 +2317,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TColMaxOp, 8> colmaxops;
+      DefaultInlineVector<mlir::pto::TColMaxOp> colmaxops;
       func.walk([&](mlir::pto::TColMaxOp op) { colmaxops.push_back(op); });
 
       for (auto op : colmaxops) {
@@ -2265,7 +2342,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TColMinOp, 8> colminops;
+      DefaultInlineVector<mlir::pto::TColMinOp> colminops;
       func.walk([&](mlir::pto::TColMinOp op) { colminops.push_back(op); });
 
       for (auto op : colminops) {
@@ -2290,7 +2367,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TColExpandMulOp, 8> colexpandmulops;
+      DefaultInlineVector<mlir::pto::TColExpandMulOp> colexpandmulops;
       func.walk([&](mlir::pto::TColExpandMulOp op) {
         colexpandmulops.push_back(op);
       });
@@ -2320,7 +2397,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TColExpandMaxOp, 8> colexpandmaxops;
+      DefaultInlineVector<mlir::pto::TColExpandMaxOp> colexpandmaxops;
       func.walk([&](mlir::pto::TColExpandMaxOp op) {
         colexpandmaxops.push_back(op);
       });
@@ -2350,7 +2427,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TColExpandMinOp, 8> colexpandminops;
+      DefaultInlineVector<mlir::pto::TColExpandMinOp> colexpandminops;
       func.walk([&](mlir::pto::TColExpandMinOp op) {
         colexpandminops.push_back(op);
       });
@@ -2380,7 +2457,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TColSumOp, 8> colsumops;
+      DefaultInlineVector<mlir::pto::TColSumOp> colsumops;
       func.walk([&](mlir::pto::TColSumOp op) { colsumops.push_back(op); });
 
       for (auto op : colsumops) {
@@ -2440,7 +2517,7 @@ struct PTOViewToMemrefPass
         }
       }
 
-      SmallVector<mlir::pto::TCvtOp, 8> cvtops;
+      DefaultInlineVector<mlir::pto::TCvtOp> cvtops;
       func.walk([&](mlir::pto::TCvtOp op) { cvtops.push_back(op); });
 
       for (auto op : cvtops) {
@@ -2472,7 +2549,7 @@ struct PTOViewToMemrefPass
         rewriter.replaceOp(op, newOp->getResults());
       }
 
-      SmallVector<mlir::pto::TDivOp, 8> divops;
+      DefaultInlineVector<mlir::pto::TDivOp> divops;
       func.walk([&](mlir::pto::TDivOp op) { divops.push_back(op); });
 
       for (auto op : divops) {
@@ -2500,7 +2577,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TDivSOp, 8> divsops;
+      DefaultInlineVector<mlir::pto::TDivSOp> divsops;
       func.walk([&](mlir::pto::TDivSOp op) { divsops.push_back(op); });
 
       for (auto op : divsops) {
@@ -2555,7 +2632,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TExpandsOp, 8> expandsops;
+      DefaultInlineVector<mlir::pto::TExpandsOp> expandsops;
       func.walk([&](mlir::pto::TExpandsOp op) { expandsops.push_back(op); });
 
       for (auto op : expandsops) {
@@ -2579,7 +2656,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TExtractOp, 8> extractops;
+      DefaultInlineVector<mlir::pto::TExtractOp> extractops;
       func.walk([&](mlir::pto::TExtractOp op) { extractops.push_back(op); });
 
       for (auto op : extractops) {
@@ -2610,7 +2687,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TFillPadOp, 8> fillpadops;
+      DefaultInlineVector<mlir::pto::TFillPadOp> fillpadops;
       func.walk([&](mlir::pto::TFillPadOp op) { fillpadops.push_back(op); });
 
       for (auto op : fillpadops) {
@@ -2635,7 +2712,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TFillPadInplaceOp, 8> fillpadInplaceOps;
+      DefaultInlineVector<mlir::pto::TFillPadInplaceOp> fillpadInplaceOps;
       func.walk(
           [&](mlir::pto::TFillPadInplaceOp op) { fillpadInplaceOps.push_back(op); });
 
@@ -2663,7 +2740,7 @@ struct PTOViewToMemrefPass
 
       // --- TSetValOp [Dst, Offset, Val] ---
       // Lower tile-world scalar write to memref-world SETVAL DPS op.
-      SmallVector<mlir::pto::TSetValOp, 8> tsetvalops;
+      DefaultInlineVector<mlir::pto::TSetValOp> tsetvalops;
       func.walk([&](mlir::pto::TSetValOp op) { tsetvalops.push_back(op); });
 
       for (auto op : tsetvalops) {
@@ -2691,7 +2768,7 @@ struct PTOViewToMemrefPass
 
       // --- TGetValOp [Src, Offset] -> Scalar ---
       // Lower tile-world scalar read to memref-world GETVAL DPS op.
-      SmallVector<mlir::pto::TGetValOp, 8> tgetvalops;
+      DefaultInlineVector<mlir::pto::TGetValOp> tgetvalops;
       func.walk([&](mlir::pto::TGetValOp op) { tgetvalops.push_back(op); });
 
       for (auto op : tgetvalops) {
@@ -2717,7 +2794,7 @@ struct PTOViewToMemrefPass
         rewriter.replaceOp(op, newOp.getDst());
       }
 
-      SmallVector<mlir::pto::TGatherOp, 8> gatherops;
+      DefaultInlineVector<mlir::pto::TGatherOp> gatherops;
       func.walk([&](mlir::pto::TGatherOp op) { gatherops.push_back(op); });
 
       for (auto op : gatherops) {
@@ -2812,7 +2889,7 @@ struct PTOViewToMemrefPass
         return;
       }
 
-      SmallVector<mlir::pto::TGatherBOp, 8> gatherbops;
+      DefaultInlineVector<mlir::pto::TGatherBOp> gatherbops;
       func.walk([&](mlir::pto::TGatherBOp op) { gatherbops.push_back(op); });
 
       for (auto op : gatherbops) {
@@ -2840,7 +2917,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TLogOp, 8> logops;
+      DefaultInlineVector<mlir::pto::TLogOp> logops;
       func.walk([&](mlir::pto::TLogOp op) { logops.push_back(op); });
 
       for (auto op : logops) {
@@ -2865,7 +2942,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TLReluOp, 8> lreluops;
+      DefaultInlineVector<mlir::pto::TLReluOp> lreluops;
       func.walk([&](mlir::pto::TLReluOp op) { lreluops.push_back(op); });
 
       for (auto op : lreluops) {
@@ -2893,7 +2970,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TMaxOp, 8> maxops;
+      DefaultInlineVector<mlir::pto::TMaxOp> maxops;
       func.walk([&](mlir::pto::TMaxOp op) { maxops.push_back(op); });
 
       for (auto op : maxops) {
@@ -2921,7 +2998,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TMaxSOp, 8> maxsops;
+      DefaultInlineVector<mlir::pto::TMaxSOp> maxsops;
       func.walk([&](mlir::pto::TMaxSOp op) { maxsops.push_back(op); });
 
       for (auto op : maxsops) {
@@ -2949,7 +3026,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TMinOp, 8> minops;
+      DefaultInlineVector<mlir::pto::TMinOp> minops;
       func.walk([&](mlir::pto::TMinOp op) { minops.push_back(op); });
 
       for (auto op : minops) {
@@ -2977,7 +3054,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TMinSOp, 8> minsops;
+      DefaultInlineVector<mlir::pto::TMinSOp> minsops;
       func.walk([&](mlir::pto::TMinSOp op) { minsops.push_back(op); });
 
       for (auto op : minsops) {
@@ -3005,7 +3082,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TMovFPOp, 8> movfpops;
+      DefaultInlineVector<mlir::pto::TMovFPOp> movfpops;
       func.walk([&](mlir::pto::TMovFPOp op) { movfpops.push_back(op); });
 
       for (auto op : movfpops) {
@@ -3033,7 +3110,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TQuantOp, 8> quantops;
+      DefaultInlineVector<mlir::pto::TQuantOp> quantops;
       func.walk([&](mlir::pto::TQuantOp op) { quantops.push_back(op); });
 
       for (auto op : quantops) {
@@ -3069,7 +3146,7 @@ struct PTOViewToMemrefPass
             op.getQuantTypeAttr());
       }
 
-      SmallVector<mlir::pto::TMrgSortOp, 8> mrgsortops;
+      DefaultInlineVector<mlir::pto::TMrgSortOp> mrgsortops;
       func.walk([&](mlir::pto::TMrgSortOp op) { mrgsortops.push_back(op); });
 
       for (auto op : mrgsortops) {
@@ -3143,7 +3220,7 @@ struct PTOViewToMemrefPass
         }
       }
 
-      SmallVector<mlir::pto::TNegOp, 8> negops;
+      DefaultInlineVector<mlir::pto::TNegOp> negops;
       func.walk([&](mlir::pto::TNegOp op) { negops.push_back(op); });
 
       for (auto op : negops) {
@@ -3168,7 +3245,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TNotOp, 8> notops;
+      DefaultInlineVector<mlir::pto::TNotOp> notops;
       func.walk([&](mlir::pto::TNotOp op) { notops.push_back(op); });
 
       for (auto op : notops) {
@@ -3193,7 +3270,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TOrOp, 8> orops;
+      DefaultInlineVector<mlir::pto::TOrOp> orops;
       func.walk([&](mlir::pto::TOrOp op) { orops.push_back(op); });
 
       for (auto op : orops) {
@@ -3220,7 +3297,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TOrSOp, 8> orsops;
+      DefaultInlineVector<mlir::pto::TOrSOp> orsops;
       func.walk([&](mlir::pto::TOrSOp op) { orsops.push_back(op); });
 
       for (auto op : orsops) {
@@ -3248,7 +3325,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TPartAddOp, 8> partaddops;
+      DefaultInlineVector<mlir::pto::TPartAddOp> partaddops;
       func.walk([&](mlir::pto::TPartAddOp op) { partaddops.push_back(op); });
 
       for (auto op : partaddops) {
@@ -3275,7 +3352,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::TPartMulOp, 8> partmulops;
+      DefaultInlineVector<mlir::pto::TPartMulOp> partmulops;
       func.walk([&](mlir::pto::TPartMulOp op) { partmulops.push_back(op); });
 
       for (auto op : partmulops) {
@@ -3302,7 +3379,7 @@ struct PTOViewToMemrefPass
             dst);
       }
 
-      SmallVector<mlir::pto::MGatherOp, 8> mgatherops;
+      DefaultInlineVector<mlir::pto::MGatherOp> mgatherops;
       func.walk([&](mlir::pto::MGatherOp op) { mgatherops.push_back(op); });
 
       for (auto op : mgatherops) {
@@ -3331,7 +3408,7 @@ struct PTOViewToMemrefPass
             op.getGatherOobAttr());
       }
 
-      SmallVector<mlir::pto::MScatterOp, 8> mascatterops;
+      DefaultInlineVector<mlir::pto::MScatterOp> mascatterops;
       func.walk([&](mlir::pto::MScatterOp op) { mascatterops.push_back(op); });
 
       for (auto op : mascatterops) {
@@ -3360,7 +3437,7 @@ struct PTOViewToMemrefPass
             op.getScatterAtomicOpAttr(),
             op.getScatterOobAttr());
       }
-      SmallVector<mlir::pto::TPrintOp, 8> printops;
+      DefaultInlineVector<mlir::pto::TPrintOp> printops;
       func.walk([&](mlir::pto::TPrintOp op) { printops.push_back(op); });
 
       for (auto op : printops) {
