@@ -283,10 +283,16 @@ def build_softmax(meta, generator, ints):
     for gi in (gi0, gi1):
         for sb in range(ctx_blocks):
             valid_len = min(SEQ_TILE, max(ctx_len - sb * SEQ_TILE, 0))
-            in_offset = (gi * MAX_CTX_BLOCKS * Q_HEAD_PAD + sb * Q_HEAD_PAD) * SEQ_TILE
-            scores_valid = load_strided_2d(buffers["v4"], offset=in_offset, rows=Q_HEAD_BATCH, cols=SEQ_TILE, row_stride=SEQ_TILE).astype(np.float32)
             scores = np.full((Q_HEAD_BATCH, SEQ_TILE), NEG_INF, dtype=np.float32)
             if valid_len > 0:
+                in_offset = (gi * MAX_CTX_BLOCKS * Q_HEAD_PAD + sb * Q_HEAD_PAD) * SEQ_TILE
+                scores_valid = load_strided_2d(
+                    buffers["v4"],
+                    offset=in_offset,
+                    rows=Q_HEAD_BATCH,
+                    cols=valid_len,
+                    row_stride=SEQ_TILE,
+                ).astype(np.float32)
                 scores[:, :valid_len] = scores_valid[:, :valid_len]
             scores *= ATTN_SCALE
             cur_mi = np.max(scores, axis=1, keepdims=True)
