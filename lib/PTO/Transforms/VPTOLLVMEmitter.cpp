@@ -2873,6 +2873,16 @@ StringRef buildSyncCallee<pto::WaitFlagOp>(MLIRContext *context) {
 }
 
 template <>
+StringRef buildSyncCallee<pto::SetFlagDynOp>(MLIRContext *context) {
+  return StringAttr::get(context, "llvm.hivm.SET.FLAG.REG").getValue();
+}
+
+template <>
+StringRef buildSyncCallee<pto::WaitFlagDynOp>(MLIRContext *context) {
+  return StringAttr::get(context, "llvm.hivm.WAIT.FLAG.REG").getValue();
+}
+
+template <>
 StringRef buildSyncCallee<pto::BarrierOp>(MLIRContext *context) {
   return StringAttr::get(context, "llvm.hivm.BARRIER").getValue();
 }
@@ -6716,6 +6726,68 @@ private:
 };
 
 template <typename SyncOp>
+class LowerPipeEventDynSyncOpPattern final : public OpConversionPattern<SyncOp> {
+public:
+  explicit LowerPipeEventDynSyncOpPattern(TypeConverter &typeConverter,
+                                          MLIRContext *context,
+                                          LoweringState &state)
+      : OpConversionPattern<SyncOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(SyncOp op, typename SyncOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto src = parsePipeImmediate(stringifyPIPE(op.getSrcPipe().getPipe()));
+    auto dst = parsePipeImmediate(stringifyPIPE(op.getDstPipe().getPipe()));
+    if (!src || !dst)
+      return rewriter.notifyMatchFailure(op, "unsupported sync pipe");
+
+    StringRef calleeName = buildSyncCallee<SyncOp>(op.getContext());
+    Value srcValue = getI64Constant(rewriter, op.getLoc(), *src);
+    Value dstValue = getI64Constant(rewriter, op.getLoc(), *dst);
+    
+    Value eventIdValue = adaptor.getEventId();
+    if (!eventIdValue)
+      return rewriter.notifyMatchFailure(op, "missing event_id operand");
+    
+    Value eventValue = eventIdValue;
+    
+    while (eventValue.getDefiningOp()) {
+      auto unrealizedCast = dyn_cast<UnrealizedConversionCastOp>(eventValue.getDefiningOp());
+      if (!unrealizedCast || unrealizedCast.getInputs().size() != 1)
+        break;
+      eventValue = unrealizedCast.getInputs()[0];
+    }
+    
+    if (eventValue.getType().isIndex()) {
+      eventValue = rewriter.create<arith::IndexCastOp>(op.getLoc(), 
+                                                        rewriter.getI64Type(), 
+                                                        eventValue);
+    } else if (auto intType = dyn_cast<IntegerType>(eventValue.getType())) {
+      if (intType.getWidth() < 64) {
+        eventValue = rewriter.create<LLVM::ZExtOp>(op.getLoc(), 
+                                                    rewriter.getI64Type(), 
+                                                    eventValue);
+      }
+    } else {
+      return rewriter.notifyMatchFailure(op, "unexpected event_id type");
+    }
+    
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{rewriter.getI64Type(), rewriter.getI64Type(),
+                  rewriter.getI64Type()},
+        TypeRange{});
+    rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{},
+                                  ValueRange{srcValue, dstValue, eventValue});
+    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
+template <typename SyncOp>
 class LowerInterCoreSyncOpPattern final : public OpConversionPattern<SyncOp> {
 public:
   explicit LowerInterCoreSyncOpPattern(TypeConverter &typeConverter,
@@ -7389,6 +7461,8 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerNullaryConfigOpPattern<pto::SetAtomicS8Op>,
                LowerPipeEventSyncOpPattern<pto::SetFlagOp>,
                LowerPipeEventSyncOpPattern<pto::WaitFlagOp>,
+               LowerPipeEventDynSyncOpPattern<pto::SetFlagDynOp>,
+               LowerPipeEventDynSyncOpPattern<pto::WaitFlagDynOp>,
                LowerBarrierOpPattern, LowerMemBarOpPattern,
                LowerBufSyncOpPattern<pto::GetBufOp>,
                LowerBufSyncOpPattern<pto::RlsBufOp>,
@@ -7447,7 +7521,7 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
   target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect,
                          func::FuncDialect, scf::SCFDialect>();
   target.addLegalOp<UnrealizedConversionCastOp>();
-  target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SyncSetOp,
+  target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
                       pto::SyncWaitOp, pto::BarrierOp, pto::MemBarOp,
                       pto::GetBufOp, pto::RlsBufOp>();
   target.addIllegalOp<pto::GetBlockIdxOp, pto::GetSubBlockIdxOp,
