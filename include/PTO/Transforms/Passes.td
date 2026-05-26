@@ -225,26 +225,6 @@ def VPTONormalizeContainer : Pass<"vpto-normalize-container", "ModuleOp"> {
   ];
 }
 
-def MemrefToTileBuf : Pass<"pto-memref-to-tile-buf", "ModuleOp"> {
-  let summary = "Recover tile_buf types from memref + pto.bind_tile metadata";
-  let description = [{
-    After PTOViewToMemref + PlanMemory + InsertSync, the IR uses memref types
-    with pto.bind_tile ops carrying tile metadata (TileBufConfigAttr, valid
-    dims).  This pass reconstructs tile_buf types from those anchors so that
-    the subsequent Tile->Vector lowering (Expand TileOp) can operate on
-    tile_buf semantics.
-
-    The pass does NOT redo memory planning or synchronisation.
-  }];
-  let constructor = "mlir::pto::createMemrefToTileBufPass()";
-  let dependentDialects = [
-    "mlir::pto::PTODialect",
-    "mlir::memref::MemRefDialect",
-    "mlir::arith::ArithDialect",
-    "mlir::func::FuncDialect"
-  ];
-}
-
 def PTOLowerFrontendPipeOps : Pass<"pto-lower-frontend-pipe-ops", "func::FuncOp"> {
   let summary = "Lower frontend TPUSH/TPOP pipe ops to internal pipe ops";
   let description = [{

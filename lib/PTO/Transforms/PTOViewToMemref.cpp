@@ -1392,12 +1392,10 @@ struct PTOViewToMemrefPass
         return;
       }
 
-      // Stage 0.40 Insert pto.bind_tile for function args that were tile_buf
+      // Stage 0.40 Insert pto.bind_tile for function args that were tile_buf.
       // ------------------------------------------------------------------
-      // Legacy MemrefToTileBuf compatibility: when that pass is used, it needs
-      // BindTileOp as the anchor to recover tile_buf types. For function args,
-      // no such anchor exists after the Stage-0 type rewrite, so we create one
-      // here.
+      // Later materialization and intrinsic folding use BindTileOp as the
+      // anchor to recover tile metadata after the Stage-0 type rewrite.
       {
         IRRewriter rewriter(ctx);
         // Insert after existing block args, before any existing ops.

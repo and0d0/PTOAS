@@ -4126,14 +4126,10 @@ LogicalResult TileBufAddrOp::verify() {
     srcMemorySpace = srcTileType.getMemorySpace();
     srcRank = static_cast<int64_t>(srcTileType.getShape().size());
   } else if (auto srcMemRefType = dyn_cast<BaseMemRefType>(getSrc().getType())) {
-    // Compatibility for the legacy memref-bridge path:
-    // PTOViewToMemref may lower tile_buf producers (for example alloc_tile) to
-    // memref + pto.bind_tile before the deprecated MemrefToTileBuf bridge
-    // reconstructs tile_buf values. Hand-written pto.tile_buf_addr may
-    // therefore temporarily see a tile-bound memref operand in that
-    // intermediate form. The active shared materialization bridge no longer
-    // relies on this round-trip, so this memref acceptance remains only for
-    // compatibility with the legacy path.
+    // PTOViewToMemref may lower tile_buf producers to memref + pto.bind_tile
+    // before the shared materialization bridge restores tile handles.
+    // Hand-written pto.tile_buf_addr may therefore temporarily see a tile-bound
+    // memref operand in that intermediate form.
     elementType = srcMemRefType.getElementType();
     srcMemorySpace = srcMemRefType.getMemorySpace();
     srcRank = srcMemRefType.getRank();

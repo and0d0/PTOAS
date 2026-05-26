@@ -669,8 +669,8 @@ Fold pass 处理两族 intrinsic，通过严格的模式匹配将它们解析回
 
 ##### tile_buf 系列折叠
 
-每一个被折叠的 tile_buf intrinsic，其 `tile_buf` 操作数必须由如下固定链定义
-（由 `MemrefToTileBuf` pass 保证），否则 pass 直接报错并失败：
+每一个被折叠的 tile_buf intrinsic，其 `tile_buf` 操作数必须能解析到调用点
+的 materialized tile handle，否则 pass 直接报错并失败：
 
 ```mlir
 %0 = pto.pointer_cast(%addr) {config = ...}
@@ -922,7 +922,7 @@ def template_xxx(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
   // expands pto.tadd via the default TileLang Python DSL template
   // lib/TileOps/tadd_template.py.
   //
-  // Pipeline: MemrefToTileBuf -> ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
+  // Pipeline: PTOMaterializeTileHandles -> ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
   //
   // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
 
