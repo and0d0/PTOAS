@@ -1,10 +1,7 @@
 name: CI
 
-concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 on:
+  push:
   pull_request:
   # Nightly remote-board validation (GitHub cron is UTC).
   # 22:00 CST (UTC+8) == 14:00 UTC.
@@ -70,7 +67,7 @@ permissions:
 
 jobs:
   license-header-check:
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -96,8 +93,9 @@ jobs:
   build-and-test:
     runs-on: ubuntu-22.04
     env:
-      LLVM_REPO: https://github.com/vpto-dev/llvm-project.git
-      LLVM_REF: feature-vpto
+      LLVM_COMMIT: cd708029e0b2869e80abe31ddb175f7c35361f90
+      LLVM_REPO_VPTO: https://github.com/vpto-dev/llvm-project.git
+      LLVM_REF_VPTO: feature-vpto
       LLVM_BUILD_DIR: ${{ github.workspace }}/llvm-project/llvm/build-assert
       LLVM_DIR: ${{ github.workspace }}/llvm-project/llvm/build-assert
       PTO_BUILD_DIR: ${{ github.workspace }}/build-assert
@@ -105,7 +103,29 @@ jobs:
       MLIR_PYTHONPATH: ${{ github.workspace }}/llvm-project/llvm/build-assert/tools/mlir/python_packages/mlir_core
       LLVM_CACHE_FLAVOR: assert-shared-mlirpy-hardening-v1
     steps:
-      - name: Checkout
+      - name: Detect PR source fork
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          if [[ "${HEAD_REF}" == feature-vpto-* ]]; then
+            echo "IS_VPTO_FORK=true" >> "${GITHUB_ENV}"
+            echo "::notice::PR from vpto fork (${HEAD_REPO}) — using vpto LLVM branch"
+          else
+            echo "IS_VPTO_FORK=false" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Checkout (default)
+        if: env.IS_VPTO_FORK != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+        
+      - name: Checkout (vpto fork)
+        if: env.IS_VPTO_FORK == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -142,17 +162,6 @@ jobs:
           mkdir -p "${PAYLOAD_DIR}/test/npu_validation/scripts"
           mkdir -p "${PAYLOAD_DIR}/test/npu_validation/templates"
 
-      - name: Resolve LLVM source SHA
-        shell: bash
-        run: |
-          set -euo pipefail
-          LLVM_SOURCE_SHA="$(git ls-remote "${LLVM_REPO}" "refs/heads/${LLVM_REF}" | awk '{print $1}')"
-          [[ -n "${LLVM_SOURCE_SHA}" ]] || {
-            echo "ERROR: failed to resolve ${LLVM_REPO} ${LLVM_REF}" >&2
-            exit 1
-          }
-          echo "LLVM_SOURCE_SHA=${LLVM_SOURCE_SHA}" >> "${GITHUB_ENV}"
-
       # 先恢复 LLVM build 缓存
       - name: Restore LLVM build cache
         id: cache-llvm
@@ -160,22 +169,44 @@ jobs:
         with:
           path: |
             llvm-project/llvm/build-assert
-          key: llvm-${{ runner.os }}-${{ env.LLVM_SOURCE_SHA }}-${{ env.LLVM_CACHE_FLAVOR }}
+          key: llvm-${{ runner.os }}-${{ env.LLVM_COMMIT }}-${{ env.LLVM_CACHE_FLAVOR }}
+
+      - name: Resolve LLVM source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${IS_VPTO_FORK}" == "true" ]]; then
+            LLVM_SOURCE_SHA="$(git ls-remote "${LLVM_REPO_VPTO}" "refs/heads/${LLVM_REF_VPTO}" | awk '{print $1}')"
+            [[ -n "${LLVM_SOURCE_SHA}" ]] || {
+              echo "ERROR: failed to resolve ${LLVM_REPO_VPTO} ${LLVM_REF_VPTO}" >&2
+              exit 1
+            }
+          else
+            LLVM_SOURCE_SHA="${LLVM_COMMIT}"
+          fi
+          echo "LLVM_SOURCE_SHA=${LLVM_SOURCE_SHA}" >> "${GITHUB_ENV}"
 
       - name: Prepare LLVM source (no rebuild)
         run: |
+          set -euo pipefail
           mkdir -p llvm-project
           cd llvm-project
-
-          # cache 只保存 build 目录，这里补一个最小 git repo 供 cmake/ninja 使用
-          if [ ! -d .git ]; then
-            git init
-            git remote add origin "${LLVM_REPO}"
+          if [[ "${IS_VPTO_FORK}" == "true" ]]; then
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin "${LLVM_REPO_VPTO}"
+            fi
+            git remote set-url origin "${LLVM_REPO_VPTO}"
+            git fetch --depth 1 origin "${LLVM_REF_VPTO}"
+            git checkout --force FETCH_HEAD
+          else
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin https://github.com/llvm/llvm-project.git
+            fi
+            git fetch --depth 1 origin tag llvmorg-19.1.7
+            git checkout "${LLVM_COMMIT}"
           fi
-
-          git remote set-url origin "${LLVM_REPO}"
-          git fetch --depth 1 origin "${LLVM_REF}"
-          git checkout --force FETCH_HEAD
 
       - name: Build LLVM/MLIR (only if cache miss)
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -200,7 +231,7 @@ jobs:
         with:
           path: |
             llvm-project/llvm/build-assert
-          key: llvm-${{ runner.os }}-${{ env.LLVM_SOURCE_SHA }}-${{ env.LLVM_CACHE_FLAVOR }}
+          key: llvm-${{ runner.os }}-${{ env.LLVM_COMMIT }}-${{ env.LLVM_CACHE_FLAVOR }}
 
       - name: Build PTOAS
         run: |
@@ -291,11 +322,11 @@ jobs:
     concurrency:
       group: vpto-sim-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
+    # only worked for mly pr -> main
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'schedule' ||
-        github.event_name == 'pull_request'
+        (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') &&
+         startsWith(github.event.pull_request.head.ref, 'feature-vpto-')
       }}
     env:
       LLVM_REPO: https://github.com/vpto-dev/llvm-project.git
