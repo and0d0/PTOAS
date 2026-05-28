@@ -2,7 +2,7 @@
 
 > **Status:** DRAFT for review
 > **Base:** [vpto-spec.md](https://github.com/mouliangyu/PTOAS/blob/feature-vpto-backend/docs/vpto-spec.md) (2026-03-20)
-> **Updated:** 2026-04-30
+> **Updated:** 2026-05-28
 
 ---
 
@@ -27,37 +27,40 @@ Within the end-to-end PTO software stack, PTO instructions may appear in three c
 From these PTO instruction forms, the stack can proceed along two main compilation flows:
 
 - **CCE generation flow**: PTO ISA is lowered into a CCE-oriented representation, which is then compiled by the BiSheng toolchain into Ascend device binaries.
-- **Bytecode generation flow**: PTO ISA is emitted as bytecode, which is then compiled by the BiSheng toolchain into Ascend device binaries.
+- **VPTO flow**: PTO ISA is lowered through the VPTO backend for A5 device code generation. PTOAS organizes the device components and invokes the BiSheng compiler internally to produce the final device artifact.
 
 ```text
-High-level frameworks / DSLs / library kernels
-                    |
-                    v
-         +----------------------------------+
-         |          PTO ISA layer           |
-         |                                  |
-         |  (1) PTO Tile Instruction        |
-         |  (2) PTO micro Instruction       |
-         |  (3) PTO Tile+micro Instruction  |
-         +----------------+-----------------+
-                          |
-             +------------+------------+
-             |                         |
-             v                         v
+        High-level frameworks / DSLs / library kernels
+                             |
+                             v
+            +----------------------------------+
+            |          PTO ISA layer           |
+            |                                  |
+            |  (1) PTO Tile Instruction        |
+            |  (2) PTO micro Instruction       |
+            |  (3) PTO Tile+micro Instruction  |
+            +----------------+-----------------+
+                             |
+              +--------------+--------------+
+              |                             |
+              v                             v
  +-------------------------+   +-------------------------+
  | Path A: generate CCE    |   | Path B: generate        |
  | (CCE-oriented form)     |   | bytecode                |
  +------------+------------+   +------------+------------+
               |                             |
               v                             v
-   +-----------------------------------------------+
-   |               BiSheng compiler                |
-   +---------------------------+-------------------+
-                               |
-                               v
-                 +-----------------------------+
-                 |   Ascend device binaries    |
-                 +-----------------------------+
+ +-------------------------+   +-------------------------+
+ | BiSheng compiler        |   | BiSheng compiler        |
+ | invoked explicitly      |   | invoked inside PTOAS    |
+ +------------+------------+   +------------+------------+
+              |                             |
+              +--------------+--------------+
+                             |
+                             v
+              +-----------------------------+
+              |   Ascend device binaries    |
+              +-----------------------------+
 ```
 
 #### Why External Developers Read or Author PTO micro Instruction
@@ -82,6 +85,111 @@ This document is written for compiler engineers, library writers, and advanced p
 ### Getting Started
 
 The PTO micro Instruction is architected as a performance-critical layer within the compiler stack, specifically designed to exploit the **Decoupled Access-Execute** (DAE) nature of the Ascend 950 hardware.
+
+#### Authoring VPTO `.pto` Files
+
+A VPTO source file must make the target architecture, launched device function,
+and cube/vector placement explicit. The recommended authoring form is a single
+outer module with one or more `pto.kernel` functions whose bodies are split by
+`pto.section.vector` and `pto.section.cube`. The Vector section describes the
+Vector-unit program, and the Cube section describes the Cube-unit program.
+Synchronization and communication between the two units are written as normal
+operations in the relevant section bodies.
+
+**Common module attributes:**
+
+| Attribute | Attachment site | Required | Meaning |
+|-----------|-----------------|----------|---------|
+| `pto.target_arch = "a5"` | outer `module` | Recommended in source files | Selects the A5 PTO parser and verifier contract. A command-line `--pto-arch` value overrides the module attribute. |
+| `pto.kernel` | `func.func` | Required for externally launched device kernels | Marks the function as a device kernel entry. Helper functions inside the same module do not need this attribute unless they are launched directly. |
+| `pto.section.vector` | region inside a `pto.kernel` function | Required for vector-core code in the recommended source form | Contains the Vector program. |
+| `pto.section.cube` | region inside a `pto.kernel` function | Required for cube-core code in the recommended source form | Contains the Cube program. |
+| `pto.kernel_kind = #pto.kernel_kind<vector>` | normalized kernel `module` | Advanced/frontend-emitted form only | Marks a normalized submodule as vector-core code. |
+| `pto.kernel_kind = #pto.kernel_kind<cube>` | normalized kernel `module` | Advanced/frontend-emitted form only | Marks a normalized submodule as cube-core code. |
+
+In this source form, every `pto.kernel` function must contain one or both
+sections. A function may contain at most one `pto.section.vector` and at most
+one `pto.section.cube`; nested sections are invalid. Values defined outside the
+sections may be used by both sections, but values defined inside one section
+are local to that section.
+
+For the recommended source form, keep `pto.target_arch` on the outer module,
+mark the launched function with `pto.kernel`, and place core-specific code
+inside `pto.section.vector` and/or `pto.section.cube`:
+
+```mlir
+module attributes {pto.target_arch = "a5"} {
+  func.func @mixed_kernel(%a: !pto.ptr<f16, gm>,
+                          %b: !pto.ptr<f16, gm>,
+                          %out: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+    %c0_i64 = arith.constant 0 : i64
+    %l1 = pto.castptr %c0_i64 : i64 -> !pto.ptr<f16, l1>
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
+
+    pto.section.cube {
+      // Cube program body.
+    }
+
+    pto.section.vector {
+      // Vector program body.
+    }
+
+    return
+  }
+}
+```
+
+Vector-only and cube-only kernels use the same structure with only the section
+they need:
+
+```mlir
+module attributes {pto.target_arch = "a5"} {
+  func.func @vadd_kernel(%lhs: !pto.ptr<f32, gm>,
+                         %rhs: !pto.ptr<f32, gm>,
+                         %out: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+    %c0_i64 = arith.constant 0 : i64
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
+
+    pto.section.vector {
+      // Vector-core program body.
+    }
+
+    return
+  }
+}
+```
+
+Advanced frontends may emit a normalized container directly. This is not the
+preferred hand-authored source shape, but it is a valid compiler-facing form:
+
+```mlir
+module attributes {pto.target_arch = "a5"} {
+  module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    func.func @kernel(%in: !pto.ptr<f32, gm>,
+                      %out: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+      return
+    }
+  }
+  module attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    func.func @kernel(%in: !pto.ptr<f32, gm>,
+                      %out: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+      return
+    }
+  }
+}
+```
+
+At the container top level, only kernel submodules are valid. Each kernel
+submodule must carry exactly one `pto.kernel_kind`. Put `pto.target_arch` on
+the outer module so all submodules share the same target contract.
+
+**Compilation:**
+
+```bash
+ptoas --pto-arch=a5 --pto-backend=vpto kernel.pto -o kernel.o
+```
+
+This command emits the final device artifact.
 
 #### Hardware Pipeline Modeling
 
@@ -707,8 +815,8 @@ tz = get_tid_z();
 Example:
 
 ```mlir
-module attributes {pto.target_arch = "a5"} {
-  func.func @simt_store_tid_kernel(%out: !pto.ptr<i32, gm>) {
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @simt_store_tid_kernel(%out: !pto.ptr<i32, gm>) attributes {pto.kernel} {
     %c0_i64 = arith.constant 0 : i64
     %c32_i64 = arith.constant 32 : i64
     %c128_i64 = arith.constant 128 : i64
