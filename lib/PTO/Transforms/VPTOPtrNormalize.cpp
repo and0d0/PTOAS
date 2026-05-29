@@ -89,6 +89,14 @@ static bool hasPtrNormalizeConvertibleType(TypeRange types) {
       types, [](Type type) { return hasPtrNormalizeConvertibleType(type); });
 }
 
+static FailureOr<SmallVector<Type>>
+convertTypes(const TypeConverter &typeConverter, TypeRange types) {
+  SmallVector<Type> convertedTypes;
+  if (failed(typeConverter.convertTypes(types, convertedTypes)))
+    return failure();
+  return convertedTypes;
+}
+
 static bool isMemRefType(Type type) { return isa<BaseMemRefType>(type); }
 
 static Value materializeUnrealizedCast(OpBuilder &builder, Type resultType,
@@ -408,7 +416,11 @@ struct ConvertVldsSubviewOperandPattern : public OpConversionPattern<pto::VldsOp
 
     OperationState state(op.getLoc(), op->getName().getStringRef());
     state.addOperands({adaptor.getSource(), adaptor.getOffset()});
-    state.addTypes(op->getResultTypes());
+    FailureOr<SmallVector<Type>> resultTypes =
+        convertTypes(*getTypeConverter(), op->getResultTypes());
+    if (failed(resultTypes))
+      return failure();
+    state.addTypes(*resultTypes);
     state.addAttributes(op->getAttrs());
     Operation *newOp = rewriter.create(state);
     rewriter.replaceOp(op, newOp->getResults());
@@ -429,7 +441,37 @@ struct ConvertVstsSubviewOperandPattern : public OpConversionPattern<pto::VstsOp
     state.addOperands(
         {adaptor.getValue(), adaptor.getDestination(), adaptor.getOffset(),
          adaptor.getMask()});
-    state.addTypes(op->getResultTypes());
+    FailureOr<SmallVector<Type>> resultTypes =
+        convertTypes(*getTypeConverter(), op->getResultTypes());
+    if (failed(resultTypes))
+      return failure();
+    state.addTypes(*resultTypes);
+    state.addAttributes(op->getAttrs());
+    Operation *newOp = rewriter.create(state);
+    rewriter.replaceOp(op, newOp->getResults());
+    return success();
+  }
+};
+
+struct ConvertVsstbSubviewOperandPattern
+    : public OpConversionPattern<pto::VsstbOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::VsstbOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<pto::PtrType>(adaptor.getDestination().getType()))
+      return failure();
+
+    OperationState state(op.getLoc(), op->getName().getStringRef());
+    state.addOperands({adaptor.getValue(), adaptor.getDestination(),
+                       adaptor.getBlockStride(), adaptor.getRepeatStride(),
+                       adaptor.getMask()});
+    FailureOr<SmallVector<Type>> resultTypes =
+        convertTypes(*getTypeConverter(), op->getResultTypes());
+    if (failed(resultTypes))
+      return failure();
+    state.addTypes(*resultTypes);
     state.addAttributes(op->getAttrs());
     Operation *newOp = rewriter.create(state);
     rewriter.replaceOp(op, newOp->getResults());
@@ -726,7 +768,7 @@ struct VPTOPtrNormalizePass
                            scf::SCFDialect>();
     target.addDynamicallyLegalDialect<pto::PTODialect>([](Operation *op) {
       return !isa<pto::TileBufAddrOp, pto::PointerCastOp, pto::CastPtrOp,
-                  pto::BindTileOp, pto::VldsOp, pto::VstsOp>(op);
+                  pto::BindTileOp, pto::VldsOp, pto::VstsOp, pto::VsstbOp>(op);
     });
     target.addLegalOp<ModuleOp>();
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
@@ -760,10 +802,20 @@ struct VPTOPtrNormalizePass
              typeConverter.convertType(op.getResult().getType());
     });
     target.addDynamicallyLegalOp<pto::VldsOp>(
-        [](pto::VldsOp op) { return isa<pto::PtrType>(op.getSource().getType()); });
-    target.addDynamicallyLegalOp<pto::VstsOp>([](pto::VstsOp op) {
-      return isa<pto::PtrType>(op.getDestination().getType());
-    });
+        [&](pto::VldsOp op) {
+          return isa<pto::PtrType>(op.getSource().getType()) &&
+                 typeConverter.isLegal(op->getResultTypes());
+        });
+    target.addDynamicallyLegalOp<pto::VstsOp>(
+        [&](pto::VstsOp op) {
+          return isa<pto::PtrType>(op.getDestination().getType()) &&
+                 typeConverter.isLegal(op->getResultTypes());
+        });
+    target.addDynamicallyLegalOp<pto::VsstbOp>(
+        [&](pto::VsstbOp op) {
+          return isa<pto::PtrType>(op.getDestination().getType()) &&
+                 typeConverter.isLegal(op->getResultTypes());
+        });
     target.addDynamicallyLegalOp<pto::LoadScalarOp>(
         [](pto::LoadScalarOp op) { return isa<pto::PtrType>(op.getPtr().getType()); });
     target.addDynamicallyLegalOp<pto::StoreScalarOp>(
@@ -839,6 +891,7 @@ struct VPTOPtrNormalizePass
                  ConvertBindTileToPtrPattern,
                  ConvertSubviewToAddPtrPattern, ConvertVldsSubviewOperandPattern,
                  ConvertVstsSubviewOperandPattern,
+                 ConvertVsstbSubviewOperandPattern,
                  ConvertLoadScalarOperandToPtrPattern,
                  ConvertStoreScalarOperandToPtrPattern,
                  ConvertMteUbUbOperandPattern,

@@ -1181,12 +1181,14 @@ All PTO micro Instruction operations follow standard MLIR syntax. The common pat
 
 ```mlir
 %result = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>
+%result, %updated_base = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>, !pto.ptr<T, ub>
 ```
 
 **Store (register to memory):**
 
 ```mlir
 pto.vsts %value, %destination[%offset] {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>
+%updated_base = pto.vsts %value, %destination[%offset] {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub> -> !pto.ptr<T, ub>
 ```
 
 **Dual Load (one load, two results — deinterleave):**

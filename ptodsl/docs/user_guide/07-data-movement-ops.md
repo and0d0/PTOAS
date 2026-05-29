@@ -300,9 +300,9 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 
 ---
 
-#### `pto.vlds(tile[row, col:], dist: VLoadDist | None = None) -> VRegType`
-#### `pto.vlds(tile[start:], dist: VLoadDist | None = None) -> VRegType`
-#### `pto.vlds(buf: PtrType, offset: Index, dist: VLoadDist | None = None) -> VRegType`
+#### `pto.vlds(tile[row, col:], dist: VLoadDist | None = None, return_updated_base: bool = False) -> VRegType | (VRegType, PtrType)`
+#### `pto.vlds(tile[start:], dist: VLoadDist | None = None, return_updated_base: bool = False) -> VRegType | (VRegType, PtrType)`
+#### `pto.vlds(buf: PtrType, offset: Index, dist: VLoadDist | None = None, return_updated_base: bool = False) -> VRegType | (VRegType, PtrType)`
 
 **Description**: Stateless vector load from UB. Reads one vector-width slice.
 
@@ -315,12 +315,14 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 | `buf` | `PtrType` (UB) | Pointer to buffer in UB (pointer form) |
 | `offset` | `Index` | Element offset (pointer form) |
 | `dist` | `VLoadDist` or `None` | Optional load distribution: `NORM` (default), `UNPK_B8`/`UNPK_B16`/`UNPK_B32`, `BRC_B8`/`BRC_B16`/`BRC_B32` |
+| `return_updated_base` | `bool` | When `True`, also returns the post-update base address |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
 | `vec` | `VRegType` | Loaded vector register |
+| `updated_base` | `PtrType` | Returned with `vec` when `return_updated_base=True` |
 
 ---
 
@@ -528,9 +530,9 @@ blocks are zero-filled.
 
 Vector stores write `vreg` contents back to UB tiles. Like loads, they support tile-index syntax.
 
-#### `pto.vsts(vec: VRegType, tile[row, col:], mask: MaskType, dist: VStoreDist | None = None) -> None`
-#### `pto.vsts(vec: VRegType, tile[start:], mask: MaskType, dist: VStoreDist | None = None) -> None`
-#### `pto.vsts(vec: VRegType, buf: PtrType, offset: Index, mask: MaskType, dist: VStoreDist | None = None) -> None`
+#### `pto.vsts(vec: VRegType, tile[row, col:], mask: MaskType, dist: VStoreDist | None = None, return_updated_base: bool = False) -> PtrType | None`
+#### `pto.vsts(vec: VRegType, tile[start:], mask: MaskType, dist: VStoreDist | None = None, return_updated_base: bool = False) -> PtrType | None`
+#### `pto.vsts(vec: VRegType, buf: PtrType, offset: Index, mask: MaskType, dist: VStoreDist | None = None, return_updated_base: bool = False) -> PtrType | None`
 
 **Description**: Stateless vector store to UB. The mask gates writes for the
 distributions that use predicate masking.
@@ -544,6 +546,7 @@ distributions that use predicate masking.
 | `tile[start:]` | Tile index | 1D destination (vector-width range) |
 | `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
 | `offset` | `Index` | Element offset (pointer form) |
+| `return_updated_base` | `bool` | When `True`, returns the post-update base address |
 | `mask` | `MaskType` | Predicate mask gating writes |
 | `dist` | `VStoreDist` or `None` | Store distribution token. When omitted, PTODSL defaults to `NORM_B32` on the current surface. |
 
@@ -604,12 +607,13 @@ into one destination.
 
 ---
 
-#### `pto.vsstb(tile[row, col], block_stride: Index, repeat_stride: Index, mask: MaskType) -> None`
-#### `pto.vsstb(tile[pos], block_stride: Index, repeat_stride: Index, mask: MaskType) -> None`
-#### `pto.vsstb(buf: PtrType, block_stride: Index, repeat_stride: Index, mask: MaskType) -> None`
+#### `pto.vsstb(tile[row, col], block_stride: Index, repeat_stride: Index, mask: MaskType, return_updated_base: bool = False) -> PtrType | None`
+#### `pto.vsstb(tile[pos], block_stride: Index, repeat_stride: Index, mask: MaskType, return_updated_base: bool = False) -> PtrType | None`
+#### `pto.vsstb(buf: PtrType, block_stride: Index, repeat_stride: Index, mask: MaskType, return_updated_base: bool = False) -> PtrType | None`
 
 **Description**: Block-strided store. Stores 32-byte source blocks to a
 block-strided UB destination. Masked-off blocks do not write memory.
+When `return_updated_base=True`, returns the post-update base address.
 
 **Parameters**:
 

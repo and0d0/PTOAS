@@ -18,8 +18,15 @@ from . import _pto_ops_gen as _pto_ops_gen
 
 def _load_local_pto_ext():
     lib_dir = Path(__file__).resolve().parent.parent / "_mlir_libs"
+    candidates = []
     for suffix in ("*.so", "*.pyd", "*.dll", "*.dylib"):
-        for so_path in lib_dir.glob(f"_pto{suffix}"):
+        candidates.extend(lib_dir.glob(f"_pto{suffix}"))
+    if not candidates:
+        raise FileNotFoundError("cannot locate local _pto extension in _mlir_libs")
+
+    first_error = None
+    for so_path in candidates:
+        try:
             spec = importlib.util.spec_from_file_location(
                 "mlir._mlir_libs._pto", so_path
             )
@@ -27,12 +34,15 @@ def _load_local_pto_ext():
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 return mod
-    raise ImportError("cannot locate local _pto extension in _mlir_libs")
+        except ImportError as exc:
+            if first_error is None:
+                first_error = exc
+    raise ImportError(f"failed to load local _pto extension from {lib_dir}") from first_error
 
 
 try:
     _pto_mod = _load_local_pto_ext()
-except Exception:
+except FileNotFoundError:
     _pto_mod = importlib.import_module(".._mlir_libs._pto", __package__)
 
 

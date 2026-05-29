@@ -1058,12 +1058,6 @@ static bool isSupportedPostMode(StringRef mode) {
   return mode == "NO_POST_UPDATE" || mode == "POST_UPDATE";
 }
 
-static std::optional<StringRef> getOptionalPostModeAttr(Operation *op) {
-  if (auto mode = op->getAttrOfType<StringAttr>("mode"))
-    return mode.getValue();
-  return std::nullopt;
-}
-
 static unsigned getIntOrFloatBitWidth(Type type) {
   if (auto intType = dyn_cast<IntegerType>(type))
     return intType.getWidth();
@@ -3947,25 +3941,12 @@ static LogicalResult verifyVldsCommon(LoadOp op) {
 LogicalResult VldsOp::verify() {
   if (failed(verifyVldsCommon(*this)))
     return failure();
-  if (std::optional<StringRef> mode = getOptionalPostModeAttr(getOperation());
-      mode && !isSupportedPostMode(*mode))
-    return emitOpError("requires mode to be POST_UPDATE or NO_POST_UPDATE");
+  if (Value updatedBase = getUpdatedBase()) {
+    if (updatedBase.getType() != getSource().getType())
+      return emitOpError("requires updated base result to match base type");
+  }
   return success();
 }
-void VldsPostOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable());
-}
-
-LogicalResult VldsPostOp::verify() {
-  if (failed(verifyVldsCommon(*this)))
-    return failure();
-  if (getUpdatedSource().getType() != getSource().getType())
-    return emitOpError("requires updated source result to match source type");
-  return success();
-}
-
 void VldasOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -5323,27 +5304,11 @@ static LogicalResult verifyVstsCommon(StoreOp op) {
 LogicalResult VstsOp::verify() {
   if (failed(verifyVstsCommon(*this)))
     return failure();
-  if (std::optional<StringRef> mode = getOptionalPostModeAttr(getOperation());
-      mode && !isSupportedPostMode(*mode))
-    return emitOpError("requires mode to be POST_UPDATE or NO_POST_UPDATE");
+  if (getUpdatedBase() &&
+      getUpdatedBase().getType() != getDestination().getType())
+    return emitOpError("requires updated base result to match base type");
   return success();
 }
-void VstsPostOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(), &getValueMutable());
-  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
-}
-
-LogicalResult VstsPostOp::verify() {
-  if (failed(verifyVstsCommon(*this)))
-    return failure();
-  if (getUpdatedDestination().getType() != getDestination().getType())
-    return emitOpError(
-        "requires updated destination result to match destination type");
-  return success();
-}
-
 void Vstsx2Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -5484,6 +5449,9 @@ LogicalResult VsstbOp::verify() {
     return emitOpError("requires block_stride to be i16");
   if (!getRepeatStride().getType().isSignlessInteger(16))
     return emitOpError("requires repeat_stride to be i16");
+  if (getUpdatedBase() &&
+      getUpdatedBase().getType() != getDestination().getType())
+    return emitOpError("requires updated base result to match base type");
   return success();
 }
 

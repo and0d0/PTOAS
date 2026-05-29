@@ -208,7 +208,7 @@ _VLOAD_DIST_TOKENS = {
 }
 
 
-def vlds(src_ptr, offset=None, result_vreg_type=None, *, dist=None):
+def vlds(src_ptr, offset=None, result_vreg_type=None, *, dist=None, return_updated_base=False):
     """``pto.vlds`` – vector load from a tile slice or from *src_ptr* at *offset*."""
     if isinstance(src_ptr, TileSliceValue):
         if offset is not None or result_vreg_type is not None:
@@ -220,12 +220,18 @@ def vlds(src_ptr, offset=None, result_vreg_type=None, *, dist=None):
                 allowed=_VLOAD_DIST_TOKENS,
                 context="vlds(..., dist)",
             )
-        return wrap_surface_value(_pto.VldsOp(
+        raw_source = unwrap_surface_value(src_ptr)
+        op = _pto.VldsOp(
             _infer_vreg_type_from_tile_slice(src_ptr),
-            unwrap_surface_value(src_ptr),
+            raw_source.type if return_updated_base else None,
+            raw_source,
             _index_zero(),
             **kwargs,
-        ).result)
+        )
+        result = wrap_surface_value(op.result)
+        if return_updated_base:
+            return result, wrap_surface_value(op.updated_base)
+        return result
 
     if offset is None:
         raise TypeError("vlds(ptr, offset, result_vreg_type=None) requires an explicit offset")
@@ -238,12 +244,18 @@ def vlds(src_ptr, offset=None, result_vreg_type=None, *, dist=None):
             allowed=_VLOAD_DIST_TOKENS,
             context="vlds(..., dist)",
         )
-    return wrap_surface_value(_pto.VldsOp(
+    raw_source = unwrap_surface_value(src_ptr)
+    op = _pto.VldsOp(
         _resolve(result_vreg_type),
-        unwrap_surface_value(src_ptr),
+        raw_source.type if return_updated_base else None,
+        raw_source,
         unwrap_surface_value(offset),
         **kwargs,
-    ).result)
+    )
+    result = wrap_surface_value(op.result)
+    if return_updated_base:
+        return result, wrap_surface_value(op.updated_base)
+    return result
 
 
 def vldas(source):
@@ -359,7 +371,7 @@ def pbitcast(mask_value, to_type):
     )
 
 
-def vsts(val, dst_ptr, offset, mask=None, *, dist=None):
+def vsts(val, dst_ptr, offset, mask=None, *, dist=None, return_updated_base=False):
     """``pto.vsts`` – vector store to a tile slice or to *dst_ptr* at *offset*."""
     if isinstance(dst_ptr, TileSliceValue):
         if mask is not None:
@@ -371,13 +383,17 @@ def vsts(val, dst_ptr, offset, mask=None, *, dist=None):
                 allowed=_VSTORE_DIST_TOKENS,
                 context="vsts(..., dist)",
             )
-        _pto.VstsOp(
+        raw_destination = unwrap_surface_value(dst_ptr)
+        op = _pto.VstsOp(
+            raw_destination.type if return_updated_base else None,
             unwrap_surface_value(val),
-            unwrap_surface_value(dst_ptr),
+            raw_destination,
             _index_zero(),
             unwrap_surface_value(offset),
             **kwargs,
         )
+        if return_updated_base:
+            return wrap_surface_value(op.updated_base)
         return
 
     if mask is None:
@@ -389,13 +405,17 @@ def vsts(val, dst_ptr, offset, mask=None, *, dist=None):
             allowed=_VSTORE_DIST_TOKENS,
             context="vsts(..., dist)",
         )
-    _pto.VstsOp(
+    raw_destination = unwrap_surface_value(dst_ptr)
+    op = _pto.VstsOp(
+        raw_destination.type if return_updated_base else None,
         unwrap_surface_value(val),
-        unwrap_surface_value(dst_ptr),
+        raw_destination,
         unwrap_surface_value(offset),
         unwrap_surface_value(mask),
         **kwargs,
     )
+    if return_updated_base:
+        return wrap_surface_value(op.updated_base)
 
 
 def vstsx2(low, high, dst_ptr, offset_or_dist, dist_or_mask=None, mask=None):
@@ -525,15 +545,19 @@ def vsldb(source, block_stride, repeat_stride, mask):
     )
 
 
-def vsstb(value, destination, block_stride, repeat_stride, mask):
+def vsstb(value, destination, block_stride, repeat_stride, mask, *, return_updated_base=False):
     """``pto.vsstb`` – block-strided store."""
-    _pto.VsstbOp(
+    raw_destination = unwrap_surface_value(destination)
+    op = _pto.VsstbOp(
+        raw_destination.type if return_updated_base else None,
         unwrap_surface_value(value),
-        unwrap_surface_value(destination),
+        raw_destination,
         _coerce_i16(block_stride, context="vsstb(..., block_stride, repeat_stride, mask)"),
         _coerce_i16(repeat_stride, context="vsstb(..., block_stride, repeat_stride, mask)"),
         unwrap_surface_value(mask),
     )
+    if return_updated_base:
+        return wrap_surface_value(op.updated_base)
 
 
 # ── Mask / predicate ops ──────────────────────────────────────────────────────

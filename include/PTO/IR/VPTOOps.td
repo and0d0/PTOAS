@@ -794,31 +794,14 @@ def PTO_VldsOp : PTO_Op<"vlds", [
     OptionalAttr<StrAttr>:$dist
   );
 
-  let results = (outs PTO_VectorType:$result);
+  let results = (outs PTO_VectorType:$result,
+                      Optional<PTO_BufferLikeType>:$updated_base);
 
   let hasVerifier = 1;
 
   let assemblyFormat = [{
     $source `[` $offset `]` attr-dict `:` type($source) `->` type($result)
-  }];
-}
-
-def PTO_VldsPostOp : PTO_Op<"vlds_post", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
-  ]> {
-  let arguments = (ins
-    PTO_BufferLikeType:$source,
-    Index:$offset,
-    OptionalAttr<StrAttr>:$dist
-  );
-
-  let results = (outs PTO_VectorType:$result,
-                      PTO_BufferLikeType:$updated_source);
-
-  let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    $source `[` $offset `]` attr-dict `:` type($source) `->` type($result) `,` type($updated_source)
+    (`,` type($updated_base)^)?
   }];
 }
 
@@ -1860,32 +1843,13 @@ def PTO_VstsOp : PTO_Op<"vsts", [
     PTO_MaskTypeConstraint:$mask
   );
 
-  let results = (outs);
+  let results = (outs Optional<PTO_BufferLikeType>:$updated_base);
 
   let hasVerifier = 1;
 
   let assemblyFormat = [{
     $value `,` $destination `[` $offset `]` `,` $mask attr-dict `:` type($value) `,` type($destination) `,` type($mask)
-  }];
-}
-
-def PTO_VstsPostOp : PTO_Op<"vsts_post", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
-  ]> {
-  let arguments = (ins
-    PTO_VectorType:$value,
-    PTO_BufferLikeType:$destination,
-    Index:$offset,
-    OptionalAttr<StrAttr>:$dist,
-    PTO_MaskTypeConstraint:$mask
-  );
-
-  let results = (outs PTO_BufferLikeType:$updated_destination);
-
-  let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    $value `,` $destination `[` $offset `]` `,` $mask attr-dict `:` type($value) `,` type($destination) `,` type($mask) `->` type($updated_destination)
+    (`->` type($updated_base)^)?
   }];
 }
 
@@ -2668,12 +2632,13 @@ def PTO_VsstbOp : PTO_Op<"vsstb", [
     I16:$repeat_stride,
     PTO_MaskTypeConstraint:$mask
   );
-  let results = (outs);
+  let results = (outs Optional<PTO_BufferLikeType>:$updated_base);
 
   let hasVerifier = 1;
 
   let assemblyFormat = [{
     $value `,` $destination `,` $block_stride `,` $repeat_stride `,` $mask attr-dict `:` type($value) `,` type($destination) `,` type($block_stride) `,` type($repeat_stride) `,` type($mask)
+    (`->` type($updated_base)^)?
   }];
 }
 

@@ -2561,6 +2561,10 @@ static StringRef buildVsstbCallee(MLIRContext *context) {
   return StringAttr::get(context, "llvm.hivm.vsstb").getValue();
 }
 
+static StringRef buildVsstbPostCallee(MLIRContext *context) {
+  return StringAttr::get(context, "llvm.hivm.vsstb.post").getValue();
+}
+
 static FailureOr<StringRef> buildVgather2Callee(MLIRContext *context,
                                                 Type resultType) {
   std::string vec =
@@ -5160,7 +5164,8 @@ public:
   LogicalResult
   matchAndRewrite(pto::VldsOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Type elementType = getElementTypeFromVectorLike(op.getResult().getType());
+    Type ptoResultType = op.getResult().getType();
+    Type elementType = getElementTypeFromVectorLike(ptoResultType);
     if (!elementType)
       return rewriter.notifyMatchFailure(op, "unsupported vlds element type");
     auto offsetBytes = convertElementOffsetToBytes(op, adaptor.getOffset(), elementType);
@@ -5174,77 +5179,30 @@ public:
     if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(), resultTypes)))
       return rewriter.notifyMatchFailure(op, "failed to convert vlds result types");
 
-    FailureOr<StringRef> calleeName = buildVldsCallee(op.getContext(),
-                                                      op.getResult().getType());
-    if (failed(calleeName))
-      return rewriter.notifyMatchFailure(op, "unsupported vlds signature");
-
-    Value distValue = rewriter.create<arith::ConstantOp>(
-        op.getLoc(), rewriter.getI32IntegerAttr(*dist));
-    Value zero = rewriter.create<arith::ConstantOp>(op.getLoc(),
-                                                    rewriter.getI32IntegerAttr(0));
-    SmallVector<Value> args{adaptor.getSource(), *offsetBytes, distValue, zero};
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{adaptor.getSource().getType(), rewriter.getI32Type(),
-                  rewriter.getI32Type(), rewriter.getI32Type()},
-        resultTypes);
-    auto call = rewriter.create<func::CallOp>(op.getLoc(), *calleeName,
-                                              resultTypes, args);
-    state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
-    rewriter.replaceOp(op, call.getResults());
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-class LowerVldsPostOpPattern final
-    : public OpConversionPattern<pto::VldsPostOp> {
-public:
-  explicit LowerVldsPostOpPattern(TypeConverter &typeConverter,
-                                  MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<pto::VldsPostOp>(typeConverter, context),
-        state(state) {}
-
-  LogicalResult
-  matchAndRewrite(pto::VldsPostOp op, pto::VldsPostOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Type elementType = getElementTypeFromVectorLike(op.getResult().getType());
-    if (!elementType)
-      return rewriter.notifyMatchFailure(op, "unsupported vlds_post element type");
-
-    auto offsetBytes = convertElementOffsetToBytes(op, adaptor.getOffset(), elementType);
-    auto basePtr = dyn_cast<LLVM::LLVMPointerType>(adaptor.getSource().getType());
-    auto dist =
-        parseLoadDistImmediate(op.getDist().value_or("NORM"), elementType);
-    if (failed(offsetBytes) || !basePtr || !dist) {
-      return rewriter.notifyMatchFailure(op,
-                                         "failed to materialize vlds_post operands");
-    }
-
-    Type resultType = this->getTypeConverter()->convertType(op.getResult().getType());
-    Type updatedSourceType =
-        this->getTypeConverter()->convertType(op.getUpdatedSource().getType());
-    if (!resultType || !updatedSourceType || updatedSourceType != adaptor.getSource().getType()) {
-      return rewriter.notifyMatchFailure(op,
-                                         "failed to convert vlds_post result types");
+    bool usePostIntrinsic = static_cast<bool>(op.getUpdatedBase());
+    if (usePostIntrinsic) {
+      if (resultTypes.size() != 2 || resultTypes[1] != adaptor.getSource().getType())
+        return rewriter.notifyMatchFailure(op,
+                                           "unsupported vlds post-update results");
+    } else if (resultTypes.size() != 1) {
+      return rewriter.notifyMatchFailure(op, "unsupported vlds result count");
     }
 
     FailureOr<StringRef> calleeName =
-        buildVldsPostCallee(op.getContext(), op.getResult().getType());
+        usePostIntrinsic ? buildVldsPostCallee(op.getContext(), ptoResultType)
+                         : buildVldsCallee(op.getContext(), ptoResultType);
     if (failed(calleeName))
-      return rewriter.notifyMatchFailure(op, "unsupported vlds_post signature");
+      return rewriter.notifyMatchFailure(op, "unsupported vlds signature");
 
     Value distValue = getI32Constant(rewriter, op.getLoc(), *dist);
-    Value postValue = getI32Constant(rewriter, op.getLoc(), 1);
+    Value postValue = getI32Constant(rewriter, op.getLoc(), usePostIntrinsic ? 1 : 0);
     SmallVector<Value> args{adaptor.getSource(), *offsetBytes, distValue, postValue};
     auto funcType = rewriter.getFunctionType(
         TypeRange{adaptor.getSource().getType(), (*offsetBytes).getType(),
                   distValue.getType(), postValue.getType()},
-        TypeRange{resultType, updatedSourceType});
-    auto call = rewriter.create<func::CallOp>(
-        op.getLoc(), *calleeName, TypeRange{resultType, updatedSourceType}, args);
+        resultTypes);
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), *calleeName,
+                                              resultTypes, args);
     state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
     rewriter.replaceOp(op, call.getResults());
     return success();
@@ -5498,24 +5456,45 @@ public:
       return rewriter.notifyMatchFailure(op, "failed to materialize vsts operands");
 
     FailureOr<StringRef> calleeName =
-        buildVstsCallee(op.getContext(), op.getValue().getType());
+        op.getUpdatedBase()
+            ? buildVstsPostCallee(op.getContext(), op.getValue().getType())
+            : buildVstsCallee(op.getContext(), op.getValue().getType());
     if (failed(calleeName))
       return rewriter.notifyMatchFailure(op, "unsupported vsts signature");
+
+    SmallVector<Type> resultTypes;
+    if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(),
+                                                      resultTypes)))
+      return rewriter.notifyMatchFailure(op, "failed to convert vsts result types");
+    bool usePostIntrinsic = static_cast<bool>(op.getUpdatedBase());
+    if (usePostIntrinsic) {
+      if (resultTypes.size() != 1 ||
+          resultTypes[0] != adaptor.getDestination().getType())
+        return rewriter.notifyMatchFailure(op,
+                                           "unsupported vsts post-update result");
+    } else if (!resultTypes.empty()) {
+      return rewriter.notifyMatchFailure(op, "unsupported vsts result count");
+    }
 
     Value distValue = rewriter.create<arith::ConstantOp>(
         op.getLoc(), rewriter.getI32IntegerAttr(*dist));
     Value zero = rewriter.create<arith::ConstantOp>(op.getLoc(),
-                                                    rewriter.getI32IntegerAttr(0));
+                                                    rewriter.getI32IntegerAttr(
+                                                        usePostIntrinsic ? 1 : 0));
     SmallVector<Value> args{adaptor.getValue(), adaptor.getDestination(),
                             *offsetBytes, distValue, zero, adaptor.getMask()};
     auto funcType = rewriter.getFunctionType(
         TypeRange{adaptor.getValue().getType(), adaptor.getDestination().getType(),
                   rewriter.getI32Type(), rewriter.getI32Type(),
                   rewriter.getI32Type(), adaptor.getMask().getType()},
-        TypeRange{});
-    rewriter.create<func::CallOp>(op.getLoc(), *calleeName, TypeRange{}, args);
+        resultTypes);
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), *calleeName,
+                                              resultTypes, args);
     state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
-    rewriter.eraseOp(op);
+    if (usePostIntrinsic)
+      rewriter.replaceOp(op, call.getResults());
+    else
+      rewriter.eraseOp(op);
     return success();
   }
 
@@ -5539,75 +5518,39 @@ public:
     if (!basePtr || !packedStride)
       return rewriter.notifyMatchFailure(op, "failed to materialize vsstb operands");
 
-    StringRef calleeName = buildVsstbCallee(op.getContext());
-    Value zeroValue = getI32Constant(rewriter, op.getLoc(), 0);
+    SmallVector<Type> resultTypes;
+    if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(),
+                                                      resultTypes)))
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to convert vsstb result types");
+    bool usePostIntrinsic = static_cast<bool>(op.getUpdatedBase());
+    if (usePostIntrinsic) {
+      if (resultTypes.size() != 1 ||
+          resultTypes[0] != adaptor.getDestination().getType())
+        return rewriter.notifyMatchFailure(
+            op, "unsupported vsstb post-update result");
+    } else if (!resultTypes.empty()) {
+      return rewriter.notifyMatchFailure(op, "unsupported vsstb result count");
+    }
+
+    StringRef calleeName = usePostIntrinsic
+                               ? buildVsstbPostCallee(op.getContext())
+                               : buildVsstbCallee(op.getContext());
+    Value zeroValue = getI32Constant(rewriter, op.getLoc(), usePostIntrinsic ? 1 : 0);
     SmallVector<Value> args{adaptor.getValue(), adaptor.getDestination(),
                             packedStride, zeroValue, adaptor.getMask()};
     auto funcType = rewriter.getFunctionType(
         TypeRange{adaptor.getValue().getType(), adaptor.getDestination().getType(),
                   packedStride.getType(), zeroValue.getType(),
                   adaptor.getMask().getType()},
-        TypeRange{});
-    rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{}, args);
+        resultTypes);
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), calleeName,
+                                              resultTypes, args);
     state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-class LowerVstsPostOpPattern final
-    : public OpConversionPattern<pto::VstsPostOp> {
-public:
-  explicit LowerVstsPostOpPattern(TypeConverter &typeConverter,
-                                  MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<pto::VstsPostOp>(typeConverter, context),
-        state(state) {}
-
-  LogicalResult
-  matchAndRewrite(pto::VstsPostOp op, pto::VstsPostOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Type elementType = getElementTypeFromVectorLike(op.getValue().getType());
-    if (!elementType)
-      return rewriter.notifyMatchFailure(op, "unsupported vsts_post element type");
-
-    auto offsetBytes = convertElementOffsetToBytes(op, adaptor.getOffset(), elementType);
-    auto basePtr =
-        dyn_cast<LLVM::LLVMPointerType>(adaptor.getDestination().getType());
-    auto dist =
-        parseStoreDistImmediate(op.getDist().value_or(""), elementType);
-    if (failed(offsetBytes) || !basePtr || !dist) {
-      return rewriter.notifyMatchFailure(op,
-                                         "failed to materialize vsts_post operands");
-    }
-
-    Type updatedDestinationType =
-        this->getTypeConverter()->convertType(op.getUpdatedDestination().getType());
-    if (!updatedDestinationType || updatedDestinationType != adaptor.getDestination().getType()) {
-      return rewriter.notifyMatchFailure(op,
-                                         "failed to convert vsts_post result type");
-    }
-
-    FailureOr<StringRef> calleeName =
-        buildVstsPostCallee(op.getContext(), op.getValue().getType());
-    if (failed(calleeName))
-      return rewriter.notifyMatchFailure(op, "unsupported vsts_post signature");
-
-    Value distValue = getI32Constant(rewriter, op.getLoc(), *dist);
-    Value postValue = getI32Constant(rewriter, op.getLoc(), 1);
-    SmallVector<Value> args{adaptor.getValue(), adaptor.getDestination(), *offsetBytes,
-                            distValue, postValue, adaptor.getMask()};
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{adaptor.getValue().getType(), adaptor.getDestination().getType(),
-                  (*offsetBytes).getType(), distValue.getType(), postValue.getType(),
-                  adaptor.getMask().getType()},
-        TypeRange{updatedDestinationType});
-    auto call = rewriter.create<func::CallOp>(
-        op.getLoc(), *calleeName, TypeRange{updatedDestinationType}, args);
-    state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
-    rewriter.replaceOp(op, call.getResults());
+    if (usePostIntrinsic)
+      rewriter.replaceOp(op, call.getResults());
+    else
+      rewriter.eraseOp(op);
     return success();
   }
 
@@ -7485,12 +7428,11 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerRuntimeQueryOpPattern<pto::GetSubBlockIdxOp>,
                LowerRuntimeQueryOpPattern<pto::GetBlockNumOp>,
                LowerRuntimeQueryOpPattern<pto::GetSubBlockNumOp>,
-               LowerVldsOpPattern, LowerVldsPostOpPattern,
-               LowerVldsx2OpPattern, LowerVsldbOpPattern,
+               LowerVldsOpPattern, LowerVldsx2OpPattern, LowerVsldbOpPattern,
                LowerVldasOpPattern, LowerInitAlignOpPattern,
                LowerVldusOpPattern, LowerSprclrOpPattern,
                LowerVstsOpPattern, LowerVsstbOpPattern,
-               LowerVstsPostOpPattern, LowerVstsx2OpPattern,
+               LowerVstsx2OpPattern,
                LowerVstarOpPattern, LowerVstasOpPattern,
                LowerVgather2OpPattern, LowerVgather2BcOpPattern,
                LowerVgatherbOpPattern, LowerVscatterOpPattern,
@@ -7555,10 +7497,9 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::StoreVfSimtInfoOp,
                       pto::SetMovPadValOp, pto::SetQuantPreOp>();
   target.addIllegalOp<pto::Sbitset0Op, pto::Sbitset1Op>();
-  target.addIllegalOp<pto::VldsOp, pto::VldsPostOp, pto::Vldsx2Op,
-                      pto::VsldbOp, pto::VldasOp, pto::InitAlignOp,
-                      pto::VldusOp, pto::SprclrOp, pto::VstsOp,
-                      pto::VsstbOp, pto::VstsPostOp, pto::Vstsx2Op,
+  target.addIllegalOp<pto::VldsOp, pto::Vldsx2Op, pto::VsldbOp,
+                      pto::VldasOp, pto::InitAlignOp, pto::VldusOp,
+                      pto::SprclrOp, pto::VstsOp, pto::VsstbOp, pto::Vstsx2Op,
                       pto::VstarOp, pto::VstasOp, pto::Vgather2Op,
                       pto::Vgather2BcOp, pto::VgatherbOp, pto::VscatterOp,
                       pto::PldiOp, pto::PldsOp, pto::PstiOp, pto::PstsOp,

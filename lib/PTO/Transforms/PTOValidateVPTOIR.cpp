@@ -199,8 +199,8 @@ public:
             CopyCbufToUbufOp, CopyUbufToCbufOp>(op))
       return VPTOBufferAddressFamily::Copy;
 
-    if (isa<VldsPostOp, VstsPostOp, VldasOp, VldusOp, PstuOp, VstusOp, VsturOp,
-            MadOp, MadMxOp, CopyGmToCbufOp, LoadCbufToCaOp,
+    if (isa<VldasOp, VldusOp, PstuOp, VstusOp, VsturOp, MadOp, MadMxOp,
+            CopyGmToCbufOp, LoadCbufToCaOp,
             LoadCbufToCbOp, CopyMatrixCcToGmOp>(op))
       return VPTOBufferAddressFamily::PtrOnly;
 
@@ -323,8 +323,6 @@ private:
     Value value;
     if (auto vsts = dyn_cast<VstsOp>(op))
       value = vsts.getValue();
-    else if (auto vstsPost = dyn_cast<VstsPostOp>(op))
-      value = vstsPost.getValue();
     else
       return std::nullopt;
 
@@ -450,8 +448,7 @@ private:
 
   template <typename OpTy>
   static LogicalResult validateValueMaskVectorConsumer(OpTy op) {
-    if constexpr (std::is_same_v<OpTy, VstsOp> ||
-                  std::is_same_v<OpTy, VstsPostOp>) {
+    if constexpr (std::is_same_v<OpTy, VstsOp>) {
       if (std::optional<VPTOMaskGranularity> expected =
               inferVstsMaskGranularityOverride(op.getOperation())) {
         auto actual =
@@ -487,10 +484,6 @@ private:
 
     if (auto vsts = dyn_cast<VstsOp>(op)) {
       emitForStore(vsts);
-      return;
-    }
-    if (auto vstsPost = dyn_cast<VstsPostOp>(op)) {
-      emitForStore(vstsPost);
       return;
     }
   }
@@ -711,7 +704,7 @@ private:
         .Case<Vgather2BcOp, VsldbOp>([](auto concreteOp) {
           return validateResultMaskVectorConsumer(concreteOp);
         })
-        .Case<VstsOp, VstsPostOp, VsstbOp>([](auto concreteOp) {
+        .Case<VstsOp, VsstbOp>([](auto concreteOp) {
           return validateValueMaskVectorConsumer(concreteOp);
         })
         .Case<Vstsx2Op>([](Vstsx2Op concreteOp) {

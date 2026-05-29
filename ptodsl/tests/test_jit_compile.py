@@ -900,6 +900,29 @@ def public_data_movement_surface_probe():
     _ = blocked
 
 
+@pto.jit(target="a5", mode="explicit")
+def vector_post_update_surface_probe():
+    zero_u64 = pto.const(0, dtype=pto.ui64)
+    ub_src = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
+    ub_dst = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
+    mask32_full = pto.pset_b32(pto.MaskPattern.ALL)
+
+    vec, load_base = pto.vlds(ub_src, pto.const(0), return_updated_base=True)
+    store_base = pto.vsts(vec, ub_dst, pto.const(0), mask32_full, return_updated_base=True)
+    block_base = pto.vsstb(
+        vec,
+        ub_dst,
+        pto.i16(32),
+        pto.i16(0),
+        mask32_full,
+        return_updated_base=True,
+    )
+
+    _ = load_base
+    _ = store_base
+    _ = block_base
+
+
 @pto.jit(target="a5")
 def auto_mode_explicit_surface_violation_probe():
     zero_u64 = pto.const(0, dtype=pto.ui64)
@@ -1767,6 +1790,8 @@ def main() -> None:
     expect_parse_roundtrip_and_verify(sync_surface_text, "public sync surface specialization")
     data_movement_surface_text = public_data_movement_surface_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(data_movement_surface_text, "public data movement surface specialization")
+    vector_post_update_surface_text = vector_post_update_surface_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(vector_post_update_surface_text, "vector post-update surface specialization")
     expect("pto.mte_gm_ub" in public_surface_text, "mte_load(...) should lower to pto.mte_gm_ub")
     expect("pto.mte_ub_gm" in public_surface_text, "mte_store(...) should lower to pto.mte_ub_gm")
     expect(public_surface_text.count("pto.mem_bar") >= 1, "mem_bar(...) should still lower explicit memory barriers")
@@ -1802,6 +1827,14 @@ def main() -> None:
     expect("pto.vscatter" in data_movement_surface_text, "vscatter(...) should lower to pto.vscatter")
     expect("pto.vsldb" in data_movement_surface_text, "vsldb(...) should lower to pto.vsldb")
     expect("pto.vsstb" in data_movement_surface_text, "vsstb(...) should lower to pto.vsstb")
+    expect(
+        "-> !pto.vreg<64xf32>, !pto.ptr<f32, ub>" in vector_post_update_surface_text,
+        "vlds(..., return_updated_base=True) should request the updated base result",
+    )
+    expect(
+        vector_post_update_surface_text.count("-> !pto.ptr<f32, ub>") >= 2,
+        "vsts/vsstb(..., return_updated_base=True) should request updated base results",
+    )
     expect("pto.vstar" in data_movement_surface_text, "vstar(...) should lower to pto.vstar")
     expect("pto.vstas" in data_movement_surface_text, "vstas(...) should lower to pto.vstas")
     expect("pto.mte_l1_l0b" in public_surface_text, "mte_l1_l0b(...) should lower to pto.mte_l1_l0b")
