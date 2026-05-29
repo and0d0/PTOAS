@@ -1718,21 +1718,29 @@ static LogicalResult verifyRowReductionDstLayout(Operation *op, Type ty,
       return op->emitOpError() << "expects " << name
                                << " to use a DN-style column vector tile or legacy ND-style tile";
   }
-  return success();
-  auto valid = getValidShapeVec(ty);
-  if (valid.size() != 2)
-    return op->emitOpError() << "expects " << name << " to have rank-2 valid_shape";
-  if (valid[1] != ShapedType::kDynamic && valid[1] != 1)
-    return op->emitOpError() << "expects " << name << " valid_shape[1] to be 1";
+  // The dst valid_shape[1] == 1 constraint for row reductions is enforced in
+  // verifyRowReductionValidRegion (it must be conditional on the no-op-marker
+  // path), so it is intentionally not duplicated here. A previous unreachable
+  // copy of that check lived after this return and has been removed.
   return success();
 }
 
 static LogicalResult verifyRowReductionValidRegion(Operation *op, Type srcTy,
-                                                   Type dstTy) {
+                                                   Type dstTy,
+                                                   bool allowEmptyMarker) {
   auto srcValid = getValidShapeVec(srcTy);
   auto dstValid = getValidShapeVec(dstTy);
   if (srcValid.size() != 2 || dstValid.size() != 2)
     return op->emitOpError("expects src and dst to have rank-2 valid_shape");
+  // A fully-empty dst valid region (0x0) is PyPTO's dual-AIV no-op replay
+  // marker: the op writes no elements, so accept it and skip the non-empty
+  // structural constraints. Only plain reductions opt in (allowEmptyMarker);
+  // arg reductions (trowargmax/trowargmin) still produce a real per-row index,
+  // so they stay strict. One-sided empties (only one dim 0) still fall through
+  // and are rejected below. Hardware Rv=0 no-op is tracked in pto-isa#143;
+  // PTOAS only guarantees the IR is legal here.
+  if (allowEmptyMarker && dstValid[0] == 0 && dstValid[1] == 0)
+    return success();
   if (srcValid[0] != ShapedType::kDynamic && srcValid[0] == 0)
     return op->emitOpError("expects src valid_shape[0] to be non-zero");
   if (srcValid[1] != ShapedType::kDynamic && srcValid[1] == 0)
@@ -1758,7 +1766,8 @@ static LogicalResult verifyTRowReductionNoTmpCommon(Operation *op, Type srcTy,
     return failure();
   if (getElemTy(srcTy) != getElemTy(dstTy))
     return op->emitOpError("expects src and dst to have the same element type");
-  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy)))
+  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy,
+                                           /*allowEmptyMarker=*/true)))
     return failure();
   if (!isSupportedRowReductionElemType(getElemTy(srcTy)))
     return op->emitOpError(elemTypeError);
@@ -1777,7 +1786,8 @@ static LogicalResult verifyTRowReductionWithTmpCommon(Operation *op, Type srcTy,
     return failure();
   if (getElemTy(srcTy) != getElemTy(dstTy))
     return op->emitOpError("expects src and dst to have the same element type");
-  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy)))
+  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy,
+                                           /*allowEmptyMarker=*/true)))
     return failure();
   if (!isSupportedRowReductionElemType(getElemTy(srcTy)))
     return op->emitOpError(elemTypeError);
@@ -1793,7 +1803,10 @@ static LogicalResult verifyTRowArgReductionCommon(Operation *op, Type srcTy,
   if (failed(verifyTileBufSameElemType(op, srcTy, tmpTy, "src", "tmp")) ||
       failed(verifyTileBufSameValidShape(op, srcTy, tmpTy, "src", "tmp")))
     return failure();
-  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy)))
+  // Arg reductions still emit a real per-row index, so the empty-region no-op
+  // marker is not accepted here (unlike plain trowmax/trowsum above).
+  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy,
+                                           /*allowEmptyMarker=*/false)))
     return failure();
   Type srcElem = getElemTy(srcTy);
   if (!isSupportedRowReductionElemType(srcElem))
@@ -1826,6 +1839,15 @@ static LogicalResult verifyColReductionValidRegion(Operation *op, Type srcTy,
   auto dstValid = getValidShapeVec(dstTy);
   if (srcValid.size() != 2 || dstValid.size() != 2)
     return op->emitOpError("expects src and dst to have rank-2 valid_shape");
+  // Fully-empty dst valid region (0x0): dual-AIV no-op replay marker. The op
+  // writes no elements; accept and skip the non-empty constraints. One-sided
+  // empties still fall through. See pto-isa#143 for hardware Rv=0 no-op.
+  // Col arg reductions (tcolargmax/tcolargmin) never reach this point with a
+  // 0x0 dst: verifyColArgReductionDstLayout enforces dst valid_shape[0] == 1
+  // first, so they stay strict without needing a flag here (unlike the row
+  // path, whose dst-layout check does not constrain valid).
+  if (dstValid[0] == 0 && dstValid[1] == 0)
+    return success();
   if (requireNonZeroSrc) {
     if (srcValid[0] != ShapedType::kDynamic && srcValid[0] == 0)
       return op->emitOpError("expects src valid_shape[0] to be non-zero");
@@ -8486,6 +8508,11 @@ mlir::LogicalResult mlir::pto::TRowExpandOp::verify() {
     auto dstValid = getValidShapeVec(getDst());
     if (srcValid.size() != 2 || dstValid.size() != 2)
       return emitOpError("expects src and dst to have rank-2 valid_shape");
+    // Fully-empty dst valid region (0x0): dual-AIV no-op replay marker. The op
+    // writes no elements; accept and skip the non-empty constraints. One-sided
+    // empties still fall through. See pto-isa#143 for hardware Rv=0 no-op.
+    if (dstValid[0] == 0 && dstValid[1] == 0)
+      return success();
     if (srcValid[0] != ShapedType::kDynamic && dstValid[0] != ShapedType::kDynamic &&
         srcValid[0] != dstValid[0])
       return emitOpError("expects src and dst to have the same valid_shape[0]");
@@ -8949,6 +8976,20 @@ static LogicalResult verifyTRowExpandReduceLikeOp(Operation *op, Type src0Ty,
   if (src0Valid.size() != 2 || src1Valid.size() != 2 || dstValid.size() != 2)
     return op->emitOpError("expects src0, src1, and dst to have rank-2 valid_shape");
 
+  // Operand-form invariant, enforced regardless of the valid region: A5 has no
+  // tmp form for these ops. Must run before the empty-marker early-accept below,
+  // otherwise a 0x0 dst would let an A5 tmp form slip through and lower to the
+  // A2/A3 4-operand TROWEXPAND* call.
+  if (hasTmp && targetArch == PTOArch::A5)
+    return op->emitOpError("expects A5 form to omit tmp");
+
+  // Fully-empty dst valid region (0x0): dual-AIV no-op replay marker. Element
+  // type/layout were already checked above; the op writes no elements, so accept
+  // and skip the non-empty broadcast/width constraints. One-sided empties still
+  // fall through. See pto-isa#143 for hardware Rv=0 no-op.
+  if (dstValid[0] == 0 && dstValid[1] == 0)
+    return success();
+
   if (dstValid[0] != ShapedType::kDynamic && dstValid[0] == 0)
     return op->emitOpError("expects dst valid_shape[0] to be non-zero");
   if (dstValid[1] != ShapedType::kDynamic && dstValid[1] == 0)
@@ -9018,8 +9059,7 @@ static LogicalResult verifyTRowExpandReduceLikeOp(Operation *op, Type src0Ty,
                                      targetArch == PTOArch::A3);
   };
 
-  if (hasTmp && targetArch == PTOArch::A5)
-    return op->emitOpError("expects A5 form to omit tmp");
+  // (A5 tmp-form invariant is checked earlier, before the empty-marker accept.)
 
   if (src0MatchesDst) {
     if (succeeded(checkFullAndBroadcast(src0Ty, src0Valid, "src0", src1Ty,
@@ -10425,6 +10465,44 @@ void mlir::pto::SubViewOp::print(OpAsmPrinter &printer) {
   printer << " : " << getSource().getType() << " -> " << getResult().getType();
 }
 
+// The inferred result type derives valid_shape from `sizes` (or the explicit
+// valid operands). With the operand omitted the result type is authoritative for
+// the valid extent (any static value, including the v=0 no-op-replay marker or a
+// partial valid), so accept a static declared valid that differs from the
+// size-inferred one here; SubViewOp::verify() enforces the precise per-path rule
+// (operand clamping vs the [0, size] range). Only a dynamic declared valid that
+// disagrees with the inferred extent is incompatible -- it needs an explicit
+// operand to supply the runtime value. Every other difference (shape, element
+// type, address space, config) is still rejected as the default check would.
+bool SubViewOp::isCompatibleReturnTypes(TypeRange lhs, TypeRange rhs) {
+  if (lhs.size() != rhs.size())
+    return false;
+  for (auto [inferred, declared] : llvm::zip(lhs, rhs)) {
+    if (inferred == declared)
+      continue;
+    auto inferredTb = dyn_cast<TileBufType>(inferred);
+    auto declaredTb = dyn_cast<TileBufType>(declared);
+    if (!inferredTb || !declaredTb)
+      return false;
+    if (inferredTb.getShape() != declaredTb.getShape() ||
+        inferredTb.getElementType() != declaredTb.getElementType() ||
+        inferredTb.getMemorySpace() != declaredTb.getMemorySpace() ||
+        inferredTb.getConfigAttr() != declaredTb.getConfigAttr())
+      return false;
+    auto inferredValid = inferredTb.getValidShape();
+    auto declaredValid = declaredTb.getValidShape();
+    if (inferredValid.size() != declaredValid.size())
+      return false;
+    for (auto [inferredDim, declaredDim] : llvm::zip(inferredValid, declaredValid)) {
+      // Any static declared valid extent is accepted in place of the inferred
+      // one; only a dynamic declared valid that disagrees is incompatible.
+      if (inferredDim != declaredDim && declaredDim == ShapedType::kDynamic)
+        return false;
+    }
+  }
+  return true;
+}
+
 LogicalResult SubViewOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> location, ValueRange operands,
     DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
@@ -10704,9 +10782,19 @@ mlir::LogicalResult mlir::pto::SubViewOp::verify() {
   auto dstValid = dstTy.getValidShape();
   if (dstValid.size() != 2)
     return emitOpError("expects result to have rank-2 valid_shape");
-  if (dstValid[0] != expectedVRow)
+  // With the valid operand omitted, the result type is authoritative for the
+  // valid extent: accept any static value in [0, size] (this subsumes both the
+  // full-size default and the v=0 no-op-replay empty marker). Lowering derives
+  // the bind_tile valid operand from this type. A dynamic result valid still
+  // requires an explicit operand to supply the runtime extent, so it stays
+  // rejected on this path.
+  bool rowInferred = !getValidRow() && dstValid[0] != ShapedType::kDynamic &&
+                     dstValid[0] >= 0 && dstValid[0] <= sizeR;
+  bool colInferred = !getValidCol() && dstValid[1] != ShapedType::kDynamic &&
+                     dstValid[1] >= 0 && dstValid[1] <= sizeC;
+  if (dstValid[0] != expectedVRow && !rowInferred)
     return emitOpError("expects result valid_shape[0] to match inferred/explicit valid_row");
-  if (dstValid[1] != expectedVCol)
+  if (dstValid[1] != expectedVCol && !colInferred)
     return emitOpError("expects result valid_shape[1] to match inferred/explicit valid_col");
 
   auto cfg = srcTy.getConfigAttr();
