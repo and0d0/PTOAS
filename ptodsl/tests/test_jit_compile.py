@@ -116,6 +116,23 @@ def pointer_runtime_shape_specialization_probe(
     pto.tile.load(x_part, x_tile)
 
 
+@pto.jit(target="a5")
+def tile_transfer_surface_probe(
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+    *,
+    BLOCK: pto.constexpr = 128,
+):
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
+    a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, valid_shape=[rows, cols])
+    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, valid_shape=[rows, cols])
+    pto.load_tile(a_view, a_tile, offset=[0, 0])
+    pto.store_tile(o_tile, o_view, offsets=[0, 0])
+
+
 @pto.jit(target="a5", insert_sync=False)
 def host_vec_copy_no_insert_sync(
     A_ptr: pto.ptr(pto.f32, "gm"),
@@ -1187,6 +1204,8 @@ def main() -> None:
         "mad_mx",
         "mad_mx_acc",
         "mad_mx_bias",
+        "load_tile",
+        "store_tile",
         "empty_like",
     ]
     for name in expected_public_exports:
@@ -1591,6 +1610,18 @@ def main() -> None:
             runtime_metadata_text,
         ) is not None,
         "partition_view sizes derived from tensor metadata should remain runtime MLIR values",
+    )
+
+    tile_transfer_text = tile_transfer_surface_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(tile_transfer_text, "tile transfer surface specialization")
+    expect("pto.tload" in tile_transfer_text, "pto.load_tile(...) should lower to pto.tload")
+    expect("pto.tstore" in tile_transfer_text, "pto.store_tile(...) should lower to pto.tstore")
+    expect(
+        re.search(
+            r"sizes = \[%[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+\]",
+            tile_transfer_text,
+        ) is not None,
+        "load_tile/store_tile should infer partition sizes from tile.valid_shape",
     )
 
     authored_addr_tile_text = authored_addr_tile_surface_probe.compile().mlir_text()

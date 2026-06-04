@@ -6,6 +6,16 @@ This chapter covers every operation that moves data between memory spaces in PTO
 
 Tile ops move entire blocks between Global Memory and the Unified Buffer in a single call. They are the primary data movement interface inside `@pto.jit`.
 
+Use `pto.load_tile(view, tile, offset=[...])` and `pto.store_tile(tile, view, offset=[...])` when the GM partition is only needed for that transfer. These helpers build the `partition_view` internally and infer `sizes` from `tile.valid_shape` when the tensor-view rank matches the tile rank:
+
+```python
+a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, valid_shape=[1, cols])
+pto.load_tile(a_view, a_tile, offset=[row, 0])
+pto.store_tile(a_tile, o_view, offset=[row, 0])
+```
+
+For rank-changing layouts, pass `sizes=` explicitly or keep using `partition_view(...)` plus `pto.tile.load/store`.
+
 #### `pto.tile.load(partition: PartitionTensorView, tile: Tile) -> None`
 
 **Description**: Copies data from a GM partition into a UB tile. The transfer size is determined by the partition's `sizes` and the tile's shape — they must be compatible.

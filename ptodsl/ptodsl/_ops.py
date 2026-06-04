@@ -1632,6 +1632,116 @@ def partition_view(tv, *, offsets, sizes):
     )
 
 
+def _tile_logical_rank(tile, *, context: str) -> int:
+    shape = getattr(tile, "shape", None)
+    if shape is not None:
+        return len(shape)
+    parsed = parse_tile_type_metadata(unwrap_surface_value(tile).type)
+    if parsed is not None:
+        return len(parsed["shape_dims"])
+    raise TypeError(f"{context} requires tile shape metadata to infer sizes")
+
+
+def _source_view_rank(tv, *, context: str) -> int:
+    shape = getattr(tv, "shape", None)
+    if shape is not None:
+        return len(shape)
+    raw_type = unwrap_surface_value(tv).type
+    try:
+        return _pto.TensorViewType(raw_type).rank
+    except Exception:
+        try:
+            return _pto.PartitionTensorViewType(raw_type).rank
+        except Exception as exc:
+            raise TypeError(f"{context} expects a tensor view or partition tensor view, got {raw_type}") from exc
+
+
+def _normalize_transfer_offsets(tv, *, offset, offsets, context: str):
+    if offset is not None and offsets is not None:
+        raise TypeError(f"{context} accepts only one of offset= or offsets=")
+    authored_offsets = offsets if offsets is not None else offset
+    if authored_offsets is None:
+        return [0] * _source_view_rank(tv, context=context)
+    if isinstance(authored_offsets, tuple):
+        return list(authored_offsets)
+    if isinstance(authored_offsets, list):
+        return authored_offsets
+    return [authored_offsets]
+
+
+def _normalize_transfer_sizes(sizes):
+    if isinstance(sizes, tuple):
+        return list(sizes)
+    if isinstance(sizes, list):
+        return sizes
+    return [sizes]
+
+
+def _infer_tile_transfer_sizes(tile, *, context: str):
+    if not hasattr(tile, "valid_shape"):
+        raise TypeError(f"{context} requires tile valid_shape metadata to infer sizes")
+    return [tile.valid_shape[index] for index in range(_tile_logical_rank(tile, context=context))]
+
+
+def _tile_transfer_partition(tv, tile, *, offset=None, offsets=None, sizes=None, context: str):
+    normalized_offsets = _normalize_transfer_offsets(
+        tv,
+        offset=offset,
+        offsets=offsets,
+        context=context,
+    )
+    normalized_sizes = (
+        _infer_tile_transfer_sizes(tile, context=context)
+        if sizes is None
+        else _normalize_transfer_sizes(sizes)
+    )
+    if len(normalized_offsets) != len(normalized_sizes):
+        if sizes is None:
+            raise ValueError(
+                f"{context} cannot infer partition sizes for rank-{len(normalized_offsets)} view "
+                f"from rank-{len(normalized_sizes)} tile; pass sizes= explicitly"
+            )
+        raise ValueError(
+            f"{context} expects offset rank and sizes rank to match, got "
+            f"{len(normalized_offsets)} and {len(normalized_sizes)}"
+        )
+    return partition_view(tv, offsets=normalized_offsets, sizes=normalized_sizes)
+
+
+def load_tile(src, dst_tile, *, offset=None, offsets=None, sizes=None):
+    """
+    Load a tensor-view partition into ``dst_tile``.
+
+    ``sizes`` defaults to ``dst_tile.valid_shape`` when the view and tile ranks match.
+    """
+    part = _tile_transfer_partition(
+        src,
+        dst_tile,
+        offset=offset,
+        offsets=offsets,
+        sizes=sizes,
+        context="load_tile(...)",
+    )
+    tload(part, dst_tile)
+
+
+def store_tile(src_tile, dst, *, offset=None, offsets=None, sizes=None):
+    """
+    Store ``src_tile`` into a tensor-view partition.
+
+    ``sizes`` defaults to ``src_tile.valid_shape`` when the view and tile ranks match.
+    """
+    part = _tile_transfer_partition(
+        dst,
+        src_tile,
+        offset=offset,
+        offsets=offsets,
+        sizes=sizes,
+        context="store_tile(...)",
+    )
+    tstore(src_tile, part)
+
+
 def alloc_tile(
     tile_type=None,
     *,
@@ -3917,6 +4027,7 @@ __all__ = [
     "vaxpy", "vaddrelu", "vsubrelu",
     "vsel",
     "make_tensor_view", "partition_view",
+    "load_tile", "store_tile",
     "alloc_tile",
     "tload", "tstore", "tmov",
     "tadd", "tsub", "tmul", "tdiv", "tmax", "tmin",

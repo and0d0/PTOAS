@@ -386,6 +386,8 @@ pto.vadd(a, b, mask)   # infers result type from a.type
 pto.vmul / vmax / vdiv / vcmax / vcadd / vdup / vexpdif  # similarly
 pto.make_tensor_view(ptr, shape=…, strides=…)    # type inferred
 pto.partition_view(tv, offsets=…, sizes=…)        # type inferred
+pto.load_tile(tv, tile, offset=…)                 # partition + tile.load, sizes inferred from tile
+pto.store_tile(tile, tv, offset=…)                # partition + tile.store, sizes inferred from tile
 pto.alloc_tile(shape=…, dtype=…, memory_space=…, valid_shape=…, addr=…)  # authored surface
 pto.tile.load(part, tile)
 pto.tile.store(tile, part)
