@@ -10,7 +10,7 @@ name: Watchdog
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["ci-sim"]
     types: [completed]
 
 permissions:
