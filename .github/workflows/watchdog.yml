@@ -16,6 +16,7 @@ on:
 permissions:
   actions: write
   contents: read
+  pull-requests: read
 
 jobs:
   rerun-self-hosted-git-failure:
