@@ -112,6 +112,29 @@ static LogicalResult verifyVPTOScalarAccessTypes(Operation *op, Type ptrTy,
   return success();
 }
 
+static LogicalResult verifyVPTOContiguousVectorAccess(Operation *op,
+                                                      Type ptrType,
+                                                      VectorType vectorType) {
+  auto ptrTy = dyn_cast<PtrType>(ptrType);
+  if (!ptrTy)
+    return op->emitOpError() << "requires !pto.ptr pointer operand";
+
+  if (ptrTy.getMemorySpace().getAddressSpace() != AddressSpace::VEC)
+    return op->emitOpError() << "requires UB pointer";
+
+  if (!ptrTy.getElementType().isF32())
+    return op->emitOpError() << "currently supports only f32 pointer element type";
+
+  if (vectorType.getElementType() != ptrTy.getElementType())
+    return op->emitOpError()
+           << "requires vector element type to match pointer element type";
+
+  if (vectorType.getRank() != 1 || vectorType.getDimSize(0) != 4)
+    return op->emitOpError() << "currently supports only vector<4xf32>";
+
+  return success();
+}
+
 static bool isMaskGranularityAdjacentWidening(StringRef inputGranularity,
                                               StringRef resultGranularity) {
   return (inputGranularity == "b8" && resultGranularity == "b16") ||
@@ -537,6 +560,18 @@ LogicalResult PTOStoreOp::verify() {
                                          getValue().getType(), "store")))
     return failure();
   return success();
+}
+
+LogicalResult PTOLoadContiguousOp::verify() {
+  auto vectorType = cast<VectorType>(getValue().getType());
+  return verifyVPTOContiguousVectorAccess(getOperation(), getPtr().getType(),
+                                          vectorType);
+}
+
+LogicalResult PTOStoreContiguousOp::verify() {
+  auto vectorType = cast<VectorType>(getValue().getType());
+  return verifyVPTOContiguousVectorAccess(getOperation(), getPtr().getType(),
+                                          vectorType);
 }
 
 LogicalResult PTOLdgOp::verify() {
