@@ -8850,6 +8850,94 @@ private:
   LoweringState &state;
 };
 
+static Type getConvertedPtoPointerElementType(const TypeConverter *typeConverter,
+                                              Type ptrType) {
+  auto ptoPtrType = dyn_cast<pto::PtrType>(ptrType);
+  if (!ptoPtrType)
+    return Type();
+  return typeConverter->convertType(ptoPtrType.getElementType());
+}
+
+class ConvertPtoLoadContiguousOp final
+    : public OpConversionPattern<pto::PTOLoadContiguousOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::PTOLoadContiguousOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto llvmPtrType = dyn_cast<LLVM::LLVMPointerType>(adaptor.getPtr().getType());
+    if (!llvmPtrType)
+      return rewriter.notifyMatchFailure(op, "expected LLVM pointer operand");
+
+    Type convertedVectorType =
+        getTypeConverter()->convertType(op.getValue().getType());
+    if (!convertedVectorType)
+      return rewriter.notifyMatchFailure(
+          op, "could not convert load_contiguous result type");
+
+    Type convertedElementType = getConvertedPtoPointerElementType(
+        getTypeConverter(), op.getPtr().getType());
+    if (!convertedElementType)
+      return rewriter.notifyMatchFailure(
+          op, "could not convert load_contiguous pointer element type");
+
+    Value offset = adaptor.getOffset();
+    if (offset.getType().isIndex())
+      offset = rewriter.create<arith::IndexCastUIOp>(op.getLoc(),
+                                                     rewriter.getI64Type(), offset);
+
+    Value elemPtr = adaptor.getPtr();
+    if (!matchPattern(offset, m_Zero())) {
+      elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
+                                             convertedElementType,
+                                             adaptor.getPtr(), ValueRange{offset});
+    }
+
+    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(
+        op, convertedVectorType, elemPtr,
+        getNaturalByteAlignment(convertedVectorType));
+    return success();
+  }
+};
+
+class ConvertPtoStoreContiguousOp final
+    : public OpConversionPattern<pto::PTOStoreContiguousOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::PTOStoreContiguousOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto llvmPtrType = dyn_cast<LLVM::LLVMPointerType>(adaptor.getPtr().getType());
+    if (!llvmPtrType)
+      return rewriter.notifyMatchFailure(op, "expected LLVM pointer operand");
+
+    Type convertedElementType = getConvertedPtoPointerElementType(
+        getTypeConverter(), op.getPtr().getType());
+    if (!convertedElementType)
+      return rewriter.notifyMatchFailure(
+          op, "could not convert store_contiguous pointer element type");
+
+    Value offset = adaptor.getOffset();
+    if (offset.getType().isIndex())
+      offset = rewriter.create<arith::IndexCastUIOp>(op.getLoc(),
+                                                     rewriter.getI64Type(), offset);
+
+    Value elemPtr = adaptor.getPtr();
+    if (!matchPattern(offset, m_Zero())) {
+      elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
+                                             convertedElementType,
+                                             adaptor.getPtr(), ValueRange{offset});
+    }
+
+    rewriter.replaceOpWithNewOp<LLVM::StoreOp>(
+        op, adaptor.getValue(), elemPtr,
+        getNaturalByteAlignment(adaptor.getValue().getType()));
+    return success();
+  }
+};
+
 static Type getLdgCallResultType(Type valueType, Type convertedValueType,
                                  ConversionPatternRewriter &rewriter) {
   if (auto intType = dyn_cast<IntegerType>(valueType)) {
@@ -9501,6 +9589,7 @@ static LogicalResult lowerVPTOTypes(ModuleOp module, llvm::raw_ostream &diagOS) 
       });
   target.addIllegalOp<pto::AddPtrOp, pto::CastPtrOp, pto::LoadScalarOp,
                       pto::StoreScalarOp, pto::PTOLoadOp, pto::PTOStoreOp,
+                      pto::PTOLoadContiguousOp, pto::PTOStoreContiguousOp,
                       pto::PTOLdgOp, pto::PTOStgOp>();
   target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
       [&](UnrealizedConversionCastOp op) {
@@ -9518,6 +9607,8 @@ static LogicalResult lowerVPTOTypes(ModuleOp module, llvm::raw_ostream &diagOS) 
   patterns.add<ConvertPtoLoadOp, ConvertPtoStoreOp, ConvertPtoLdgOp,
                ConvertPtoStgOp>(
       typeConverter, context, state);
+  patterns.add<ConvertPtoLoadContiguousOp, ConvertPtoStoreContiguousOp>(
+      typeConverter, context);
   patterns.add<ConvertVPTOUnrealizedCastOp>(typeConverter, context);
   patterns.add<ConvertVPTOTypedCarrierOp>(typeConverter, context);
 
