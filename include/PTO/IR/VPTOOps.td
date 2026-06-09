@@ -68,6 +68,10 @@ def PTO_V2F32Type : Type<
         "::llvm::cast<::mlir::VectorType>($_self).getDimSize(0) == 2 && "
         "::llvm::cast<::mlir::VectorType>($_self).getElementType().isF32()">,
   "vector<2xf32>">;
+def PTO_ContiguousVectorType : Type<
+  CPred<"::llvm::isa<::mlir::VectorType>($_self) && "
+        "::llvm::cast<::mlir::VectorType>($_self).getRank() == 1">,
+  "1-D builtin vector type for contiguous element access">;
 def PTO_V2F8E4M3FNType : Type<
   CPred<"::llvm::isa<::mlir::VectorType>($_self) && "
         "::llvm::cast<::mlir::VectorType>($_self).getRank() == 1 && "
@@ -143,6 +147,53 @@ def PTOStoreOp : PTO_Op<"store", [
 
   let assemblyFormat = [{
     $value `,` $ptr `[` $offset `]` attr-dict `:` type($ptr) `,` type($value)
+  }];
+}
+
+def PTOLoadContiguousOp : PTO_Op<"load_contiguous"> {
+  let summary = "Load a contiguous 1-D vector from a VPTO pointer-like operand.";
+  let description = [{
+    Loads a contiguous vector window starting at `ptr[offset]`. The offset is
+    expressed in scalar pointer elements, not vector chunks. For example,
+    loading `vector<4xf32>` from `!pto.ptr<f32, ub>` at offset `%i` reads
+    elements `%i`, `%i + 1`, `%i + 2`, and `%i + 3`.
+  }];
+
+  let arguments = (ins
+    PTO_BufferLikeType:$ptr,
+    Index:$offset
+  );
+
+  let results = (outs PTO_ContiguousVectorType:$value);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $ptr `[` $offset `]` attr-dict `:` type($ptr) `->` type($value)
+  }];
+}
+
+def PTOStoreContiguousOp : PTO_Op<"store_contiguous"> {
+  let summary = "Store a contiguous 1-D vector to a VPTO pointer-like operand.";
+  let description = [{
+    Stores a contiguous vector window starting at `ptr[offset]`. The offset is
+    expressed in scalar pointer elements, not vector chunks. For example,
+    storing `vector<4xf32>` to `!pto.ptr<f32, ub>` at offset `%i` writes
+    elements `%i`, `%i + 1`, `%i + 2`, and `%i + 3`.
+  }];
+
+  let arguments = (ins
+    PTO_ContiguousVectorType:$value,
+    PTO_BufferLikeType:$ptr,
+    Index:$offset
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $value `,` $ptr `[` $offset `]` attr-dict `:` type($value) `,` type($ptr)
   }];
 }
 
