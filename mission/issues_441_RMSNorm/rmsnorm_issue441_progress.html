@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Issue #441 RMSNorm 实施进展记录</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-soft: #182236;
+      --panel-strong: #0b1220;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --line: #334155;
+      --cyan: #22d3ee;
+      --blue: #60a5fa;
+      --green: #34d399;
+      --yellow: #fbbf24;
+      --red: #f87171;
+      --gray: #64748b;
+      --radius: 20px;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      line-height: 1.6;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(34, 211, 238, 0.20), transparent 32rem),
+        radial-gradient(circle at 90% 8%, rgba(96, 165, 250, 0.18), transparent 28rem),
+        var(--bg);
+    }
+
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 34px 24px 64px;
+    }
+
+    .hero,
+    .sidebar,
+    .step,
+    .note,
+    .next-panel {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.94), rgba(15, 23, 42, 0.94));
+      border-radius: var(--radius);
+      box-shadow: 0 18px 54px rgba(0, 0, 0, 0.30);
+    }
+
+    .hero {
+      padding: 28px 30px;
+      margin-bottom: 22px;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(30px, 4.6vw, 52px);
+      line-height: 1.05;
+      letter-spacing: -0.04em;
+    }
+
+    h2 { margin: 0 0 14px; font-size: 23px; }
+    h3 { margin: 0 0 8px; font-size: 18px; }
+    p { margin: 0 0 10px; }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      color: #bfdbfe;
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      padding: 1px 6px;
+      border-radius: 7px;
+    }
+
+    pre {
+      margin: 10px 0 0;
+      overflow-x: auto;
+      background: rgba(2, 6, 23, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 14px;
+      padding: 13px;
+      color: #dbeafe;
+      font-size: 13px;
+    }
+
+    .lead {
+      color: #cbd5e1;
+      font-size: 18px;
+      max-width: 980px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .badge,
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.10);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      color: #dbeafe;
+    }
+
+    .badge { padding: 6px 10px; font-size: 12px; }
+    .status { padding: 4px 8px; font-size: 12px; margin-bottom: 8px; }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--gray);
+    }
+    .dot.done { background: var(--green); }
+    .dot.next { background: var(--yellow); }
+    .dot.risk { background: var(--red); }
+
+    .workspace {
+      position: relative;
+    }
+
+    .sidebar {
+      position: fixed;
+      top: 18px;
+      bottom: 18px;
+      left: max(18px, calc((100vw - 1440px) / 2 + 24px));
+      z-index: 20;
+      width: 72px;
+      overflow: hidden;
+      max-height: calc(100vh - 36px);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      transition: width 180ms ease, box-shadow 180ms ease;
+    }
+
+    .sidebar[open] {
+      width: min(390px, calc(100vw - 36px));
+      box-shadow: 26px 18px 80px rgba(0, 0, 0, 0.38);
+    }
+
+    .sidebar summary {
+      cursor: pointer;
+      list-style: none;
+      min-height: 74px;
+      padding: 18px 14px;
+      background: linear-gradient(180deg, rgba(36, 50, 71, 0.95), rgba(15, 23, 42, 0.95));
+      border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      user-select: none;
+    }
+
+    .sidebar:not([open]) summary {
+      height: 100%;
+      flex-direction: column;
+      justify-content: center;
+      border-bottom: 0;
+      padding: 16px 10px;
+    }
+
+    .sidebar summary::-webkit-details-marker { display: none; }
+
+    .summary-title {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .summary-title strong { font-size: 20px; }
+    .summary-title span { color: var(--muted); font-size: 12px; }
+
+    .sidebar:not([open]) .summary-title {
+      align-items: center;
+    }
+
+    .sidebar:not([open]) .summary-title strong {
+      writing-mode: vertical-rl;
+      letter-spacing: 0.12em;
+      font-size: 14px;
+    }
+
+    .sidebar:not([open]) .summary-title span { display: none; }
+
+    .chevron {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      color: var(--cyan);
+      background: rgba(34, 211, 238, 0.10);
+      border: 1px solid rgba(34, 211, 238, 0.22);
+      transition: transform 160ms ease;
+    }
+
+    .sidebar[open] .chevron { transform: rotate(90deg); }
+
+    .sidebar:not([open]) .chevron { transform: rotate(0deg); }
+
+    .sidebar-content {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+      overflow: auto;
+    }
+
+    .sidebar:not([open]) .sidebar-content { display: none; }
+
+    .sidebar-kicker {
+      display: inline-flex;
+      width: fit-content;
+      margin-bottom: 6px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      color: #67e8f9;
+      background: rgba(34, 211, 238, 0.10);
+      border: 1px solid rgba(34, 211, 238, 0.18);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .conclusion-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .conclusion-list li,
+    .side-card {
+      padding: 12px 13px;
+      background: rgba(15, 23, 42, 0.58);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 14px;
+      color: #cbd5e1;
+      font-size: 14px;
+    }
+
+    .side-card h4 {
+      margin: 0 0 6px;
+      color: #e0f2fe;
+      font-size: 14px;
+    }
+
+    .side-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .sidebar-block {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(2, 6, 23, 0.30);
+      border: 1px solid rgba(148, 163, 184, 0.13);
+    }
+
+    .side-progress {
+      display: grid;
+      gap: 9px;
+      margin-top: 8px;
+    }
+
+    .progress-row {
+      display: grid;
+      grid-template-columns: 18px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      color: #cbd5e1;
+      font-size: 13px;
+    }
+
+    .progress-row small { color: var(--muted); }
+
+    .main-flow {
+      display: grid;
+      gap: 18px;
+      margin-left: 414px;
+      transition: margin-left 180ms ease;
+    }
+
+    .workspace:has(.sidebar:not([open])) .main-flow {
+      margin-left: 94px;
+    }
+
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .overview-card {
+      padding: 16px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.74), rgba(15, 23, 42, 0.82));
+      border: 1px solid rgba(148, 163, 184, 0.16);
+    }
+
+    .overview-card strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #e0f2fe;
+      font-size: 14px;
+    }
+
+    .overview-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .next-panel {
+      padding: 18px 20px;
+      border-color: rgba(251, 191, 36, 0.42);
+      background: linear-gradient(180deg, rgba(69, 47, 15, 0.40), rgba(15, 23, 42, 0.94));
+    }
+
+    .next-panel p { color: #fde68a; }
+
+    .timeline {
+      display: grid;
+      gap: 14px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      overflow: hidden;
+    }
+
+    .step-label {
+      padding: 18px 14px;
+      background: rgba(15, 23, 42, 0.72);
+      border-right: 1px solid rgba(148, 163, 184, 0.16);
+    }
+
+    .step-label strong {
+      display: block;
+      font-size: 28px;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+
+    .step-label span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .step-body {
+      padding: 18px;
+    }
+
+    .step-body p {
+      color: #cbd5e1;
+    }
+
+    .cols {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .mini {
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.55);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 14px;
+      min-height: 104px;
+    }
+
+    .mini h4 {
+      margin: 0 0 7px;
+      font-size: 13px;
+      color: #e0f2fe;
+    }
+
+    .mini ul {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .mini li { margin: 4px 0; }
+
+    .note {
+      padding: 18px 20px;
+    }
+
+    .note p { color: #cbd5e1; }
+
+    @media (max-width: 1040px) {
+      .sidebar {
+        position: static;
+        width: auto;
+        max-height: none;
+        margin-bottom: 18px;
+      }
+      .sidebar[open] { width: auto; box-shadow: 0 18px 54px rgba(0, 0, 0, 0.30); }
+      .sidebar:not([open]) summary { height: auto; flex-direction: row; justify-content: space-between; }
+      .sidebar:not([open]) .summary-title strong { writing-mode: initial; letter-spacing: initial; font-size: 20px; }
+      .sidebar-content { overflow: visible; }
+      .main-flow,
+      .workspace:has(.sidebar:not([open])) .main-flow { margin-left: 0; }
+      .overview-grid { grid-template-columns: 1fr; }
+      .cols { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 720px) {
+      .page { padding: 22px 14px 44px; }
+      .step { grid-template-columns: 1fr; }
+      .step-label { border-right: 0; border-bottom: 1px solid rgba(148, 163, 184, 0.16); }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <h1>Issue #441 RMSNorm 实施进展记录</h1>
+      <p class="lead">记录围绕 TileLang RMSNorm 设计文档和 issue #441 的讨论与实施步骤。当前路线：先从 VPTO 底层新增一个专门表达 4-lane 连续访存的 IR 接口，后续再接 verifier、lowering、scratch、allreduce helper 和 PTODSL 前端样例。</p>
+      <div class="badge-row">
+        <span class="badge"><span class="dot done"></span>已生成分层计划 HTML</span>
+        <span class="badge"><span class="dot done"></span>已回滚扩展现有 pto.load/store 的方案</span>
+        <span class="badge"><span class="dot done"></span>已新增 load_contiguous/store_contiguous ODS</span>
+        <span class="badge"><span class="dot done"></span>已新增第一版 verifier</span>
+        <span class="badge"><span class="dot done"></span>已新增 parser/verifier lit 测试</span>
+        <span class="badge"><span class="dot done"></span>已实现 LLVM lowering 代码</span>
+        <span class="badge"><span class="dot risk"></span>本地构建被 LLVM 环境兼容问题阻塞</span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <details class="sidebar" open>
+        <summary>
+          <span class="summary-title">
+            <strong>当前结论</strong>
+            <span>点击可展开 / 收起；这里放“现在到底做到哪了”</span>
+          </span>
+          <span class="chevron">›</span>
+        </summary>
+        <div class="sidebar-content">
+          <div class="sidebar-block">
+            <span class="sidebar-kicker">Decision</span>
+            <ul class="conclusion-list">
+              <li><strong>第一阶段目标：</strong>只支持 RMSNorm 需要的 <code>vector&lt;4xf32&gt;</code> UB 连续访存。</li>
+              <li><strong>实现路线：</strong>先做 VPTO 底层 op，再做 LLVM lowering，最后往 PTODSL 包装。</li>
+              <li><strong>不改老接口：</strong>不扩展现有 <code>pto.load/store</code>，避免影响已有标量路径。</li>
+              <li><strong>新接口：</strong><code>pto.load_contiguous</code> / <code>pto.store_contiguous</code> 表达连续 vector 窗口。</li>
+              <li><strong>暂不做：</strong>allreduce helper、<code>x_frag[32]</code>、完整 RMSNorm、persistent W。</li>
+            </ul>
+          </div>
+
+          <div class="sidebar-block">
+            <span class="sidebar-kicker">Progress</span>
+            <div class="side-progress">
+              <div class="progress-row"><span class="dot done"></span><span>新增 VPTO op</span><small>完成</small></div>
+              <div class="progress-row"><span class="dot done"></span><span>新增 verifier</span><small>完成</small></div>
+              <div class="progress-row"><span class="dot done"></span><span>新增 lit 测试</span><small>完成</small></div>
+              <div class="progress-row"><span class="dot done"></span><span>接 LLVM lowering</span><small>代码完成</small></div>
+              <div class="progress-row"><span class="dot"></span><span>接 PTODSL 前端</span><small>未开始</small></div>
+            </div>
+          </div>
+
+          <div class="side-card">
+            <h4>当前改动文件</h4>
+            <p><code>include/PTO/IR/VPTOOps.td</code>、<code>lib/PTO/IR/VPTO.cpp</code>、<code>lib/PTO/Transforms/VPTOLLVMEmitter.cpp</code>、三个 <code>test/lit/vpto</code> 测试，以及本进度 HTML。</p>
+          </div>
+
+          <div class="side-card">
+            <h4>术语速查</h4>
+            <p><strong>lowering：</strong>把高层 IR 翻译成更底层 IR。<br><strong>GEP：</strong>LLVM 里的地址计算。<br><strong>UB：</strong>片上高速缓存空间。</p>
+          </div>
+        </div>
+      </details>
+
+      <section class="main-flow">
+        <section class="next-panel">
+          <h2>当前状态：LLVM lowering 代码已写</h2>
+          <p>已把 <code>pto.load_contiguous/store_contiguous</code> 接到 LLVM lowering：地址计算按单个 <code>f32</code> 元素缩放，实际读写类型是 <code>vector&lt;4xf32&gt;</code>。本地验证暂时被当前 LLVM 构建环境里的低精度类型和 <code>SimtEntry</code> 兼容问题阻塞。</p>
+        </section>
+
+        <section class="overview-grid">
+          <article class="overview-card">
+            <strong>现在在第几层？</strong>
+            <p>正在做 VPTO 后端层：先让 IR 能表达 RMSNorm 的 4-lane 连续访存。</p>
+          </article>
+          <article class="overview-card">
+            <strong>为什么先做这里？</strong>
+            <p>因为 issue #441 需要的最终代码形态是底层连续 vector load/store，先把底座打通。</p>
+          </article>
+          <article class="overview-card">
+            <strong>离完整 RMSNorm 多远？</strong>
+            <p>lowering 代码已写；还差通过环境验证、lane-local scratch、allreduce helper、PTODSL 包装和前端样例。</p>
+          </article>
+        </section>
+
+        <section class="timeline">
+          <article class="step">
+            <div class="step-label"><strong>0</strong><span>理解需求</span></div>
+            <div class="step-body"><span class="status"><span class="dot done"></span>Done</span><h3>从 md 与 issue #441 收敛目标</h3><p>确认第一阶段不是完整 RMSNorm，而是先抓两个固定 pattern：4-lane 连续访存，以及后续的 sum/f32/128 allreduce helper。</p></div>
+          </article>
+
+          <article class="step">
+            <div class="step-label"><strong>1</strong><span>计划图</span></div>
+            <div class="step-body"><span class="status"><span class="dot done"></span>Done</span><h3>生成总体分层实施图</h3><p>新增 <code>docs/designs/rmsnorm-vpto-ptodsl-implementation-plan.html</code>，说明从 Ascend 参考形态到 PTODSL surface 的整体路线。</p></div>
+          </article>
+
+          <article class="step">
+            <div class="step-label"><strong>2</strong><span>路线纠偏</span></div>
+            <div class="step-body"><span class="status"><span class="dot done"></span>Done</span><h3>回滚扩展现有 pto.load/store 的尝试</h3><p>决定不改变现有 <code>pto.load/store</code> 的标量语义，而是新增专门接口，避免影响已有路径。</p></div>
+          </article>
+
+          <article class="step">
+            <div class="step-label"><strong>3</strong><span>新增 op</span></div>
+            <div class="step-body">
+              <span class="status"><span class="dot done"></span>Done</span>
+              <h3>新增底层 VPTO op：load_contiguous / store_contiguous</h3>
+              <p>在 ODS 中新增两个底层 IR op，用来表达“从 ptr[offset] 开始连续读/写一段 vector”。</p>
+              <pre><code>%v = pto.load_contiguous %src[%off]
+    : !pto.ptr&lt;f32, ub&gt; -&gt; vector&lt;4xf32&gt;
+
+pto.store_contiguous %v, %dst[%off]
+    : vector&lt;4xf32&gt;, !pto.ptr&lt;f32, ub&gt;</code></pre>
+            </div>
+          </article>
+
+          <article class="step">
+            <div class="step-label"><strong>4</strong><span>Verifier</span></div>
+            <div class="step-body">
+              <span class="status"><span class="dot done"></span>Done</span>
+              <h3>给新 op 加第一版合法性检查</h3>
+              <p>现在新 op 只允许 RMSNorm 当前需要的最窄形态：UB 指针、f32 元素、<code>vector&lt;4xf32&gt;</code>。</p>
+              <div class="cols"><div class="mini"><h4>文件</h4><ul><li><code>include/PTO/IR/VPTOOps.td</code></li><li><code>lib/PTO/IR/VPTO.cpp</code></li></ul></div><div class="mini"><h4>白话解释</h4><ul><li>verifier 是“合法性检查器”</li><li>防止把 f32 指针读成错误类型</li></ul></div><div class="mini"><h4>当前限制</h4><ul><li>只支持 <code>!pto.ptr&lt;f32, ub&gt;</code></li><li>只支持 <code>vector&lt;4xf32&gt;</code></li><li>不支持 GM/f16/vector8</li></ul></div></div>
+            </div>
+          </article>
+
+          <article class="step">
+            <div class="step-label"><strong>5</strong><span>测试</span></div>
+            <div class="step-body">
+              <span class="status"><span class="dot done"></span>Done</span>
+              <h3>新增 parser/verifier lit 测试</h3>
+              <p>新增正例 roundtrip 测试和 GM 指针反例测试。它们只验证新 op 的语法与合法性检查，不验证 LLVM lowering。</p>
+              <div class="cols"><div class="mini"><h4>新增文件</h4><ul><li><code>test/lit/vpto/load_contiguous_roundtrip.pto</code></li><li><code>test/lit/vpto/load_contiguous_verify_invalid.pto</code></li></ul></div><div class="mini"><h4>验证什么</h4><ul><li>合法 <code>vector&lt;4xf32&gt;</code> 能通过</li><li>GM 指针报错</li></ul></div><div class="mini"><h4>所属层级</h4><ul><li>测试层</li><li>parser/verifier 验证</li><li>不是 lowering</li></ul></div></div>
+            </div>
+          </article>
+
+          <article class="step">
+            <div class="step-label"><strong>6</strong><span>Lowering</span></div>
+            <div class="step-body">
+              <span class="status"><span class="dot done"></span>Code Done</span>
+              <h3>新增 VPTO 到 LLVM 的连续访存转换</h3>
+              <p>在 <code>VPTOLLVMEmitter.cpp</code> 中新增 <code>load_contiguous/store_contiguous</code> lowering。白话说：把 PTOAS 自己的新 op 翻译成 LLVM 能继续处理的 vector load/store。</p>
+              <div class="cols"><div class="mini"><h4>新增文件</h4><ul><li><code>test/lit/vpto/load_contiguous_vpto_llvm.pto</code></li></ul></div><div class="mini"><h4>关键点</h4><ul><li>GEP 按 scalar <code>f32</code> 缩放</li><li>load/store 类型是 <code>vector&lt;4xf32&gt;</code></li></ul></div><div class="mini"><h4>验证状态</h4><ul><li>本地构建被 LLVM 环境兼容问题阻塞</li><li>新增代码的 const 编译问题已修</li></ul></div></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="note"><h2>当前还没做的事情</h2><p><code>VPTOLLVMEmitter</code> lowering 代码已经写入，但还需要在匹配的 LLVM/MLIR 环境下跑通构建和 lit；还没有实现 <code>x_frag[32]</code>；还没有实现 allreduce helper；还没有写 PTODSL 的 <code>simt_load4/store4</code>。</p></section>
+      </section>
+    </section>
+  </main>
+</body>
+</html>
