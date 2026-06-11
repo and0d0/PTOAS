@@ -157,6 +157,18 @@ enum TNotifyMteDrainMask : unsigned {
 static constexpr llvm::StringLiteral kLastUseAttrName = "pto.last_use";
 static constexpr llvm::StringLiteral kLastUseMarkerPrefix = "PTOAS__LAST_USE__";
 
+static int64_t getAPIntSignedValue(const APInt &value) {
+  return value.getBitWidth() == 0 ? 0 : value.getSExtValue();
+}
+
+static uint64_t getAPIntUnsignedValue(const APInt &value) {
+  return value.getBitWidth() == 0 ? 0 : value.getZExtValue();
+}
+
+static int64_t getIntegerAttrSignedValue(IntegerAttr attr) {
+  return getAPIntSignedValue(attr.getValue());
+}
+
 static SmallVector<unsigned, 4> collectTileOperandNumbers(Operation *op) {
   SmallVector<unsigned, 4> tileOperandNumbers;
   for (OpOperand &operand : op->getOpOperands()) {
@@ -845,7 +857,7 @@ static std::optional<std::string> getEmitCTileTypeString(pto::TileBufType type) 
 
   int32_t fractal = 512;
   if (auto frAttr = dyn_cast<IntegerAttr>(configAttr.getSFractalSize()))
-    fractal = frAttr.getInt();
+    fractal = static_cast<int32_t>(getIntegerAttrSignedValue(frAttr));
 
   return std::string("Tile<") +
          tileRoleToken(type.getMemorySpace(), elemTy, type.getConfigAttr()) + ", " +
@@ -1157,14 +1169,15 @@ static FailureOr<std::string> buildTPipeTokenFromInitOp(Operation *op,
         getTPipeDirectionToken(/*isL2G2L=*/true, initOp.getDirMask(), targetArch);
     if (failed(dirTok))
       return failure();
-    int32_t localSlotNum = initOp.getLocalSlotNumAttr()
-                               ? initOp.getLocalSlotNumAttr().getInt()
-                               : initOp.getSlotNum();
-    return buildTPipeToken(initOp.getFlagBaseAttr().getInt(), *dirTok,
-                           initOp.getSlotSize(), initOp.getSlotNum(),
-                           localSlotNum,
-                           initOp.getNosplitAttr() &&
-                               initOp.getNosplitAttr().getValue());
+    int32_t localSlotNum =
+        initOp.getLocalSlotNumAttr()
+            ? static_cast<int32_t>(
+                  getIntegerAttrSignedValue(initOp.getLocalSlotNumAttr()))
+            : initOp.getSlotNum();
+    return buildTPipeToken(
+        static_cast<int32_t>(getIntegerAttrSignedValue(initOp.getFlagBaseAttr())),
+        *dirTok, initOp.getSlotSize(), initOp.getSlotNum(), localSlotNum,
+        initOp.getNosplitAttr() && initOp.getNosplitAttr().getValue());
   }
 
   if (auto initOp = dyn_cast<pto::InitializeL2LPipeOp>(op)) {
@@ -1174,10 +1187,10 @@ static FailureOr<std::string> buildTPipeTokenFromInitOp(Operation *op,
         getTPipeDirectionToken(/*isL2G2L=*/false, initOp.getDirMask(), targetArch);
     if (failed(dirTok))
       return failure();
-    return buildTPipeToken(initOp.getFlagBaseAttr().getInt(), *dirTok,
-                           initOp.getSlotSize(), initOp.getSlotNum(), 2,
-                           initOp.getNosplitAttr() &&
-                               initOp.getNosplitAttr().getValue());
+    return buildTPipeToken(
+        static_cast<int32_t>(getIntegerAttrSignedValue(initOp.getFlagBaseAttr())),
+        *dirTok, initOp.getSlotSize(), initOp.getSlotNum(), 2,
+        initOp.getNosplitAttr() && initOp.getNosplitAttr().getValue());
   }
 
   return failure();
@@ -1348,7 +1361,8 @@ static InterCoreSyncCallDesc buildInterCoreSyncSetCall(
   if (targetArch == PTOArch::A3) {
     auto indexTy = emitc::OpaqueType::get(ctx, "int64_t");
     Value eventVal =
-        makeEmitCIntConstant(rewriter, loc, indexTy, eventIdAttr.getInt());
+        makeEmitCIntConstant(rewriter, loc, indexTy,
+                             getIntegerAttrSignedValue(eventIdAttr));
     Value msgVal = createFFTSMsg(rewriter, loc, eventVal, fftsMode);
 
     InterCoreSyncCallDesc desc;
@@ -2827,11 +2841,6 @@ static Value makeEmitCIntConstant(ConversionPatternRewriter &rewriter,
   return makeEmitCOpaqueConstant(rewriter, loc, type, std::to_string(value));
 }
 
-static int64_t getIntegerAttrSignedValue(IntegerAttr attr) {
-  const APInt &value = attr.getValue();
-  return value.getBitWidth() == 0 ? 0 : value.getSExtValue();
-}
-
 static FailureOr<std::string> buildEmitCOpaqueConstantLiteral(Type targetType,
                                                               Attribute valueAttr) {
   auto opaqueTy = dyn_cast<emitc::OpaqueType>(targetType);
@@ -2856,7 +2865,7 @@ static FailureOr<std::string> buildEmitCOpaqueConstantLiteral(Type targetType,
       if (!first)
         os << ", ";
       first = false;
-      os << elem.getZExtValue();
+      os << getAPIntUnsignedValue(elem);
     }
     os << "}";
     os.flush();
@@ -3491,12 +3500,12 @@ struct SubviewToEmitCPattern : public OpConversionPattern<memref::SubViewOp> {
   std::optional<int64_t> extractStaticInt(OpFoldResult ofr) const {
     if (auto attr = ofr.dyn_cast<Attribute>()) {
       if (auto intAttr = dyn_cast<IntegerAttr>(attr))
-        return intAttr.getInt();
+        return getIntegerAttrSignedValue(intAttr);
     } else {
       Value v = ofr.dyn_cast<Value>();
       if (auto cOp = v.getDefiningOp<arith::ConstantOp>()) {
         if (auto iAttr = dyn_cast<IntegerAttr>(cOp.getValue()))
-          return iAttr.getInt();
+          return getIntegerAttrSignedValue(iAttr);
       } else if (auto idxOp = v.getDefiningOp<arith::ConstantIndexOp>()) {
         return idxOp.value();
       }
@@ -4346,7 +4355,7 @@ static FailureOr<Value> buildAsyncScratchTileValue(
 
   int32_t fractal = 512;
   if (auto frAttr = dyn_cast<IntegerAttr>(configAttr.getSFractalSize()))
-    fractal = frAttr.getInt();
+    fractal = static_cast<int32_t>(getIntegerAttrSignedValue(frAttr));
 
   Type elemTy = memTy.getElementType();
   pto::BLayout blayout = getTileBufBLayoutValue(configAttr);
@@ -4556,7 +4565,7 @@ struct PointerCastConversion : public OpConversionPattern<pto::PointerCastOp> {
     if (!v) return false;
     if (auto cst = v.getDefiningOp<arith::ConstantOp>()) {
        if (auto attr = dyn_cast<IntegerAttr>(cst.getValue())) {
-           outVal = attr.getInt();
+           outVal = getIntegerAttrSignedValue(attr);
            return true;
        }
     }
@@ -4623,7 +4632,8 @@ struct PointerCastConversion : public OpConversionPattern<pto::PointerCastOp> {
         std::string slStr = (slVal == 1) ? "SLayout::RowMajor" : (slVal == 2) ? "SLayout::ColMajor" : "SLayout::NoneBox";
 
         int32_t frVal = 0;
-        if (auto attr = dyn_cast<IntegerAttr>(config.getSFractalSize())) frVal = attr.getInt();
+        if (auto attr = dyn_cast<IntegerAttr>(config.getSFractalSize()))
+            frVal = static_cast<int32_t>(getIntegerAttrSignedValue(attr));
 
         int32_t padVal = 0;
         if (auto attr = dyn_cast<PadValueAttr>(config.getPad()))
@@ -6008,7 +6018,7 @@ struct PTOSyncSetToEmitC : public OpConversionPattern<mlir::pto::SyncSetOp> {
     Value eventIdDyn = adaptor.getEventIdDyn();
     int64_t fftsMode = 2;
     if (IntegerAttr fftsModeAttr = op.getFftsModeAttr())
-      fftsMode = fftsModeAttr.getInt();
+      fftsMode = getIntegerAttrSignedValue(fftsModeAttr);
 
     if ((eventIdAttr != nullptr) == static_cast<bool>(eventIdDyn))
       return rewriter.notifyMatchFailure(
@@ -6048,7 +6058,7 @@ struct PTOSyncSetToEmitC : public OpConversionPattern<mlir::pto::SyncSetOp> {
         emitSet(Value{}, eventIdAttr, /*isDynamic=*/false);
         if (needsMirrorPlus16) {
           auto plus16 = IntegerAttr::get(eventIdAttr.getType(),
-                                         eventIdAttr.getInt() + 16);
+                                         getIntegerAttrSignedValue(eventIdAttr) + 16);
           emitSet(Value{}, plus16, /*isDynamic=*/false);
         }
       } else {
@@ -6368,7 +6378,7 @@ struct PTOHistogramToEmitC : public OpConversionPattern<pto::THistogramOp> {
     int64_t byte = 1;
     auto byteAttr = op.getByteAttr();
     if (byteAttr)
-      byte = byteAttr.getInt();
+      byte = getIntegerAttrSignedValue(byteAttr);
     if (auto legacyIsMSB = op->getAttrOfType<BoolAttr>("isMSB")) {
       int64_t legacyByte = legacyIsMSB.getValue() ? 1 : 0;
       if (byteAttr && byte != legacyByte)
@@ -6889,14 +6899,28 @@ struct PTOBuildAsyncSessionToEmitC
       return makeEmitCOpaqueConstant(rewriter, loc, u32Ty,
                                      std::to_string(value) + "u");
     };
-    uint64_t syncId = op.getSyncIdAttr() ? op.getSyncIdAttr().getInt() : 0;
+    uint64_t syncId = op.getSyncIdAttr()
+                          ? static_cast<uint64_t>(
+                                getIntegerAttrSignedValue(op.getSyncIdAttr()))
+                          : 0;
     uint64_t blockBytes =
-        op.getBlockBytesAttr() ? op.getBlockBytesAttr().getInt() : 32 * 1024;
+        op.getBlockBytesAttr()
+            ? static_cast<uint64_t>(
+                  getIntegerAttrSignedValue(op.getBlockBytesAttr()))
+            : 32 * 1024;
     uint64_t commBlockOffset =
-        op.getCommBlockOffsetAttr() ? op.getCommBlockOffsetAttr().getInt() : 0;
-    uint64_t queueNum = op.getQueueNumAttr() ? op.getQueueNumAttr().getInt() : 1;
+        op.getCommBlockOffsetAttr()
+            ? static_cast<uint64_t>(
+                  getIntegerAttrSignedValue(op.getCommBlockOffsetAttr()))
+            : 0;
+    uint64_t queueNum = op.getQueueNumAttr()
+                            ? static_cast<uint64_t>(
+                                  getIntegerAttrSignedValue(op.getQueueNumAttr()))
+                            : 1;
     uint64_t channelGroupIdx = op.getChannelGroupIdxAttr()
-                                   ? op.getChannelGroupIdxAttr().getInt()
+                                   ? static_cast<uint64_t>(
+                                         getIntegerAttrSignedValue(
+                                             op.getChannelGroupIdxAttr()))
                                    : UINT32_MAX;
 
     Value syncIdVal = makeU32Const(syncId);
@@ -7621,7 +7645,7 @@ static std::optional<int64_t> getStaticIndexLikeValue(Value value) {
     return cst.value();
   if (auto cst = value.getDefiningOp<arith::ConstantOp>()) {
     if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValue()))
-      return intAttr.getInt();
+      return getIntegerAttrSignedValue(intAttr);
   }
   return std::nullopt;
 }
@@ -9445,7 +9469,7 @@ struct PTOGatherToEmitC : public OpConversionPattern<pto::TGatherOp> {
       std::string cmpTok = cmpAttr ? cmpModeTok(cmpAttr) : "CmpMode::EQ";
       int64_t offset = 0;
       if (auto offsetAttr = op.getOffsetAttr())
-        offset = offsetAttr.getInt();
+        offset = getIntegerAttrSignedValue(offsetAttr);
       auto i32Ty = emitc::OpaqueType::get(ctx, "int32_t");
       Value offsetVal = makeEmitCIntConstant(rewriter, loc, i32Ty, offset);
 
@@ -11727,7 +11751,7 @@ struct PTOXORSToEmitC : public OpConversionPattern<pto::TXorSOp> {
     SmallVector<Attribute, 1> templateArgVec;
     int64_t printFormat = 0;
     if (auto formatAttr = op.getPrintFormatAttr())
-      printFormat = formatAttr.getInt();
+      printFormat = getIntegerAttrSignedValue(formatAttr);
     if (printFormat != 0) {
       templateArgVec.push_back(
           emitc::OpaqueAttr::get(ctx, printFormatTok(printFormat)));
@@ -11842,13 +11866,13 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
     if (auto blAttr = dyn_cast<BLayoutAttr>(configAttr.getBLayout()))
       blVal = static_cast<int32_t>(blAttr.getValue());
     else if (auto intAttr = dyn_cast<IntegerAttr>(configAttr.getBLayout()))
-      blVal = static_cast<int32_t>(intAttr.getInt());
+      blVal = static_cast<int32_t>(getIntegerAttrSignedValue(intAttr));
 
     int32_t slVal = 0;
     if (auto slAttr = dyn_cast<SLayoutAttr>(configAttr.getSLayout()))
       slVal = static_cast<int32_t>(slAttr.getValue());
     else if (auto intAttr = dyn_cast<IntegerAttr>(configAttr.getSLayout()))
-      slVal = static_cast<int32_t>(intAttr.getInt());
+      slVal = static_cast<int32_t>(getIntegerAttrSignedValue(intAttr));
 
     bool boxed = slVal != 0;
     int64_t innerRows = 1;
@@ -11856,7 +11880,7 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
     if (boxed) {
       int32_t fractal = 512;
       if (auto frAttr = dyn_cast<IntegerAttr>(configAttr.getSFractalSize()))
-        fractal = static_cast<int32_t>(frAttr.getInt());
+        fractal = static_cast<int32_t>(getIntegerAttrSignedValue(frAttr));
 
       unsigned elemBytes = pto::getPTOStorageElemByteSize(elemTy);
       if (elemBytes == 0)
@@ -12116,7 +12140,7 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
 
       int32_t fractal = 512;
       if (auto frAttr = dyn_cast<IntegerAttr>(configAttr.getSFractalSize()))
-        fractal = frAttr.getInt();
+        fractal = static_cast<int32_t>(getIntegerAttrSignedValue(frAttr));
 
       std::string padTok = "PadValue::Null";
       if (auto padAttr = dyn_cast<PadValueAttr>(configAttr.getPad())) {
