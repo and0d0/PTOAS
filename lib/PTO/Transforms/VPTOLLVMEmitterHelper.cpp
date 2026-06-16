@@ -610,7 +610,7 @@ void attachHIVMKernelAnnotations(llvm::Module &llvmModule,
   for (llvm::Function &function : llvmModule) {
     if (function.isDeclaration())
       continue;
-    if (simtConfigByName.contains(function.getName())) {
+    if (function.getCallingConv() == llvm::CallingConv::SimtEntry) {
       uint32_t maxThreads = kDefaultSimtMaxThreads;
       uint32_t maxRegisters = kDefaultSimtMaxRegisters;
       if (auto it = simtConfigByName.find(function.getName());
