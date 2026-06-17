@@ -1207,6 +1207,14 @@ def carry_static_pyint_init_probe():
 
 
 @pto.jit(target="a5")
+def fixed_integer_index_coercion_probe():
+    count = pto.const(4)
+    mask, remained = pto.make_mask(pto.f32, count)
+    _ = mask
+    _ = remained
+
+
+@pto.jit(target="a5")
 def integer_loop_bound_probe(*, BLOCK: pto.const_expr = 8):
     row_start = pto.const(0, dtype=pto.i32)
     row_stop = pto.const(BLOCK, dtype=pto.i32)
@@ -1300,6 +1308,18 @@ def scalar_store_element_coercion_probe():
     scalar.store(row_stop, meta_ptr + 1)
     scalar.store(pto.const(2, dtype=pto.i64), meta_ptr + 2)
     scalar.store(3, meta_ptr + 3)
+
+
+@pto.jit(target="a5")
+def shared_index_coercion_probe():
+    limit = pto.const(4, dtype=pto.i32)
+    step = pto.const(1, dtype=pto.i32)
+    meta_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
+    meta_ptr = meta_tile.as_ptr()
+    with pto.for_(0, limit, step=step) as i:
+        ptr = pto.addptr(meta_ptr, limit)
+        scalar.store(i, ptr)
+        pto.wait_flag(pto.Pipe.V, pto.Pipe.MTE2, event_id=limit)
 
 
 @pto.simd
@@ -1842,6 +1862,49 @@ def public_data_movement_surface_probe():
 
 
 @pto.jit(target="a5", mode="explicit")
+def fixed_width_integer_specialization_probe():
+    zero_u64 = pto.const(0, dtype=pto.ui64)
+    gm_src = pto.castptr(zero_u64, pto.ptr(pto.f16, "gm"))
+    ub_src = pto.castptr(zero_u64, pto.ptr(pto.f16, "ub"))
+    ub_dst = pto.castptr(zero_u64, pto.ptr(pto.f16, "ub"))
+    l1_dst = pto.castptr(zero_u64, pto.ptr(pto.f16, "mat"))
+
+    mask32_full = pto.pset_b32(pto.MaskPattern.ALL)
+    index_stride = pto.const(32)
+    index_zero = pto.const(0)
+    blocked = pto.vsldb(ub_src, index_stride, index_zero, mask32_full)
+    pto.vsstb(blocked, ub_dst, index_stride, index_zero, mask32_full)
+
+    pto.mte_gm_l1_frac(
+        gm_src,
+        l1_dst,
+        pto.FractalMode.ND2NZ,
+        shape=(16, 4),
+        src_layout=(16, 256),
+        dst_group=(1, 0, 0, 0),
+        ctrl=(0, True),
+    )
+    pto.mte_gm_l1_frac(
+        gm_src,
+        l1_dst,
+        pto.FractalMode.ND2NZ,
+        shape=(16, 4),
+        src_layout=(16, 256),
+        dst_group=(1, 0, 0, 0),
+        ctrl=(0, 0),
+    )
+    pto.mte_gm_l1_frac(
+        gm_src,
+        l1_dst,
+        pto.FractalMode.ND2NZ,
+        shape=(16, 4),
+        src_layout=(16, 256),
+        dst_group=(1, 0, 0, 0),
+        ctrl=(0, 1),
+    )
+
+
+@pto.jit(target="a5", mode="explicit")
 def public_vector_conversion_surface_probe():
     zero_u64 = pto.const(0, dtype=pto.ui64)
     ub_f32 = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
@@ -2218,11 +2281,13 @@ def main() -> None:
     tile_valid_shape_update_probe.verify()
     tile_valid_shape_update_1d_probe.verify()
     make_mask_index_roundtrip_probe.verify()
+    fixed_integer_index_coercion_probe.verify()
     integer_loop_bound_probe.verify()
     scalar_pointer_offset_probe.verify()
     addptr_surface_probe.verify()
     simt_pointer_offset_probe.verify()
     scalar_store_element_coercion_probe.verify()
+    shared_index_coercion_probe.verify()
     public_surface_exports_probe.verify()
     compile_time_query_probe.verify()
     eager_scalar_constructor_probe.verify()
@@ -2236,6 +2301,7 @@ def main() -> None:
     explicit_runtime_index_integer_bitwise_event_probe.verify()
     ast_runtime_index_bitwise_event_probe.verify()
     public_data_movement_surface_probe.verify()
+    fixed_width_integer_specialization_probe.verify()
     public_vector_conversion_surface_probe.verify()
     vdup_surface_probe.verify()
     vmulscvt_surface_probe.verify()
@@ -2658,6 +2724,20 @@ def main() -> None:
     expect(
         "pto.plt_b32" in carry_static_pyint_init_text,
         "a carried Python int should remain compatible with make_mask(...) without manual pto.const(...) wrapping",
+    )
+
+    fixed_integer_index_coercion_text = fixed_integer_index_coercion_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(fixed_integer_index_coercion_text, "fixed integer index coercion specialization")
+    expect(
+        re.search(
+            r"arith\.index_cast %[a-zA-Z0-9_]+ : index to i32",
+            fixed_integer_index_coercion_text,
+        ) is not None,
+        "fixed-width integer parameters should coerce runtime index values through shared scalar adaptation",
+    )
+    expect(
+        "pto.plt_b32" in fixed_integer_index_coercion_text,
+        "make_mask(...) should still lower runtime index counts to the predicate-load scalar path",
     )
 
     SUBKERNEL_OBSERVATIONS.clear()
@@ -3454,6 +3534,23 @@ def main() -> None:
         scalar_store_coercion_text.count("pto.store") == 4,
         "scalar.store(...) coercion probe should still lower to four pto.store operations",
     )
+    expect(
+        re.search(r"pto\.store %\w+, %\d+\[%c0(?:_\d+)?\]", scalar_store_coercion_text) is not None,
+        "scalar.store(index, i32_ptr) should preserve explicit target coercion at offset 0",
+    )
+
+    shared_index_coercion_text = shared_index_coercion_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(shared_index_coercion_text, "shared index coercion specialization")
+    expect(
+        shared_index_coercion_text.count("arith.index_cast") >= 3,
+        "shared index coercion should cast one i32 value through loop bound, step, addptr, and event id paths",
+    )
+    expect("scf.for" in shared_index_coercion_text, "shared index coercion should lower i32 loop bounds to scf.for")
+    expect("pto.addptr" in shared_index_coercion_text, "shared index coercion should lower i32 pointer offsets")
+    expect(
+        "pto.wait_flag_dyn" in shared_index_coercion_text,
+        "shared index coercion should lower i32 event ids to dynamic wait_flag",
+    )
 
     public_surface_text = public_surface_exports_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(public_surface_text, "public surface export specialization")
@@ -3498,6 +3595,8 @@ def main() -> None:
     expect_parse_roundtrip_and_verify(vmulscvt_surface_text, "public vmulscvt surface specialization")
     vsstb_post_update_surface_text = vsstb_post_update_surface_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(vsstb_post_update_surface_text, "vsstb post-update surface specialization")
+    fixed_width_integer_text = fixed_width_integer_specialization_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(fixed_width_integer_text, "fixed-width integer specialization")
     expect("pto.mte_gm_ub" in public_surface_text, "mte_load(...) should lower to pto.mte_gm_ub")
     expect("pto.mte_ub_gm" in public_surface_text, "mte_store(...) should lower to pto.mte_ub_gm")
     expect(public_surface_text.count("pto.mem_bar") >= 1, "mem_bar(...) should still lower explicit memory barriers")
@@ -3575,6 +3674,18 @@ def main() -> None:
     expect("pto.vscatter" in data_movement_surface_text, "vscatter(...) should lower to pto.vscatter")
     expect("pto.vsldb" in data_movement_surface_text, "vsldb(...) should lower to pto.vsldb")
     expect("pto.vsstb" in data_movement_surface_text, "vsstb(...) should lower to pto.vsstb")
+    expect(
+        re.search(r"arith\.index_cast %[a-zA-Z0-9_]+ : index to i16", fixed_width_integer_text) is not None,
+        "vsldb/vsstb i16 operands should accept runtime index values through shared scalar adaptation",
+    )
+    expect(
+        fixed_width_integer_text.count("pto.mte_gm_l1_frac") == 3,
+        "mte_gm_l1_frac ctrl[1] should preserve bool, 0, and 1 i1 coercion cases",
+    )
+    expect(
+        fixed_width_integer_text.count("i1") >= 3,
+        "mte_gm_l1_frac ctrl[1] should materialize bool/0/1 as i1 values",
+    )
     expect("pto.vstar" in data_movement_surface_text, "vstar(...) should lower to pto.vstar")
     expect("pto.vstas" in data_movement_surface_text, "vstas(...) should lower to pto.vstas")
     expect("pto.vlds" in vector_conversion_surface_text, "vlds(..., post_update=ON) should lower through pto.vlds on the current VPTO Python surface")

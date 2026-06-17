@@ -66,6 +66,65 @@ def float_bitwise_probe():
 
 
 @pto.jit(target="a5")
+def float_literal_index_store_probe(ptr: pto.ptr(pto.index, "gm")):
+    scalar.store(1.5, ptr)
+
+
+@pto.jit(target="a5")
+def float_literal_index_binary_probe():
+    index_value = pto.const(1, dtype=pto.index)
+    _ = index_value + 1.5
+
+
+@pto.jit(target="a5")
+def same_width_float_store_probe():
+    f16_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f16, valid_shape=[1, 1])
+    bf16_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.bf16, valid_shape=[1, 1])
+    f16_value = scalar.load(f16_tile[0, 0])
+    scalar.store(f16_value, bf16_tile[0, 0])
+
+
+@pto.jit(target="a5")
+def bool_loop_bound_probe():
+    with pto.for_(0, True, step=1):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+
+@pto.jit(target="a5")
+def bool_addptr_offset_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
+    _ = pto.addptr(tile.as_ptr(), True)
+
+
+@pto.jit(target="a5")
+def bool_event_id_probe():
+    pto.wait_flag(pto.Pipe.V, pto.Pipe.MTE2, event_id=True)
+
+
+@pto.jit(target="a5")
+def bool_fixed_integer_probe():
+    _ = pto.make_mask(pto.f32, True)
+
+
+@pto.jit(target="a5")
+def bool_tile_element_probe():
+    tile = pto.alloc_tile(shape=[2, 8], dtype=pto.i32, valid_shape=[2, 4])
+    _ = scalar.load(tile[True, 0])
+
+
+@pto.jit(target="a5")
+def bool_address_sugar_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
+    _ = scalar.load(tile.as_ptr() + True)
+
+
+@pto.jit(target="a5")
+def bool_tile_slice_probe():
+    tile = pto.alloc_tile(shape=[8], dtype=pto.i32, valid_shape=[4])
+    _ = tile[True:]
+
+
+@pto.jit(target="a5")
 def carry_update_mismatch_probe(*, BLOCK: pto.const_expr = 8):
     acc = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     loop = pto.for_(0, 1, step=1).carry(acc=acc)
@@ -387,6 +446,68 @@ def main() -> None:
         TypeError,
         "runtime scalar bitwise operator",
         "expects integer-like operands",
+    )
+    expect_raises(
+        float_literal_index_store_probe.compile,
+        TypeError,
+        "scalar.store(...)",
+        "cannot materialize a floating-point literal against non-floating",
+        "index",
+    )
+    expect_raises(
+        float_literal_index_binary_probe.compile,
+        TypeError,
+        "runtime scalar operators cannot materialize a floating-point literal",
+        "index",
+    )
+    expect_raises(
+        same_width_float_store_probe.compile,
+        TypeError,
+        "cannot coerce between different floating-point types of the same width",
+        "f16",
+        "bf16",
+    )
+    expect_raises(
+        bool_loop_bound_probe.compile,
+        TypeError,
+        "pto.for_(...) loop bound",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_addptr_offset_probe.compile,
+        TypeError,
+        "addptr(ptr, offset)",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_event_id_probe.compile,
+        TypeError,
+        "wait_flag(..., event_id=...)",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_fixed_integer_probe.compile,
+        TypeError,
+        "make_mask(..., value)",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_tile_element_probe.compile,
+        TypeError,
+        "surface index value",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_address_sugar_probe.compile,
+        TypeError,
+        "surface index value",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_tile_slice_probe.compile,
+        TypeError,
+        "surface index value",
+        "does not accept bool values",
     )
     expect_raises(
         carry_update_mismatch_probe.compile,

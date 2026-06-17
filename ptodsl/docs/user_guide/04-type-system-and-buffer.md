@@ -25,7 +25,7 @@ This chapter covers every type you can use in a PTODSL kernel, plus the operatio
 | `pto.bf16` | Brain float 16 | 16 |
 | `pto.f32` | Single-precision float | 32 |
 
-Python literals are automatically typed by the tracer: `bool` → `pto.i1`, `int` → context-dependent (typically `pto.i32` or `pto.i64`), `float` → `pto.f32`.
+Python literals are typed by the tracer in contexts that accept them: `bool` → `pto.i1`, `int` → context-dependent (typically `pto.i32`, `pto.i64`, or `index`), `float` → a floating-point type. This does not mean every literal is accepted everywhere; for example, float literals are rejected in index-like and integer-only contexts.
 
 For explicit typing, use type constructors:
 

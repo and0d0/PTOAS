@@ -101,6 +101,53 @@ scalar.store(value, tile[row, col])
 scalar.store(value, ptr, offset)
 ```
 
+### Scalar value adaptation
+
+`scalar.store` adapts the authored `value` to the destination element type.
+Use this for normal scalar stores instead of manually materializing constants
+with a particular MLIR type.
+
+The adaptation rules are intentionally narrow:
+
+| Destination element type | Accepted values |
+|--------------------------|-----------------|
+| `index` | Python `int`, runtime `index`, runtime integer |
+| Integer types | Python `int`, runtime integer, runtime `index` |
+| Floating-point types | Python `int`/`float`, runtime float of the same format or a different width |
+
+Integer and `index` values are converted with `index_cast` where needed.
+Integer width changes use the destination type's signedness. Floating-point
+width changes use `extf` or `truncf`.
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.value_adaptation","symbol":"scalar_ops_value_adaptation_probe","compile":{}} -->
+```python
+int_ptr = int_tile.as_ptr()
+row = pto.const(0, dtype=pto.index)
+wide_count = pto.const(4, dtype=pto.i64)
+
+scalar.store(row, int_ptr + 0)          # runtime index -> i32 destination
+scalar.store(wide_count, int_ptr + 1)   # i64 -> i32 destination
+scalar.store(3, int_ptr + 2)            # Python int -> i32 destination
+
+half_value = scalar.load(f16_tile[0, 0])
+scalar.store(1.0, f32_tile[0, 0])       # Python float -> f32 destination
+scalar.store(half_value, f32_tile[0, 1]) # f16 -> f32 destination
+```
+
+The following conversions are not implicit:
+
+- Python `bool` is not accepted as a normal integer or index value.
+- A Python `float` literal is rejected for `index` and integer destinations.
+- Runtime floating-point values are rejected for `index` and integer
+  destinations.
+- Runtime `index` and integer values are rejected for floating-point
+  destinations.
+- `f16` and `bf16` are different formats even though both are 16-bit; PTODSL
+  does not silently reinterpret one as the other.
+
+Use an explicit conversion operation when you need a semantic numeric
+conversion, or a bitcast operation when you need bit reinterpretation.
+
 ---
 
 ### Typical SIMT usage
@@ -165,6 +212,12 @@ step = (N + BLOCK - 1) // BLOCK               # Python int arithmetic (trace-tim
 ```
 
 When both operands are PTO scalars (loaded from device memory or produced by another device-side op), `+`, `-`, `*`, `/` produce device-side arithmetic instructions. When one operand is a Python scalar (trace-time constant), the tracer embeds it as an immediate.
+
+Runtime scalar binary operators materialize Python literals against the other
+operand's type. `index` mixed with an integer runtime scalar stays in the
+`index` domain. Integer mixed with integer uses the wider integer type. Float
+operators require floating-point operands; Python float literals are not
+accepted in runtime `index` or integer expressions.
 
 ### Bitwise operators
 
@@ -290,6 +343,11 @@ ptr = pto.addptr(base_ptr, 1024)
 ```
 
 The `+` shorthand on pointers also counts in elements, not bytes.
+
+Pointer offsets are index-like. They accept Python `int`, runtime `index`, and
+runtime integer scalar values. Runtime integer offsets are converted to
+`index` before pointer arithmetic. Python `bool`, Python `float`, and runtime
+floating-point values are rejected.
 
 ---
 

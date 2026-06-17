@@ -857,6 +857,16 @@ FRAGMENT_FIXTURES = {
             {SNIPPET_PLACEHOLDER}
         """
     ),
+    "scalar_ops.value_adaptation": _fixture(
+        f"""
+        @pto.jit(target="a5")
+        def scalar_ops_value_adaptation_probe():
+            int_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
+            f16_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f16, valid_shape=[1, 1])
+            f32_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 2])
+            {SNIPPET_PLACEHOLDER}
+        """
+    ),
     "scalar_ops.pointer_sources": _fixture(
         f"""
         @pto.jit(target="a5")

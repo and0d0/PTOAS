@@ -32,7 +32,13 @@ from ._diagnostics import (
 )
 from ._host_tensors import resolve_tensor_data_entry
 from ._scalar_coercion import coerce_scalar_to_type, materialize_scalar_literal
-from ._runtime_scalar_ops import classify_runtime_scalar_type, emit_runtime_binary_op
+from ._scalar_adaptation import (
+    classify_runtime_scalar_type,
+    coerce_runtime_i1_value,
+    coerce_runtime_index_value,
+    coerce_runtime_integer_value,
+)
+from ._runtime_scalar_ops import emit_runtime_binary_op
 from ._surface_values import (
     MaskResultValue,
     PartitionTensorViewValue,
@@ -52,11 +58,9 @@ from ._surface_values import (
 )
 from ._types import (
     _isinstance_pto_type,
-    _integer_signedness,
     _materialize_integer_literal,
     _normalize_address_space,
     _resolve,
-    _strip_integer_signedness,
     mask_type,
     part_tensor_view_type,
     part_tensor_view_type_from_dims,
@@ -124,6 +128,8 @@ def _canonical_pipe_token(pipe):
 
 
 def _validate_static_event_id(event_id, *, context: str):
+    if isinstance(event_id, bool):
+        raise TypeError(f"{context} does not accept bool values")
     if isinstance(event_id, int) and not 0 <= event_id <= 7:
         raise ValueError(f"{context} expects static event_id in [0, 7], got {event_id}")
 
@@ -795,27 +801,7 @@ def vscatter(value, destination, offsets, mask):
 
 def _coerce_i16(value, *, context: str):
     raw_value = unwrap_surface_value(value)
-    i16_type = IntegerType.get_signless(16)
-    if isinstance(raw_value, bool):
-        raise TypeError(f"{context} does not accept bool values")
-    if isinstance(raw_value, int):
-        return _materialize_integer_literal(i16_type, raw_value)
-    kind = classify_runtime_scalar_type(raw_value.type)
-    if kind == "float":
-        raise TypeError(f"{context} expects an integer-like scalar, got {raw_value.type}")
-    if kind == "index":
-        return arith.IndexCastOp(i16_type, raw_value).result
-    signless_value = _strip_integer_signedness(raw_value)
-    if signless_value.type == i16_type:
-        return signless_value
-    width = IntegerType(raw_value.type).width
-    if width < 16:
-        if _integer_signedness(raw_value.type) == "unsigned":
-            return arith.ExtUIOp(i16_type, signless_value).result
-        return arith.ExtSIOp(i16_type, signless_value).result
-    if width > 16:
-        return arith.TruncIOp(i16_type, signless_value).result
-    return signless_value
+    return coerce_runtime_integer_value(raw_value, IntegerType.get_signless(16), context=context)
 
 
 def vsldb(source, block_stride, repeat_stride, mask):
@@ -1000,19 +986,12 @@ def _pointer_element_type(ptr_value, *, context: str):
 
 def _coerce_index(value, *, context: str):
     raw_value = unwrap_surface_value(value)
-    index_type = IndexType.get()
-    if isinstance(raw_value, bool):
-        raise TypeError(f"{context} does not accept bool values")
-    if isinstance(raw_value, int):
-        return arith.ConstantOp(index_type, raw_value).result
-    kind = classify_runtime_scalar_type(raw_value.type)
-    if kind == "float":
-        raise TypeError(f"{context} expects an index-like scalar, got {raw_value.type}")
-    if IndexType.isinstance(raw_value.type):
-        return raw_value
-    if IntegerType.isinstance(raw_value.type):
-        return arith.IndexCastOp(index_type, _strip_integer_signedness(raw_value)).result
-    raise TypeError(f"{context} expects an index-like scalar, got {raw_value.type}")
+    try:
+        return coerce_runtime_index_value(raw_value, context=context)
+    except TypeError as exc:
+        if hasattr(raw_value, "type"):
+            raise TypeError(f"{context} expects an index-like scalar, got {raw_value.type}") from exc
+        raise
 
 
 def init_align():
@@ -3219,79 +3198,17 @@ def _plt_op_for_mask_bits(mask_bits: int):
 
 def _coerce_i32(value, *, context: str):
     raw_value = unwrap_surface_value(value)
-    i32_type = IntegerType.get_signless(32)
-    if isinstance(raw_value, bool):
-        raise TypeError(f"{context} does not accept bool values")
-    if isinstance(raw_value, int):
-        return _materialize_integer_literal(i32_type, raw_value)
-    kind = classify_runtime_scalar_type(raw_value.type)
-    if kind == "float":
-        raise TypeError(f"{context} expects an integer-like scalar, got {raw_value.type}")
-    if kind == "index":
-        return arith.IndexCastOp(i32_type, raw_value).result
-    signless_value = _strip_integer_signedness(raw_value)
-    if signless_value.type == i32_type:
-        return signless_value
-    width = IntegerType(raw_value.type).width
-    if width < 32:
-        if _integer_signedness(raw_value.type) == "unsigned":
-            return arith.ExtUIOp(i32_type, signless_value).result
-        return arith.ExtSIOp(i32_type, signless_value).result
-    if width > 32:
-        return arith.TruncIOp(i32_type, signless_value).result
-    return signless_value
+    return coerce_runtime_integer_value(raw_value, IntegerType.get_signless(32), context=context)
 
 
 def _coerce_i64(value, *, context: str):
     raw_value = unwrap_surface_value(value)
-    i64_type = IntegerType.get_signless(64)
-    if isinstance(raw_value, bool):
-        raise TypeError(f"{context} does not accept bool values")
-    if isinstance(raw_value, int):
-        return _materialize_integer_literal(i64_type, raw_value)
-    kind = classify_runtime_scalar_type(raw_value.type)
-    if kind == "float":
-        raise TypeError(f"{context} expects an integer-like scalar, got {raw_value.type}")
-    if kind == "index":
-        return arith.IndexCastOp(i64_type, raw_value).result
-    signless_value = _strip_integer_signedness(raw_value)
-    if signless_value.type == i64_type:
-        return signless_value
-    width = IntegerType(raw_value.type).width
-    if width < 64:
-        if _integer_signedness(raw_value.type) == "unsigned":
-            return arith.ExtUIOp(i64_type, signless_value).result
-        return arith.ExtSIOp(i64_type, signless_value).result
-    if width > 64:
-        return arith.TruncIOp(i64_type, signless_value).result
-    return signless_value
+    return coerce_runtime_integer_value(raw_value, IntegerType.get_signless(64), context=context)
 
 
 def _coerce_i1(value, *, context: str):
     raw_value = unwrap_surface_value(value)
-    i1_type = IntegerType.get_signless(1)
-    if isinstance(raw_value, bool):
-        return _materialize_integer_literal(i1_type, int(raw_value))
-    if isinstance(raw_value, int):
-        if raw_value not in (0, 1):
-            raise ValueError(f"{context} expects a bool or 0/1 integer, got {raw_value}")
-        return _materialize_integer_literal(i1_type, raw_value)
-    kind = classify_runtime_scalar_type(raw_value.type)
-    if kind == "float":
-        raise TypeError(f"{context} expects a bool or integer-like scalar, got {raw_value.type}")
-    if kind == "index":
-        return arith.IndexCastOp(i1_type, raw_value).result
-    signless_value = _strip_integer_signedness(raw_value)
-    if signless_value.type == i1_type:
-        return signless_value
-    width = IntegerType(raw_value.type).width
-    if width < 1:
-        if _integer_signedness(raw_value.type) == "unsigned":
-            return arith.ExtUIOp(i1_type, signless_value).result
-        return arith.ExtSIOp(i1_type, signless_value).result
-    if width > 1:
-        return arith.TruncIOp(i1_type, signless_value).result
-    return signless_value
+    return coerce_runtime_i1_value(raw_value, context=context)
 
 
 def _i64_zero():
