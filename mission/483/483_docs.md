@@ -112,40 +112,76 @@ scalar.store(y4, y_ub, y_offset)
 
 ## 2. DSL vector type
 
-PTODSL needs a frontend vector type for fixed-width builtin vector values such as
-`vector<4xf32>`. This vector type is separate from PTO hardware vector-register
-values such as `!pto.vreg<NxT>`.
+PTODSL needs a frontend vector abstraction for fixed-width builtin vector values
+such as `vector<4xf32>`. This abstraction is used to type the values returned by
+contiguous memory loads, including the cases that were previously described as
+`load_contiguous(ptr, offset, lanes=4)` and
+`fragment_load_contiguous(fragment, offset, lanes=4)`.
 
-#### `pto.vec(dtype, lanes) -> VecType`
+This vector abstraction is separate from PTO hardware vector-register values
+such as `!pto.vreg<NxT>`.
 
-**Description**: Constructs a DSL vector type with `lanes` elements of `dtype`.
+#### `pto.vec(dtype, lanes) -> VecType` *(TBD)*
 
-**Parameters**:
+**Description**: TBD. Pure type-construction syntax is not required by the current RMSNorm kernel because contiguous loads can infer their vector result type from the pointer element type and `contiguous`. Keep this form as a possible type annotation/documentation helper, not as required kernel syntax.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `dtype` | PTODSL scalar dtype | Element type, for example `pto.f32` or `pto.i32`. |
-| `lanes` | `int` | Number of elements in the vector. For RMSNorm float4 access, use `4`. |
-
-**Returns**:
-
-| Return Value | Type | Description |
-|--------------|------|-------------|
-| `vec_type` | `VecType` | DSL vector type, for example `pto.vec(pto.f32, 4)`. |
-
-**Example**:
+If kept, the RMSNorm documentation example would be:
 
 ```python
 f32x4 = pto.vec(pto.f32, 4)
 ```
 
+This means:
+
+```text
+DSL type: pto.vec(pto.f32, 4)
+Lowering type: vector<4xf32>
+```
+
+In the actual RMSNorm kernel, this explicit type spelling is usually unnecessary. Values produced from contiguous loads get the type implicitly. For example:
+
+```python
+x4 = scalar.load(x_ub, x_offset, contiguous=4)
+```
+
+If `x_ub` points to `f32`, then:
+
+```text
+x4 is a VecValue
+x4 has DSL type pto.vec(pto.f32, 4)
+x4 lowers as vector<4xf32>
+```
+
+The same applies to lane-local storage:
+
+```python
+w4 = scalar.load(w_frag, frag_offset, contiguous=4)
+```
+
+If `w_frag` points to `f32`, then `w4` has the same DSL type
+`pto.vec(pto.f32, 4)` and lowers as `vector<4xf32>`.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `dtype` | PTODSL scalar dtype | Vector element type. RMSNorm uses `pto.f32`. |
+| `lanes` | `int` | Number of vector elements. RMSNorm float4 access uses `4`. |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `vec_type` | `VecType` | TBD pure type object for builtin vectors, for example `pto.vec(pto.f32, 4)`. |
+
 ---
 
-#### `pto.vec(dtype, lanes)(value) -> VecValue`
+#### `pto.vec(dtype, lanes, *, init=value) -> VecValue`
 
-**Description**: Constructs a vector value. When `value` is scalar, the scalar is
-broadcast to all vector lanes. This replaces the previous proposed
-`vf_splat_f32x4` helper.
+**Description**: Constructs a vector value of type `pto.vec(dtype, lanes)`. When
+`init` is a scalar, the scalar is broadcast to every vector lane. This replaces
+the previous proposed `vf_splat_f32x4` helper and avoids the ambiguous callable
+form `pto.vec(...)(value)`.
 
 **Parameters**:
 
@@ -153,21 +189,21 @@ broadcast to all vector lanes. This replaces the previous proposed
 |-----------|------|-------------|
 | `dtype` | PTODSL scalar dtype | Vector element type. |
 | `lanes` | `int` | Number of vector lanes. |
-| `value` | scalar value or compatible vector value | Scalar value to broadcast, or a compatible value used to construct the vector. |
+| `init` | scalar value or compatible vector value | Initializer. Scalar input is broadcast to every lane. |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `result` | `pto.vec(dtype, lanes)` | Constructed vector value. |
+| `result` | `VecValue` | Runtime vector value with DSL type `pto.vec(dtype, lanes)`. |
 
 **Example**:
 
 ```python
 # Broadcast one scalar rstd to [rstd, rstd, rstd, rstd].
-rstd4 = pto.vec(pto.f32, 4)(rstd)
+rstd4 = pto.vec(pto.f32, 4, init=rstd)
 
-# Then use normal Python arithmetic for elementwise vector math.(TODO)
+# Elementwise vector arithmetic.
 y4 = x4 * rstd4 * w4
 ```
 
@@ -175,62 +211,105 @@ y4 = x4 * rstd4 * w4
 
 | Rule | Description |
 |------|-------------|
-| Broadcast | Scalar input is broadcast to every vector lane. |
+| Type form | `pto.vec(dtype, lanes)` by itself is TBD and not required by the RMSNorm kernel. |
+| Value form | `pto.vec(dtype, lanes, init=value)` constructs a `VecValue`. |
+| Broadcast | Scalar `init` is broadcast to every vector lane. |
 | Arithmetic | Python arithmetic on two compatible `VecValue` objects is elementwise. |
-| Type separation | `pto.vec(dtype, lanes)` is a builtin vector value type and is not the same as `pto.vreg_type(lanes, dtype)`. |
+| Type separation | `pto.vec(dtype, lanes)` is a builtin vector type and is not the same as `pto.vreg_type(lanes, dtype)`. |
 
-## 3. Vector reduce
+### Vector arithmetic operator overloading
+
+RMSNorm requires elementwise multiplication on `VecValue` operands. The initial
+operator-overloading scope is intentionally narrow: only Python `*` is required.
+Other arithmetic operators are TBD.
+
+#### `lhs * rhs -> VecValue`
+
+**Description**: Performs elementwise multiplication when both operands are
+compatible `VecValue` objects, or when one operand can be broadcast/converted to
+a compatible vector value.
+
+**Example**:
+
+```python
+x4 = scalar.load(x_ub, x_offset, contiguous=4)
+w4 = scalar.load(w_frag, frag_offset, contiguous=4)
+rstd4 = pto.vec(pto.f32, 4, init=rstd)
+
+sq4 = x4 * x4
+y4 = x4 * rstd4 * w4
+```
+
+**Semantics**:
+
+```text
+(x4 * w4)[i] = x4[i] * w4[i]
+```
+
+**Lowering target**: elementwise multiply on builtin vector types, for example
+`arith.mulf` on `vector<4xf32>`.
+
+**TBD**: Mixed scalar-vector implicit broadcasting beyond the explicit `pto.vec(..., init=...)` form is not part of the initial RMSNorm requirement.
+
+## 3. Vector reduce through `pto.redux_add`
 
 RMSNorm needs to sum the elements inside one lane-local vector before reducing
-across SIMT lanes. For example, `x4 * x4` produces four squared values in one
-workitem, and those four values must become one scalar local sum.
+across SIMT workitems. For example, `x4 * x4` produces four squared values in
+one workitem, and those four values must become one scalar local sum.
 
-#### `scalar.reduce(value, *, op="add") -> ScalarType`
+PTODSL already exposes `pto.redux_add`, `pto.redux_max`, and `pto.redux_min` for
+SIMT scalar collectives. This design reuses the existing `pto.redux_add` name
+and extends it with `VecType` input. The scalar-input behavior remains the
+existing SIMT reduction behavior; the new vector-input behavior is a local
+horizontal vector reduction.
 
-**Description**: Reduces a scalar or DSL vector value to one scalar. For
-`pto.vec(T, N)` input, the operation combines all `N` vector lanes and returns a
-scalar of element type `T`.
+#### `pto.redux_add(value, *, signedness=None) -> ScalarType`
+
+**Description**: Extends existing `pto.redux_add` to accept DSL vector values.
+For `pto.vec(T, N)` input, it combines all `N` vector lanes inside the current
+workitem and returns a scalar of element type `T`.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `value` | `ScalarType` or `VecType` | Input value to reduce. RMSNorm uses `pto.vec(pto.f32, 4)`. |
-| `op` | `"add"` | Reduction operation. Initial RMSNorm requirement is sum reduction. |
+| `value` | `ScalarType` or `VecType` | Existing scalar input keeps current SIMT collective semantics. New `VecType` input performs local vector reduction. RMSNorm uses `pto.vec(pto.f32, 4)`. |
+| `signedness` | `"signed"`, `"unsigned"`, or `None` | Existing integer signedness control. Floating-point vector reduction uses `None`. |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `result` | `ScalarType` | Scalar reduction result. For `pto.vec(T, N)`, the result type is `T`. |
+| `result` | `ScalarType` | For `pto.vec(T, N)`, the result type is `T`. |
 
 **Example**:
 
 ```python
 x4 = scalar.load(x_ub, x_offset, contiguous=4)
 sq4 = x4 * x4
-local_sum += scalar.reduce(sq4, op="add")
+local_sum += pto.redux_add(sq4)
 ```
 
-**Semantics**:
+**Semantics for vector input**:
 
 ```text
-scalar.reduce([v0, v1, v2, v3], op="add") = v0 + v1 + v2 + v3
+pto.redux_add(vector[v0, v1, v2, v3]) = v0 + v1 + v2 + v3
 ```
 
 **Constraints**:
 
 | Rule | Description |
 |------|-------------|
-| Initial operation | The initial required operation is `op="add"`. Other operations can be added later. |
-| Vector input | Vector input reduces across elements inside the current workitem only. |
-| SIMT distinction | This is not a cross-lane SIMT reduction. Use `pto.simt_allreduce_sum` for cross-workitem reduction. |
+| Existing scalar input | Scalar input keeps the current documented `pto.redux_add` behavior. |
+| New vector input | Vector input reduces across vector elements inside the current workitem only. |
+| Lowering target | Vector input lowers to builtin vector reduction, for example `vector.reduction <add>`. |
+| SIMT all-reduce distinction | Use `pto.simt_allreduce_sum` when every participating workitem must receive the same cross-workitem sum. |
 
 ## 4. SIMT all-reduce sum
 
 RMSNorm also needs to reduce one scalar from every participating SIMT workitem
 and return the same total to every workitem. This is separate from
-`scalar.reduce`, which only reduces elements inside a single vector value.
+`pto.redux_add` vector-input mode, which only reduces elements inside a single vector value.
 
 #### `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0) -> ScalarType`
 
@@ -257,7 +336,7 @@ returns the reduced sum to every participating workitem.
 **Example**:
 
 ```python
-local_sum = scalar.reduce(sq4, op="add")
+local_sum = pto.redux_add(sq4)
 sum_sq = pto.simt_allreduce_sum(
     local_sum,
     threads=128,
@@ -279,7 +358,7 @@ for each participating workitem lane:
 | Scalar input | `value` is a scalar per workitem, not a vector. |
 | Participating threads | `threads` must match the SIMT launch/body contract for the reduction. |
 | Scratch | If `scratch` is provided, it must have enough elements for the selected implementation and `threads`. |
-| Distinction from vector reduce | Use `scalar.reduce` for `vector<4xf32> -> f32`; use `pto.simt_allreduce_sum` for `threads` scalar values -> one scalar total. |
+| Distinction from vector reduce | Use `pto.redux_add(vector)` for `vector<4xf32> -> f32`; use `pto.simt_allreduce_sum` for `threads` scalar values -> one scalar total. |
 
 ## 5. Lane-local pointer
 
@@ -354,6 +433,33 @@ x_frag[i : i + 4] = x4             # scalar.store(x4, x_frag, i, contiguous=4)
 | Persistent storage | `persistent=True` is intended for local values such as RMSNorm weights that should be loaded once and reused across multiple SIMT launches. |
 | Access | Returned pointers are accessed through `scalar.load/store` or equivalent indexing sugar. |
 
+**Lowering plan**:
+
+| Case | Suggested lowering | Reason |
+|------|--------------------|--------|
+| `scope="ub", persistent=False` | Lower to existing `alloc_tile` plus `tile_buf_addr` / pointer extraction. | Reuses current PTO IR and avoids adding a new allocation op in the IR layer. |
+| `scope="local", persistent=False` | Lower to lane-local storage, ultimately `llvm.alloca` or an equivalent local allocation. | Gives each SIMT workitem private storage such as `x_frag[32]`. |
+| `scope="local", persistent=True` | Lower to the persistent-fragment path for keep/resume or equivalent state preservation. | Enables `w_frag` to be loaded once and reused across token loops. |
+
+**Tile access note**:
+
+If the implementation reuses `alloc_tile`, tile values still need to become
+typed pointers before pointer-style `scalar.load/store` can use them. The
+explicit form is:
+
+```python
+x = scalar.load(tile.as_ptr(), offset)
+```
+
+A friendlier scalar-only tile element form can also remain supported:
+
+```python
+x = scalar.load(tile[row, col])
+```
+
+Contiguous vector access should still use a typed pointer produced by
+`alloc_buffer(...)` or `tile.as_ptr()`, because it needs a linear element offset.
+
 ## 6. RMSNorm dataflow example
 
 The following sketch shows how these interfaces work together for one RMSNorm
@@ -385,7 +491,7 @@ def rmsnorm_lane_body(
         scalar.store(x4, x_frag, r * lanes)
 
         sq4 = x4 * x4
-        local_sum = local_sum + scalar.reduce(sq4, op="add")
+        local_sum = local_sum + pto.redux_add(sq4)
 
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
@@ -394,7 +500,7 @@ def rmsnorm_lane_body(
     )
 
     rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
-    rstd4 = pto.vec(pto.f32, lanes)(rstd)
+    rstd4 = pto.vec(pto.f32, lanes, init=rstd)
 
     for r in pto.static_range(0, rounds):
         offset = r * threads * lanes + tx * lanes
@@ -411,7 +517,7 @@ def rmsnorm_lane_body(
 | `scalar.load(ptr, offset=0, *, contiguous=None)` | Load one scalar or a contiguous vector from a typed pointer. |
 | `scalar.store(value, ptr, offset=0, *, contiguous=None)` | Store one scalar or a contiguous vector to a typed pointer. |
 | `pto.vec(dtype, lanes)` | Define a DSL builtin vector type. |
-| `pto.vec(dtype, lanes)(value)` | Construct a vector value, including scalar broadcast. |
-| `scalar.reduce(value, *, op="add")` | Reduce a vector value inside one workitem to a scalar. |
+| `pto.vec(dtype, lanes, *, init=None)` | Construct a vector value, including scalar broadcast. |
+| `pto.redux_add(value, *, signedness=None)` | Existing scalar collective plus new vector-input local reduction. |
 | `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0)` | Sum one scalar from each participating SIMT workitem and broadcast the result. |
 | `pto.alloc_buffer(shape, dtype, *, scope, persistent=False)` | Allocate linear UB or lane-local storage and return a typed pointer to it. |

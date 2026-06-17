@@ -105,36 +105,67 @@ scalar.store(y4, y_ub, y_offset)
 
 ## 2. DSL vector 类型
 
-PTODSL 需要一个前端 vector 类型，用来表达固定宽度的 builtin vector 值，例如 `vector<4xf32>`。这个 vector 类型和 PTO 硬件 vector register 类型不同，例如 `!pto.vreg<NxT>`。
+PTODSL 需要一个前端 vector 抽象，用来表达固定宽度的 builtin vector 值，例如 `vector<4xf32>`。这个抽象用于承接连续内存 load 的返回值，也就是之前提到的 `load_contiguous(ptr, offset, lanes=4)` 和 `fragment_load_contiguous(fragment, offset, lanes=4)` 的返回类型。
 
-#### `pto.vec(dtype, lanes) -> VecType`
+这个 vector 抽象和 PTO 硬件 vector register 类型不同，例如 `!pto.vreg<NxT>`。
 
-**描述**：构造一个 DSL vector 类型，其中包含 `lanes` 个 `dtype` 类型元素。
+#### `pto.vec(dtype, lanes) -> VecType`（待定）
+
+**描述**：待定。纯类型构造语法不是当前 RMSNorm kernel 必需的，因为连续 load 可以根据 pointer 元素类型和 `contiguous` 自动推导 vector 返回类型。这里先把它保留为可能的类型标注/文档辅助形式，而不是 kernel 必须使用的语法。
+
+如果保留这种写法，RMSNorm 文档示例可以是：
+
+```python
+f32x4 = pto.vec(pto.f32, 4)
+```
+
+这表示：
+
+```text
+DSL 类型：pto.vec(pto.f32, 4)
+lowering 后类型：vector<4xf32>
+```
+
+在实际 RMSNorm kernel 中，通常不需要显式写这个类型。连续 load 产生的值会隐式得到该类型。例如：
+
+```python
+x4 = scalar.load(x_ub, x_offset, contiguous=4)
+```
+
+如果 `x_ub` 指向 `f32`，那么：
+
+```text
+x4 是一个 VecValue
+x4 的 DSL 类型是 pto.vec(pto.f32, 4)
+x4 lowering 后是 vector<4xf32>
+```
+
+lane-local storage 也是一样：
+
+```python
+w4 = scalar.load(w_frag, frag_offset, contiguous=4)
+```
+
+如果 `w_frag` 指向 `f32`，那么 `w4` 也具有同样的 DSL 类型 `pto.vec(pto.f32, 4)`，并 lower 成 `vector<4xf32>`。
 
 **参数**：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `dtype` | PTODSL 标量 dtype | 元素类型，例如 `pto.f32` 或 `pto.i32`。 |
+| `dtype` | PTODSL 标量 dtype | vector 元素类型。RMSNorm 使用 `pto.f32`。 |
 | `lanes` | `int` | vector 元素个数。RMSNorm float4 访问使用 `4`。 |
 
 **返回值**：
 
 | 返回值 | 类型 | 说明 |
 |--------|------|------|
-| `vec_type` | `VecType` | DSL vector 类型，例如 `pto.vec(pto.f32, 4)`。 |
-
-**示例**：
-
-```python
-f32x4 = pto.vec(pto.f32, 4)
-```
+| `vec_type` | `VecType` | 待定的 builtin vector 纯类型对象，例如 `pto.vec(pto.f32, 4)`。 |
 
 ---
 
-#### `pto.vec(dtype, lanes)(value) -> VecValue`
+#### `pto.vec(dtype, lanes, *, init=value) -> VecValue`
 
-**描述**：构造一个 vector 值。当 `value` 是标量时，把这个标量广播到所有 vector lane。它替代之前提出的 `vf_splat_f32x4` helper。
+**描述**：构造一个类型为 `pto.vec(dtype, lanes)` 的 vector 值。当 `init` 是标量时，把这个标量广播到所有 vector lane。它替代之前提出的 `vf_splat_f32x4` helper，也避免 `pto.vec(...)(value)` 这种有歧义的调用形式。
 
 **参数**：
 
@@ -142,21 +173,21 @@ f32x4 = pto.vec(pto.f32, 4)
 |------|------|------|
 | `dtype` | PTODSL 标量 dtype | vector 元素类型。 |
 | `lanes` | `int` | vector lane 数。 |
-| `value` | 标量值或兼容 vector 值 | 用来构造 vector 的值；如果是标量，则广播到所有 lane。 |
+| `init` | 标量值或兼容 vector 值 | 初始化值。如果是标量，则广播到所有 lane。 |
 
 **返回值**：
 
 | 返回值 | 类型 | 说明 |
 |--------|------|------|
-| `result` | `pto.vec(dtype, lanes)` | 构造出来的 vector 值。 |
+| `result` | `VecValue` | 运行时 vector 值，DSL 类型为 `pto.vec(dtype, lanes)`。 |
 
 **示例**：
 
 ```python
 # 把一个标量 rstd 广播成 [rstd, rstd, rstd, rstd]。
-rstd4 = pto.vec(pto.f32, 4)(rstd)
+rstd4 = pto.vec(pto.f32, 4, init=rstd)
 
-# 然后使用 Python 普通算术表达逐元素 vector 计算。
+# 逐元素 vector 计算。
 y4 = x4 * rstd4 * w4
 ```
 
@@ -164,56 +195,90 @@ y4 = x4 * rstd4 * w4
 
 | 规则 | 说明 |
 |------|------|
-| 广播 | 标量输入会广播到 vector 的每个 lane。 |
+| 类型形式 | `pto.vec(dtype, lanes)` 本身是否作为 `VecType` 暴露仍待定，RMSNorm kernel 不强依赖它。 |
+| 值形式 | `pto.vec(dtype, lanes, init=value)` 构造 `VecValue`。 |
+| 广播 | 标量 `init` 会广播到 vector 的每个 lane。 |
 | 算术 | 两个兼容 `VecValue` 对象上的 Python 算术是逐元素算术。 |
-| 类型区分 | `pto.vec(dtype, lanes)` 是 builtin vector 值类型，不等同于 `pto.vreg_type(lanes, dtype)`。 |
+| 类型区分 | `pto.vec(dtype, lanes)` 是 builtin vector 类型，不等同于 `pto.vreg_type(lanes, dtype)`。 |
 
-## 3. Vector reduce
+### Vector 算术运算符重载
 
-RMSNorm 需要先在一个 workitem 内部，把一个 lane-local vector 里的元素求和，然后再跨 SIMT lane 做 all-reduce。例如 `x4 * x4` 会在一个 workitem 内得到 4 个平方值，这 4 个值需要先合成一个标量 `local_sum`。
+RMSNorm 需要 `VecValue` 之间的逐元素乘法。初始运算符重载范围刻意收窄：只要求支持 Python `*`。其他算术运算符先标记为待定。
 
-#### `scalar.reduce(value, *, op="add") -> ScalarType`
+#### `lhs * rhs -> VecValue`
 
-**描述**：把一个标量或 DSL vector 值规约成一个标量。对于 `pto.vec(T, N)` 输入，该操作会把 `N` 个 vector lane 合并，并返回元素类型为 `T` 的标量。
+**描述**：当两个操作数都是兼容的 `VecValue`，或者其中一个操作数可以被显式广播/转换成兼容 vector 值时，执行逐元素乘法。
+
+**示例**：
+
+```python
+x4 = scalar.load(x_ub, x_offset, contiguous=4)
+w4 = scalar.load(w_frag, frag_offset, contiguous=4)
+rstd4 = pto.vec(pto.f32, 4, init=rstd)
+
+sq4 = x4 * x4
+y4 = x4 * rstd4 * w4
+```
+
+**语义**：
+
+```text
+(x4 * w4)[i] = x4[i] * w4[i]
+```
+
+**Lowering 目标**：builtin vector 类型上的逐元素乘法，例如 `vector<4xf32>` 上的 `arith.mulf`。
+
+**待定**：除显式 `pto.vec(..., init=...)` 之外的 scalar-vector 隐式广播，不属于 RMSNorm 初始需求。
+
+## 3. 通过 `pto.redux_add` 做 vector reduce
+
+RMSNorm 需要先在一个 workitem 内部，把一个 lane-local vector 里的元素求和，然后再跨 SIMT workitem 做 all-reduce。例如 `x4 * x4` 会在一个 workitem 内得到 4 个平方值，这 4 个值需要先合成一个标量 `local_sum`。
+
+当前 PTODSL 已经暴露了 `pto.redux_add`、`pto.redux_max`、`pto.redux_min`，用于 SIMT 标量 collective。本设计复用已有的 `pto.redux_add` 名字，并扩展它支持 `VecType` 输入。标量输入保持现有 SIMT reduction 语义；新增的 vector 输入表示当前 workitem 内部的横向 vector 规约。
+
+#### `pto.redux_add(value, *, signedness=None) -> ScalarType`
+
+**描述**：扩展现有 `pto.redux_add`，让它可以接收 DSL vector 值。对于 `pto.vec(T, N)` 输入，该操作会在当前 workitem 内把 `N` 个 vector lane 相加，并返回元素类型为 `T` 的标量。
 
 **参数**：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `value` | `ScalarType` 或 `VecType` | 要规约的输入值。RMSNorm 使用 `pto.vec(pto.f32, 4)`。 |
-| `op` | `"add"` | 规约操作。RMSNorm 初始需求是 sum reduction。 |
+| `value` | `ScalarType` 或 `VecType` | 标量输入保持现有 SIMT collective 语义；新增 `VecType` 输入表示 workitem 内部 vector reduce。RMSNorm 使用 `pto.vec(pto.f32, 4)`。 |
+| `signedness` | `"signed"`、`"unsigned"` 或 `None` | 现有整数 signedness 控制。浮点 vector reduction 使用 `None`。 |
 
 **返回值**：
 
 | 返回值 | 类型 | 说明 |
 |--------|------|------|
-| `result` | `ScalarType` | 标量规约结果。对于 `pto.vec(T, N)`，返回类型是 `T`。 |
+| `result` | `ScalarType` | 对于 `pto.vec(T, N)`，返回类型是 `T`。 |
 
 **示例**：
 
 ```python
 x4 = scalar.load(x_ub, x_offset, contiguous=4)
 sq4 = x4 * x4
-local_sum = local_sum + scalar.reduce(sq4, op="add")
+local_sum = local_sum + pto.redux_add(sq4)
 ```
 
-**语义**：
+**vector 输入语义**：
 
 ```text
-scalar.reduce([v0, v1, v2, v3], op="add") = v0 + v1 + v2 + v3
+pto.redux_add(vector[v0, v1, v2, v3]) = v0 + v1 + v2 + v3
 ```
 
 **约束**：
 
 | 规则 | 说明 |
 |------|------|
-| 初始操作 | 初始必须支持的操作是 `op="add"`；其他规约操作可以后续扩展。 |
-| vector 输入 | vector 输入只在当前 workitem 内部跨元素规约。 |
-| 和 SIMT 规约的区别 | 这不是跨 SIMT workitem 的规约；跨 workitem 规约使用 `pto.simt_allreduce_sum`。 |
+| 现有标量输入 | 标量输入保持当前文档中的 `pto.redux_add` 语义。 |
+| 新增 vector 输入 | vector 输入只在当前 workitem 内部跨 vector 元素规约。 |
+| lowering 目标 | vector 输入 lower 到 builtin vector reduction，例如 `vector.reduction <add>`。 |
+| 和 SIMT all-reduce 的区别 | 如果需要让每个参与 workitem 都拿到同一个跨 workitem 总和，使用 `pto.simt_allreduce_sum`。 |
 
 ## 4. SIMT all-reduce sum
 
-RMSNorm 还需要把每个参与的 SIMT workitem 各自产生的一个标量做求和，并把同一个求和结果返回给每个 workitem。这个接口和 `scalar.reduce` 不同：`scalar.reduce` 只是在一个 workitem 内部把一个 vector 的多个元素规约成一个标量，而 `pto.simt_allreduce_sum` 是跨多个 SIMT workitem 做规约。
+RMSNorm 还需要把每个参与的 SIMT workitem 各自产生的一个标量做求和，并把同一个求和结果返回给每个 workitem。这个接口和 `pto.redux_add` 的 vector 输入模式不同：`pto.redux_add(vector)` 只是在一个 workitem 内部把一个 vector 的多个元素规约成一个标量，而 `pto.simt_allreduce_sum` 是跨多个 SIMT workitem 做规约。
 
 #### `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0) -> ScalarType`
 
@@ -239,7 +304,7 @@ RMSNorm 还需要把每个参与的 SIMT workitem 各自产生的一个标量做
 **示例**：
 
 ```python
-local_sum = scalar.reduce(sq4, op="add")
+local_sum = pto.redux_add(sq4)
 sum_sq = pto.simt_allreduce_sum(
     local_sum,
     threads=128,
@@ -261,7 +326,7 @@ sum_sq = pto.simt_allreduce_sum(
 | 标量输入 | `value` 是每个 workitem 的一个标量，不是 vector。 |
 | 参与线程数 | `threads` 必须和当前 SIMT launch/body 的规约范围匹配。 |
 | 临时空间 | 如果传入 `scratch`，它必须有足够空间支撑对应的实现方式和 `threads` 数量。 |
-| 和 vector reduce 的区别 | `scalar.reduce` 用于 `vector<4xf32> -> f32`；`pto.simt_allreduce_sum` 用于多个 workitem 的标量求和并广播。 |
+| 和 vector reduce 的区别 | `pto.redux_add(vector)` 用于 `vector<4xf32> -> f32`；`pto.simt_allreduce_sum` 用于多个 workitem 的标量求和并广播。 |
 
 ## 5. Lane-local pointer / alloc_buffer
 
@@ -334,6 +399,30 @@ x_frag[i : i + 4] = x4             # scalar.store(x4, x_frag, i, contiguous=4)
 | persistent storage | `persistent=True` 主要用于 local storage，例如 RMSNorm 权重，希望一次读入后跨多次 SIMT launch 复用。 |
 | 访问方式 | 返回的 pointer 通过 `scalar.load/store` 或等价下标语法糖访问。 |
 
+**Lowering 计划**：
+
+| 场景 | 建议 lowering | 原因 |
+|------|---------------|------|
+| `scope="ub", persistent=False` | lower 成现有 `alloc_tile` 加 `tile_buf_addr` / pointer extraction。 | 复用当前 PTO IR，避免在 IR 层新增 allocation op。 |
+| `scope="local", persistent=False` | lower 成 lane-local storage，最终是 `llvm.alloca` 或等价 local allocation。 | 让每个 SIMT workitem 都有自己的 `x_frag[32]`。 |
+| `scope="local", persistent=True` | lower 到 persistent-fragment 路径，生成 keep/resume 或等价状态保存恢复逻辑。 | 让 `w_frag` 可以一次加载后跨 token loop 复用。 |
+
+**Tile 访问说明**：
+
+如果实现复用 `alloc_tile`，那么 tile value 仍然需要先转换成 typed pointer，才能用于 pointer 风格的 `scalar.load/store`。显式形式是：
+
+```python
+x = scalar.load(tile.as_ptr(), offset)
+```
+
+也可以保留更友好的标量 tile 元素访问形式：
+
+```python
+x = scalar.load(tile[row, col])
+```
+
+连续 vector 访问仍建议使用 `alloc_buffer(...)` 或 `tile.as_ptr()` 产生的 typed pointer，因为它需要线性元素偏移。
+
 ## 6. RMSNorm 数据流示例
 
 下面的草图展示这些接口如何组合起来表达一个 RMSNorm SIMT body。在这个示例中，`x_ub` 和 `y_ub` 是通过 `pto.alloc_buffer(..., scope="ub")` 分配的 UB pointer；`x_frag` 和 `w_frag` 是通过 `scope="local"` 分配的 lane-local pointer。
@@ -362,7 +451,7 @@ def rmsnorm_lane_body(
         scalar.store(x4, x_frag, r * lanes)
 
         sq4 = x4 * x4
-        local_sum = local_sum + scalar.reduce(sq4, op="add")
+        local_sum = local_sum + pto.redux_add(sq4)
 
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
@@ -371,7 +460,7 @@ def rmsnorm_lane_body(
     )
 
     rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
-    rstd4 = pto.vec(pto.f32, lanes)(rstd)
+    rstd4 = pto.vec(pto.f32, lanes, init=rstd)
 
     for r in pto.static_range(0, rounds):
         offset = r * threads * lanes + tx * lanes
@@ -388,7 +477,7 @@ def rmsnorm_lane_body(
 | `scalar.load(ptr, offset=0, *, contiguous=None)` | 从 typed pointer 读取一个标量或一段连续 vector。 |
 | `scalar.store(value, ptr, offset=0, *, contiguous=None)` | 向 typed pointer 写入一个标量或一段连续 vector。 |
 | `pto.vec(dtype, lanes)` | 定义 DSL builtin vector 类型。 |
-| `pto.vec(dtype, lanes)(value)` | 构造 vector 值，包括把标量广播成 vector。 |
-| `scalar.reduce(value, *, op="add")` | 在一个 workitem 内部把 vector 值规约成标量。 |
+| `pto.vec(dtype, lanes, *, init=None)` | 构造 vector 值，包括把标量广播成 vector。 |
+| `pto.redux_add(value, *, signedness=None)` | 现有标量 collective，加上新增 vector 输入的本地规约。 |
 | `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0)` | 把每个参与 SIMT workitem 的一个标量求和，并把结果广播给所有参与 workitem。 |
 | `pto.alloc_buffer(shape, dtype, *, scope, persistent=False)` | 分配线性 UB 或 lane-local storage，并返回 typed pointer。 |
