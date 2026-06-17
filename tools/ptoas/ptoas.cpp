@@ -8,6 +8,7 @@
 
 #include "ptoas.h"
 #include "PTO/IR/PTO.h"
+#include "PTO/IR/VMIUtils.h"
 #include "PTO/Transforms/VPTOLLVMEmitter.h"
 #include "PTO/Transforms/Passes.h"
 #include "PTO/Transforms/BufferizableOpInterfaceImpl.h"
@@ -588,6 +589,12 @@ static llvm::cl::opt<bool> disableInferLayout(
 static llvm::cl::opt<bool> enableSoftPostUpdate(
     "enable-vpto-soft-postupdate",
     llvm::cl::desc("Enable VPTO soft post-update optimization"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableVMI(
+    "enable-vmi",
+    llvm::cl::desc("Run the experimental VMI-to-VPTO semantic pipeline "
+                   "(requires --pto-backend=vpto or pto.backend = \"vpto\")"),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> emitAddPtrTrace(
@@ -2862,6 +2869,51 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   return success();
 }
 
+static bool containsVMIType(Type type) {
+  if (isa<pto::VMIVRegType, pto::VMIMaskType>(type))
+    return true;
+  if (auto functionType = dyn_cast<FunctionType>(type)) {
+    return llvm::any_of(functionType.getInputs(), containsVMIType) ||
+           llvm::any_of(functionType.getResults(), containsVMIType);
+  }
+  if (auto shapedType = dyn_cast<ShapedType>(type))
+    return containsVMIType(shapedType.getElementType());
+  return false;
+}
+
+static LogicalResult verifyNoPublicVMISignature(ModuleOp module) {
+  WalkResult result = module.walk([&](func::FuncOp func) {
+    if (!func.isPublic() || !containsVMIType(func.getFunctionType()))
+      return WalkResult::advance();
+    func.emitError()
+        << pto::kVMIDiagLayoutContractPrefix
+        << "public VMI typed function requires an explicit external ABI "
+           "materialization plan";
+    return WalkResult::interrupt();
+  });
+  return failure(result.wasInterrupted());
+}
+
+static LogicalResult runVMISemanticPipeline(OwningOpRef<ModuleOp> &module) {
+  if (failed(verifyNoPublicVMISignature(module.get())))
+    return failure();
+
+  PassManager pm(module->getContext());
+  pm.enableVerifier();
+  pm.addPass(pto::createPTOValidateVMIIRPass());
+  pm.addPass(pto::createVMILayoutAssignmentPass());
+  pm.addPass(pto::createPTOValidateVMILayoutIRPass());
+  pm.addPass(pto::createVMIToVPTOPass());
+  if (failed(applyConfiguredPassManagerCLOptions(pm,
+                                                 "VMI-to-VPTO pipeline")))
+    return failure();
+  if (failed(pm.run(module.get()))) {
+    llvm::errs() << "Error: VMI-to-VPTO pipeline failed.\n";
+    return failure();
+  }
+  return success();
+}
+
 int mlir::pto::compilePTOASModule(
     OwningOpRef<ModuleOp> &module, PTOASContext &context,
     PTOBackend effectiveBackend, PTOASCompileResult &result,
@@ -2885,6 +2937,11 @@ int mlir::pto::compilePTOASModule(
        !ptoSeamIRFile.empty())) {
     llvm::errs() << "Error: VPTO-specific flags require "
                     "--pto-backend=vpto or pto.backend = \"vpto\".\n";
+    return 1;
+  }
+  if (enableVMI && effectiveBackend != PTOBackend::VPTO) {
+    llvm::errs() << "Error: --enable-vmi requires --pto-backend=vpto or "
+                    "pto.backend = \"vpto\".\n";
     return 1;
   }
 
@@ -3050,6 +3107,11 @@ int mlir::pto::compilePTOASModule(
   if (effectiveBackend == PTOBackend::VPTO && hasTileOpsToExpand &&
       tileLibBackend == TileLibBackend::PTODSL)
     expandOptions = resolveExpandTileOpOptions(argc, argv);
+
+  if (enableVMI) {
+    if (failed(runVMISemanticPipeline(module)))
+      return 1;
+  }
 
   if (effectiveBackend == PTOBackend::VPTO && !hasTileOpsToExpand) {
     if (ptoPrintSeamIR || !ptoSeamIRFile.empty()) {
