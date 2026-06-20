@@ -1,0 +1,49 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @pto_load_store_builtin_vector_kernel(%src_f32: !pto.ptr<f32, ub>, %dst_f32: !pto.ptr<f32, ub>, %src_i32: !pto.ptr<i32, ub>, %dst_i32: !pto.ptr<i32, ub>) attributes {pto.aicore} {
+    func.call @pto_load_store_builtin_vector(%src_f32, %dst_f32, %src_i32, %dst_i32) : (!pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<i32, ub>, !pto.ptr<i32, ub>) -> ()
+    return
+  }
+
+  func.func @pto_load_store_builtin_vector(%src_f32: !pto.ptr<f32, ub>, %dst_f32: !pto.ptr<f32, ub>, %src_i32: !pto.ptr<i32, ub>, %dst_i32: !pto.ptr<i32, ub>) attributes {pto.simt_entry} {
+    %c2 = arith.constant 2 : index
+    %c4 = arith.constant 4 : index
+    %c8 = arith.constant 8 : index
+    %f32x4 = pto.load %src_f32[%c4] : !pto.ptr<f32, ub> -> vector<4xf32>
+    %f32x8 = pto.load %src_f32[%c8] : !pto.ptr<f32, ub> -> vector<8xf32>
+    %i32x4 = pto.load %src_i32[%c4] : !pto.ptr<i32, ub> -> vector<4xi32>
+    %i32x2 = pto.load %src_i32[%c2] : !pto.ptr<i32, ub> -> vector<2xi32>
+    pto.store %f32x4, %dst_f32[%c4] : !pto.ptr<f32, ub>, vector<4xf32>
+    pto.store %f32x8, %dst_f32[%c8] : !pto.ptr<f32, ub>, vector<8xf32>
+    pto.store %i32x4, %dst_i32[%c4] : !pto.ptr<i32, ub>, vector<4xi32>
+    pto.store %i32x2, %dst_i32[%c2] : !pto.ptr<i32, ub>, vector<2xi32>
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @pto_load_store_builtin_vector
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
+// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<4xf32>
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
+// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<8xf32>
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
+// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<4xi32>
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
+// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<2xi32>
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
+// CHECK: llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<{{[0-9]+}}>
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
+// CHECK: llvm.store {{.*}} : vector<8xf32>, !llvm.ptr<{{[0-9]+}}>
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
+// CHECK: llvm.store {{.*}} : vector<4xi32>, !llvm.ptr<{{[0-9]+}}>
+// CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
+// CHECK: llvm.store {{.*}} : vector<2xi32>, !llvm.ptr<{{[0-9]+}}>

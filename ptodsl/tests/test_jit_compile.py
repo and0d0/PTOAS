@@ -1241,6 +1241,65 @@ def scalar_pointer_offset_probe():
 
 
 @pto.jit(target="a5")
+def scalar_contiguous_vector_access_probe():
+    src_f32_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    dst_f32_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    src_i32_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 8])
+    dst_i32_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 8])
+    src_f32_ptr = src_f32_tile.as_ptr()
+    dst_f32_ptr = dst_f32_tile.as_ptr()
+    src_i32_ptr = src_i32_tile.as_ptr()
+    dst_i32_ptr = dst_i32_tile.as_ptr()
+    f32x4 = scalar.load(src_f32_ptr, 4, contiguous=4)
+    f32x8 = scalar.load(src_f32_tile[0, 0], contiguous=8)
+    i32x4 = scalar.load(src_i32_ptr, 4, contiguous=4)
+    i32x2 = scalar.load(src_i32_ptr, 2, contiguous=2)
+    scalar.store(f32x4, dst_f32_ptr, 4)
+    scalar.store(f32x4, dst_f32_ptr, 0, contiguous=4)
+    scalar.store(f32x8, dst_f32_tile[0, 0], contiguous=8)
+    scalar.store(i32x4, dst_i32_ptr, 4)
+    scalar.store(i32x2, dst_i32_ptr, 2, contiguous=2)
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_load_zero_width_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    ptr = tile.as_ptr()
+    _ = scalar.load(ptr, 0, contiguous=0)
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_load_negative_width_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    ptr = tile.as_ptr()
+    _ = scalar.load(ptr, 0, contiguous=-1)
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_load_bool_width_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    ptr = tile.as_ptr()
+    _ = scalar.load(ptr, 0, contiguous=True)
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_store_scalar_width_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    ptr = tile.as_ptr()
+    scalar.store(1.0, ptr, 0, contiguous=4)
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_store_mismatched_width_probe():
+    src_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    dst_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 8])
+    src_ptr = src_tile.as_ptr()
+    dst_ptr = dst_tile.as_ptr()
+    value4 = scalar.load(src_ptr, 0, contiguous=4)
+    scalar.store(value4, dst_ptr, 0, contiguous=8)
+
+
+@pto.jit(target="a5")
 def addptr_surface_probe():
     meta_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
     meta_ptr = meta_tile.as_ptr()
@@ -3467,6 +3526,104 @@ def main() -> None:
     expect(
         re.search(r"pto\.load %\d+\[%c2(?:_\d+)?\]", scalar_pointer_offset_text) is not None,
         "scalar.load(ptr + 2) should lower as element offset 2",
+    )
+
+    scalar_contiguous_vector_text = scalar_contiguous_vector_access_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        scalar_contiguous_vector_text,
+        "scalar contiguous vector access specialization",
+    )
+    expect(
+        re.search(
+            r"pto\.load %\d+\[%c4(?:_\d+)?\] : !pto\.ptr<f32, ub> -> vector<4xf32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.load(ptr, 4, contiguous=4) should infer vector<4xf32> from the pointer element type",
+    )
+    expect(
+        scalar_contiguous_vector_text.count("vector<4xf32>") >= 3,
+        "scalar contiguous vector access should preserve vector<4xf32> on load and stores",
+    )
+    expect(
+        re.search(
+            r"pto\.store %\d+, %\d+\[%c4(?:_\d+)?\] : !pto\.ptr<f32, ub>, vector<4xf32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.store(vector, ptr, 4) should store a contiguous vector value",
+    )
+    expect(
+        re.search(
+            r"pto\.store %\d+, %\d+\[%c0(?:_\d+)?\] : !pto\.ptr<f32, ub>, vector<4xf32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.store(vector, ptr, 0, contiguous=4) should validate and store the vector value",
+    )
+    expect(
+        re.search(
+            r"pto\.load %\d+\[%c0(?:_\d+)?\] : !pto\.ptr<f32, ub> -> vector<8xf32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.load(tile[row, col], contiguous=8) should infer vector<8xf32> from the tile element type",
+    )
+    expect(
+        re.search(
+            r"pto\.store %\d+, %\d+\[%c0(?:_\d+)?\] : !pto\.ptr<f32, ub>, vector<8xf32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.store(vector<8xf32>, tile[row, col], contiguous=8) should store through tile element syntax",
+    )
+    expect(
+        re.search(
+            r"pto\.load %\d+\[%c4(?:_\d+)?\] : !pto\.ptr<i32, ub> -> vector<4xi32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.load(i32_ptr, 4, contiguous=4) should infer vector<4xi32>",
+    )
+    expect(
+        re.search(
+            r"pto\.load %\d+\[%c2(?:_\d+)?\] : !pto\.ptr<i32, ub> -> vector<2xi32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.load(i32_ptr, 2, contiguous=2) should infer vector<2xi32>",
+    )
+    expect(
+        re.search(
+            r"pto\.store %\d+, %\d+\[%c4(?:_\d+)?\] : !pto\.ptr<i32, ub>, vector<4xi32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.store(vector<4xi32>, i32_ptr, 4) should preserve vector<4xi32>",
+    )
+    expect(
+        re.search(
+            r"pto\.store %\d+, %\d+\[%c2(?:_\d+)?\] : !pto\.ptr<i32, ub>, vector<2xi32>",
+            scalar_contiguous_vector_text,
+        ) is not None,
+        "scalar.store(vector<2xi32>, i32_ptr, 2, contiguous=2) should preserve vector<2xi32>",
+    )
+    expect_raises(
+        ValueError,
+        lambda: scalar_contiguous_load_zero_width_probe.compile().mlir_text(),
+        "scalar.load/store contiguous must be positive",
+    )
+    expect_raises(
+        ValueError,
+        lambda: scalar_contiguous_load_negative_width_probe.compile().mlir_text(),
+        "scalar.load/store contiguous must be positive",
+    )
+    expect_raises(
+        TypeError,
+        lambda: scalar_contiguous_load_bool_width_probe.compile().mlir_text(),
+        "scalar.load/store contiguous must be a positive compile-time integer",
+    )
+    expect_raises(
+        TypeError,
+        lambda: scalar_contiguous_store_scalar_width_probe.compile().mlir_text(),
+        "scalar.store(...) with contiguous > 1 expects a vector value",
+    )
+    expect_raises(
+        ValueError,
+        lambda: scalar_contiguous_store_mismatched_width_probe.compile().mlir_text(),
+        "scalar.store(...) contiguous width must match vector lane count",
     )
 
     addptr_surface_text = addptr_surface_probe.compile().mlir_text()
