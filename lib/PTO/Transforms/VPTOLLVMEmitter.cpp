@@ -9442,8 +9442,13 @@ public:
 
     Value elemPtr = adaptor.getPtr();
     if (!matchPattern(offset, m_Zero())) {
+      auto sourcePtrType = dyn_cast<pto::PtrType>(op.getPtr().getType());
+      if (!sourcePtrType)
+        return rewriter.notifyMatchFailure(op, "expected !pto.ptr source type");
+      Type sourceElemType = normalizeGEPElementTypeForLLVMLowering(
+          sourcePtrType.getElementType(), rewriter);
       elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
-                                             convertedValueType,
+                                             sourceElemType,
                                              adaptor.getPtr(),
                                              ValueRange{offset});
     }
@@ -9593,8 +9598,14 @@ public:
 
     Value elemPtr = adaptor.getPtr();
     if (!matchPattern(offset, m_Zero())) {
+      auto destinationPtrType = dyn_cast<pto::PtrType>(op.getPtr().getType());
+      if (!destinationPtrType)
+        return rewriter.notifyMatchFailure(op,
+                                           "expected !pto.ptr destination type");
+      Type destinationElemType = normalizeGEPElementTypeForLLVMLowering(
+          destinationPtrType.getElementType(), rewriter);
       elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
-                                             adaptor.getValue().getType(),
+                                             destinationElemType,
                                              adaptor.getPtr(), ValueRange{offset});
     }
 

@@ -29,7 +29,7 @@ from ._types import _resolve
 
 from mlir.dialects import arith
 from mlir.dialects import math
-from mlir.ir import IndexType, MemRefType, Operation
+from mlir.ir import IndexType, MemRefType, Operation, VectorType
 from mlir.dialects import pto as _pto
 
 
@@ -120,10 +120,10 @@ def abs(value):
     return wrap_surface_value(emit_runtime_abs(unwrap_surface_value(value)))
 
 
-def load(ptr_or_ref, offset=None):
-    """Load one scalar element from a PTODSL address view or tile element."""
+def load(ptr_or_ref, offset=None, *, contiguous=None):
+    """Load one scalar element or one contiguous vector from a PTODSL address view."""
     buffer_value, index_value = resolve_address_access(ptr_or_ref, offset)
-    result_type = _infer_buffer_element_type(buffer_value.type)
+    result_type = _infer_load_result_type(buffer_value.type, contiguous)
     return wrap_surface_value(Operation.create(
         "pto.load",
         results=[result_type],
@@ -131,13 +131,15 @@ def load(ptr_or_ref, offset=None):
     ).results[0])
 
 
-def store(value, ptr_or_ref, offset=None):
-    """Store one scalar element to a PTODSL address view or tile element."""
+def store(value, ptr_or_ref, offset=None, *, contiguous=None):
+    """Store one scalar element or one contiguous vector to a PTODSL address view."""
     buffer_value, index_value = resolve_address_access(ptr_or_ref, offset)
     elem_type = _infer_buffer_element_type(buffer_value.type)
+    raw_value = unwrap_surface_value(value)
+    raw_value = _coerce_store_value(raw_value, elem_type, contiguous)
     Operation.create(
         "pto.store",
-        operands=[buffer_value, index_value, coerce_scalar_to_type(value, elem_type, context="scalar.store(...)")],
+        operands=[buffer_value, index_value, raw_value],
     )
 
 
@@ -146,6 +148,50 @@ def _infer_buffer_element_type(buffer_type):
         return _pto.PtrType(buffer_type).element_type
     except Exception:
         return MemRefType(buffer_type).element_type
+
+
+def _infer_load_result_type(buffer_type, contiguous):
+    elem_type = _infer_buffer_element_type(buffer_type)
+    lanes = _normalize_contiguous(contiguous)
+    if lanes is None or lanes == 1:
+        return elem_type
+    return VectorType.get([lanes], elem_type)
+
+
+def _coerce_store_value(raw_value, elem_type, contiguous):
+    lanes = _normalize_contiguous(contiguous)
+    if hasattr(raw_value, "type") and VectorType.isinstance(raw_value.type):
+        vec_type = VectorType(raw_value.type)
+        if vec_type.rank != 1:
+            raise TypeError(f"scalar.store(...) expects a rank-1 vector value, got {raw_value.type}")
+        if vec_type.element_type != elem_type:
+            raise TypeError(
+                "scalar.store(...) vector element type must match pointer element type: "
+                f"got {vec_type.element_type}, expected {elem_type}"
+            )
+        if lanes is not None and lanes != vec_type.shape[0]:
+            raise ValueError(
+                "scalar.store(...) contiguous width must match vector lane count: "
+                f"got contiguous={lanes}, value has {vec_type.shape[0]} lanes"
+            )
+        return raw_value
+
+    if lanes is not None and lanes != 1:
+        raise TypeError(
+            "scalar.store(...) with contiguous > 1 expects a vector value; "
+            f"got scalar value for contiguous={lanes}"
+        )
+    return coerce_scalar_to_type(raw_value, elem_type, context="scalar.store(...)")
+
+
+def _normalize_contiguous(contiguous):
+    if contiguous is None:
+        return None
+    if isinstance(contiguous, bool) or not isinstance(contiguous, int):
+        raise TypeError("scalar.load/store contiguous must be a positive compile-time integer")
+    if contiguous <= 0:
+        raise ValueError("scalar.load/store contiguous must be positive")
+    return contiguous
 
 
 __all__ = [

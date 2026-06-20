@@ -110,7 +110,7 @@ def PTO_AtomicValueType : AnyTypeOf<[I32, I64, F16, BF16, F32, PTO_V2F16Type, PT
 def PTOLoadOp : PTO_Op<"load", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let summary = "Load one scalar element from a VPTO pointer-like operand.";
+  let summary = "Load one scalar element or contiguous vector from a VPTO pointer-like operand.";
 
   let arguments = (ins
     PTO_BufferLikeType:$ptr,
@@ -129,7 +129,7 @@ def PTOLoadOp : PTO_Op<"load", [
 def PTOStoreOp : PTO_Op<"store", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let summary = "Store one scalar element to a VPTO pointer-like operand.";
+  let summary = "Store one scalar element or contiguous vector to a VPTO pointer-like operand.";
 
   let arguments = (ins
     PTO_BufferLikeType:$ptr,

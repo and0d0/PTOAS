@@ -105,9 +105,20 @@ static LogicalResult verifyVPTOScalarAccessTypes(Operation *op, Type ptrTy,
                              << " pointer operand to be !pto.ptr or memref";
   }
 
-  if (valueTy != elemTy) {
+  Type accessElemTy = valueTy;
+  if (auto vecTy = dyn_cast<VectorType>(valueTy)) {
+    if (vecTy.getRank() != 1)
+      return op->emitOpError() << "expects " << opNameForDiag
+                               << " vector value type to be rank-1";
+    if (vecTy.getDimSize(0) <= 0)
+      return op->emitOpError() << "expects " << opNameForDiag
+                               << " vector value type to have positive lanes";
+    accessElemTy = vecTy.getElementType();
+  }
+
+  if (accessElemTy != elemTy) {
     return op->emitOpError() << "expects " << opNameForDiag
-                             << " value type to match pointer element type";
+                             << " value element type to match pointer element type";
   }
   return success();
 }
