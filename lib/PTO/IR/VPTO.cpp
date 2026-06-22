@@ -105,6 +105,9 @@ static LogicalResult verifyVPTOScalarAccessTypes(Operation *op, Type ptrTy,
                              << " pointer operand to be !pto.ptr or memref";
   }
 
+  if (valueTy == elemTy)
+    return success();
+
   Type accessElemTy = valueTy;
   if (auto vecTy = dyn_cast<VectorType>(valueTy)) {
     if (vecTy.getRank() != 1)

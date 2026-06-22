@@ -66,6 +66,7 @@ static std::string getElementTypeFragment(Type type);
 static std::string getMemoryElementTypeFragment(Type type);
 static Type getElementTypeFromVectorLike(Type type);
 static std::optional<int64_t> getElementCountFromVectorLike(Type type);
+static unsigned getNaturalByteAlignment(Type type);
 
 static Type getLowPrecisionLLVMType(Type type, MLIRContext *context) {
   if (pto::isPTOHiFloat8Type(type))
@@ -149,17 +150,43 @@ static Type normalizeGEPElementTypeForLLVMLowering(Type type,
   return normalizePayloadTypeForLLVMLowering(type, builder);
 }
 
+static FailureOr<Type> getPointerLikeElementType(Type type) {
+  if (auto ptrType = dyn_cast<pto::PtrType>(type)) {
+    return ptrType.getElementType();
+  }
+  if (auto memRefType = dyn_cast<MemRefType>(type)) {
+    return memRefType.getElementType();
+  }
+  return failure();
+}
+
 static FailureOr<Type>
 getPointerLikeElementTypeForGEPLowering(Type type, Builder &builder) {
-  Type elementType;
-  if (auto ptrType = dyn_cast<pto::PtrType>(type)) {
-    elementType = ptrType.getElementType();
-  } else if (auto memRefType = dyn_cast<MemRefType>(type)) {
-    elementType = memRefType.getElementType();
-  } else {
+  FailureOr<Type> elementType = getPointerLikeElementType(type);
+  if (failed(elementType))
     return failure();
+  return normalizeGEPElementTypeForLLVMLowering(*elementType, builder);
+}
+
+static unsigned getPTOAccessByteAlignment(Type ptrLikeType, Type valueType,
+                                          Type convertedValueType,
+                                          Builder &builder) {
+  FailureOr<Type> elementType = getPointerLikeElementType(ptrLikeType);
+  if (failed(elementType))
+    return getNaturalByteAlignment(convertedValueType);
+
+  if (valueType == *elementType)
+    return getNaturalByteAlignment(convertedValueType);
+
+  if (auto vecType = dyn_cast<VectorType>(valueType)) {
+    if (vecType.getRank() == 1 && vecType.getElementType() == *elementType) {
+      Type normalizedElementType =
+          normalizePayloadTypeForLLVMLowering(*elementType, builder);
+      return getNaturalByteAlignment(normalizedElementType);
+    }
   }
-  return normalizeGEPElementTypeForLLVMLowering(elementType, builder);
+
+  return getNaturalByteAlignment(convertedValueType);
 }
 
 static Type convertVPTOType(Type type, Builder &builder) {
@@ -9467,9 +9494,11 @@ public:
                                              ValueRange{offset});
     }
 
+    unsigned alignment = getPTOAccessByteAlignment(
+        op.getPtr().getType(), op.getValue().getType(), convertedValueType,
+        rewriter);
     rewriter.replaceOpWithNewOp<LLVM::LoadOp>(
-        op, convertedValueType, elemPtr,
-        getNaturalByteAlignment(convertedValueType));
+        op, convertedValueType, elemPtr, alignment);
     return success();
   }
 
@@ -9623,9 +9652,11 @@ public:
                                              adaptor.getPtr(), ValueRange{offset});
     }
 
+    unsigned alignment = getPTOAccessByteAlignment(
+        op.getPtr().getType(), op.getValue().getType(),
+        adaptor.getValue().getType(), rewriter);
     rewriter.replaceOpWithNewOp<LLVM::StoreOp>(
-        op, adaptor.getValue(), elemPtr,
-        getNaturalByteAlignment(adaptor.getValue().getType()));
+        op, adaptor.getValue(), elemPtr, alignment);
     return success();
   }
 

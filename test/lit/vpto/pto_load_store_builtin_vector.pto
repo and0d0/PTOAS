@@ -32,18 +32,18 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
 // CHECK-LABEL: llvm.func @pto_load_store_builtin_vector
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
-// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<4xf32>
+// CHECK: llvm.load {{.*}} {alignment = 4 : i64} : !llvm.ptr<{{[0-9]+}}> -> vector<4xf32>
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
-// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<8xf32>
+// CHECK: llvm.load {{.*}} {alignment = 4 : i64} : !llvm.ptr<{{[0-9]+}}> -> vector<8xf32>
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
-// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<4xi32>
+// CHECK: llvm.load {{.*}} {alignment = 4 : i64} : !llvm.ptr<{{[0-9]+}}> -> vector<4xi32>
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
-// CHECK: llvm.load {{.*}} : !llvm.ptr<{{[0-9]+}}> -> vector<2xi32>
+// CHECK: llvm.load {{.*}} {alignment = 4 : i64} : !llvm.ptr<{{[0-9]+}}> -> vector<2xi32>
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
-// CHECK: llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<{{[0-9]+}}>
+// CHECK: llvm.store {{.*}} {alignment = 4 : i64} : vector<4xf32>, !llvm.ptr<{{[0-9]+}}>
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, f32
-// CHECK: llvm.store {{.*}} : vector<8xf32>, !llvm.ptr<{{[0-9]+}}>
+// CHECK: llvm.store {{.*}} {alignment = 4 : i64} : vector<8xf32>, !llvm.ptr<{{[0-9]+}}>
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
-// CHECK: llvm.store {{.*}} : vector<4xi32>, !llvm.ptr<{{[0-9]+}}>
+// CHECK: llvm.store {{.*}} {alignment = 4 : i64} : vector<4xi32>, !llvm.ptr<{{[0-9]+}}>
 // CHECK: llvm.getelementptr {{.*}}[{{.*}}] : (!llvm.ptr<{{[0-9]+}}>, i64) -> !llvm.ptr<{{[0-9]+}}>, i32
-// CHECK: llvm.store {{.*}} : vector<2xi32>, !llvm.ptr<{{[0-9]+}}>
+// CHECK: llvm.store {{.*}} {alignment = 4 : i64} : vector<2xi32>, !llvm.ptr<{{[0-9]+}}>

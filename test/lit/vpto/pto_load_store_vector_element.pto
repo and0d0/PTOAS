@@ -9,18 +9,18 @@
 // RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
-  func.func @pto_load_store_builtin_vector_memref(
-      %src: memref<16xf32, #pto.address_space<vec>>,
-      %dst: memref<16xf32, #pto.address_space<vec>>) attributes {pto.simt_entry} {
-    %c4 = arith.constant 4 : index
-    %value = pto.load %src[%c4] : memref<16xf32, #pto.address_space<vec>> -> vector<4xf32>
-    pto.store %value, %dst[%c4] : memref<16xf32, #pto.address_space<vec>>, vector<4xf32>
+  func.func @pto_load_store_vector_element(
+      %src: !pto.ptr<vector<2xf8E4M3FN>, ub>,
+      %dst: !pto.ptr<vector<2xf8E4M3FN>, ub>) attributes {pto.simt_entry} {
+    %c1 = arith.constant 1 : index
+    %value = pto.load %src[%c1] : !pto.ptr<vector<2xf8E4M3FN>, ub> -> vector<2xf8E4M3FN>
+    pto.store %value, %dst[%c1] : !pto.ptr<vector<2xf8E4M3FN>, ub>, vector<2xf8E4M3FN>
     return
   }
 }
 
-// CHECK-LABEL: llvm.func @pto_load_store_builtin_vector_memref
-// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, f32
-// CHECK: llvm.load {{.*}} {alignment = 4 : i64} : !llvm.ptr<6> -> vector<4xf32>
-// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, f32
-// CHECK: llvm.store {{.*}} {alignment = 4 : i64} : vector<4xf32>, !llvm.ptr<6>
+// CHECK-LABEL: llvm.func @pto_load_store_vector_element
+// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, vector<2xi8>
+// CHECK: llvm.load {{.*}} : !llvm.ptr<6> -> !llvm.vec<2 x float8e4m3>
+// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, vector<2xi8>
+// CHECK: llvm.store {{.*}} : !llvm.vec<2 x float8e4m3>, !llvm.ptr<6>
