@@ -2191,6 +2191,38 @@ def alloc_tile(
     )
 
 
+def alloc_buffer(
+    shape,
+    dtype,
+    *,
+    scope="ub",
+    persistent=False,
+):
+    """
+    ``pto.alloc_buffer``.
+
+    First-step linear buffer allocation for pointer-style scalar access.
+    Currently this reuses tile allocation and returns ``tile.as_ptr()`` so the
+    result can be passed directly to ``scalar.load`` and ``scalar.store``.
+    """
+    if persistent:
+        raise NotImplementedError("pto.alloc_buffer(..., persistent=True) is not implemented yet")
+    if scope != "ub":
+        raise NotImplementedError('pto.alloc_buffer(...) currently only supports scope="ub"')
+    if isinstance(shape, (str, bytes)) or not isinstance(shape, (list, tuple)):
+        raise TypeError("pto.alloc_buffer(shape=...) expects a list or tuple of static dimensions")
+    if len(shape) == 0:
+        raise ValueError("pto.alloc_buffer(shape=...) requires at least one dimension")
+
+    tile = alloc_tile(
+        shape=shape,
+        dtype=dtype,
+        memory_space=scope,
+        valid_shape=shape,
+    )
+    return emit_as_ptr(tile)
+
+
 def set_tile_valid_shape(tile, valid_shape):
     """Update the runtime valid-shape metadata of an authored dynamic tile."""
     parsed_tile_type = parse_tile_type_metadata(unwrap_surface_value(tile).type)
@@ -5052,7 +5084,7 @@ __all__ = [
     "vaxpy", "vaddrelu", "vsubrelu",
     "vsel",
     "make_tensor_view", "partition_view",
-    "alloc_tile",
+    "alloc_tile", "alloc_buffer",
     "tload", "tstore", "tmov", "tinsert",
     "tadd", "tsub", "tmul", "tdiv", "tmax", "tmin",
     "tadds", "tsubs", "tmuls", "tdivs", "tmaxs", "tmins",

@@ -265,7 +265,64 @@ tail_tile.valid_shape = [rows]
 meta_ptr = meta_tile.as_ptr()
 ```
 
-## 4.8 Tile Reinterpretation
+## 4.8 Linear UB Buffer
+
+`pto.alloc_buffer` allocates a linear pointer-style scratch buffer. The current
+implementation supports UB buffers only and returns a typed UB pointer, so it
+can be used directly with `scalar.load` and `scalar.store`:
+
+```python
+src = pto.alloc_buffer((1, 8), pto.f32, scope="ub")
+dst = pto.alloc_buffer((1, 8), pto.f32, scope="ub")
+
+value = scalar.load(src, 0, contiguous=4)
+scalar.store(value, dst, 4, contiguous=4)
+```
+
+Internally, `scope="ub"` is represented with the existing tile allocation path:
+PTODSL emits a UB `pto.alloc_tile` and materializes the typed pointer with
+`pto.tile_buf_addr`. This keeps the first implementation compatible with the
+current PTO IR buffer model.
+
+#### `pto.alloc_buffer(shape: tuple[int, ...], dtype: DType, *, scope="ub", persistent=False) -> PtrType`
+
+**Description**: Allocates a UB scratch buffer and returns a typed pointer to
+the buffer base.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `shape` | `tuple[int, ...]` or `list[int]` | Static logical buffer dimensions. At least one dimension is required |
+| `dtype` | `DType` | Element type |
+| `scope` | `str` | Currently only `"ub"` is supported |
+| `persistent` | `bool` | Currently must be `False` |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `ptr` | `PtrType` | Typed pointer in UB memory, suitable for scalar and contiguous-vector scalar load/store |
+
+**Constraints**:
+
+- `scope="local"` is reserved for future lane-local storage support and is not
+  implemented yet.
+- `persistent=True` is reserved for future persistent fragment storage and is
+  not implemented yet.
+- Slice syntax on the returned pointer is not implemented. Use
+  `scalar.load(ptr, offset, contiguous=N)` and
+  `scalar.store(value, ptr, offset, contiguous=N)` for contiguous vector
+  accesses.
+
+For scalar element access, typed pointer values also support indexing sugar:
+
+```python
+value = src[0]      # scalar.load(src, 0)
+dst[4] = value      # scalar.store(value, dst, 4)
+```
+
+## 4.9 Tile Reinterpretation
 
 `pto.tile.reshape` reinterprets a tile buffer with a new shape or layout without any data movement. It is a zero-cost buffer reinterpretation on the Unified Buffer: the underlying bytes are unchanged and PTODSL returns a new tile handle with the requested result type metadata. No destination tile allocation is needed; the result is returned directly.
 

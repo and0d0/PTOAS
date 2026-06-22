@@ -1300,6 +1300,34 @@ def scalar_contiguous_store_mismatched_width_probe():
 
 
 @pto.jit(target="a5")
+def alloc_buffer_ub_scalar_access_probe():
+    src = pto.alloc_buffer((1, 8), pto.f32, scope="ub")
+    dst = pto.alloc_buffer((1, 8), pto.f32, scope="ub")
+    value = scalar.load(src, 0, contiguous=4)
+    scalar.store(value, dst, 4, contiguous=4)
+
+
+@pto.jit(target="a5")
+def alloc_buffer_local_scope_probe():
+    _ = pto.alloc_buffer((8,), pto.f32, scope="local")
+
+
+@pto.jit(target="a5")
+def alloc_buffer_persistent_probe():
+    _ = pto.alloc_buffer((8,), pto.f32, scope="ub", persistent=True)
+
+
+@pto.jit(target="a5")
+def alloc_buffer_empty_shape_probe():
+    _ = pto.alloc_buffer((), pto.f32, scope="ub")
+
+
+@pto.jit(target="a5")
+def alloc_buffer_non_sequence_shape_probe():
+    _ = pto.alloc_buffer(8, pto.f32, scope="ub")
+
+
+@pto.jit(target="a5")
 def addptr_surface_probe():
     meta_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
     meta_ptr = meta_tile.as_ptr()
@@ -3599,6 +3627,54 @@ def main() -> None:
             scalar_contiguous_vector_text,
         ) is not None,
         "scalar.store(vector<2xi32>, i32_ptr, 2, contiguous=2) should preserve vector<2xi32>",
+    )
+
+    alloc_buffer_ub_text = alloc_buffer_ub_scalar_access_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        alloc_buffer_ub_text,
+        "alloc_buffer UB scalar access specialization",
+    )
+    expect(
+        alloc_buffer_ub_text.count("pto.alloc_tile") == 2,
+        "pto.alloc_buffer(scope='ub') should currently lower through one alloc_tile per buffer",
+    )
+    expect(
+        alloc_buffer_ub_text.count("pto.tile_buf_addr") == 2,
+        "pto.alloc_buffer(scope='ub') should return the typed pointer from tile_buf_addr",
+    )
+    expect(
+        re.search(
+            r"pto\.load %\d+\[%c0(?:_\d+)?\] : !pto\.ptr<f32, ub> -> vector<4xf32>",
+            alloc_buffer_ub_text,
+        ) is not None,
+        "scalar.load(alloc_buffer(...), contiguous=4) should load vector<4xf32>",
+    )
+    expect(
+        re.search(
+            r"pto\.store %\d+, %\d+\[%c4(?:_\d+)?\] : !pto\.ptr<f32, ub>, vector<4xf32>",
+            alloc_buffer_ub_text,
+        ) is not None,
+        "scalar.store(vector, alloc_buffer(...), 4, contiguous=4) should store vector<4xf32>",
+    )
+    expect_raises(
+        NotImplementedError,
+        lambda: alloc_buffer_local_scope_probe.compile().mlir_text(),
+        'pto.alloc_buffer(...) currently only supports scope="ub"',
+    )
+    expect_raises(
+        NotImplementedError,
+        lambda: alloc_buffer_persistent_probe.compile().mlir_text(),
+        "pto.alloc_buffer(..., persistent=True) is not implemented yet",
+    )
+    expect_raises(
+        ValueError,
+        lambda: alloc_buffer_empty_shape_probe.compile().mlir_text(),
+        "pto.alloc_buffer(shape=...) requires at least one dimension",
+    )
+    expect_raises(
+        TypeError,
+        lambda: alloc_buffer_non_sequence_shape_probe.compile().mlir_text(),
+        "pto.alloc_buffer(shape=...) expects a list or tuple of static dimensions",
     )
     expect_raises(
         ValueError,
