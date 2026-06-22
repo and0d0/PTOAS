@@ -148,6 +148,22 @@ static Type normalizeGEPElementTypeForLLVMLowering(Type type,
   return normalizePayloadTypeForLLVMLowering(type, builder);
 }
 
+static FailureOr<Type> getPointerLikeElementType(Type type) {
+  if (auto ptrType = dyn_cast<pto::PtrType>(type))
+    return ptrType.getElementType();
+  if (auto memRefType = dyn_cast<MemRefType>(type))
+    return memRefType.getElementType();
+  return failure();
+}
+
+static FailureOr<Type>
+getPointerLikeElementTypeForGEPLowering(Type type, Builder &builder) {
+  FailureOr<Type> elementType = getPointerLikeElementType(type);
+  if (failed(elementType))
+    return failure();
+  return normalizeGEPElementTypeForLLVMLowering(*elementType, builder);
+}
+
 static Type convertVPTOType(Type type, Builder &builder) {
   if (auto vecType = dyn_cast<pto::VRegType>(type)) {
     Type elementType =
@@ -196,6 +212,27 @@ static unsigned getNaturalByteAlignment(Type type) {
   if (type.isF64())
     return 8;
   return 0;
+}
+
+static unsigned getPTOAccessByteAlignment(Type ptrLikeType, Type valueType,
+                                          Type convertedValueType,
+                                          Builder &builder) {
+  FailureOr<Type> elementType = getPointerLikeElementType(ptrLikeType);
+  if (failed(elementType))
+    return getNaturalByteAlignment(convertedValueType);
+
+  if (valueType == *elementType)
+    return getNaturalByteAlignment(convertedValueType);
+
+  if (auto vecType = dyn_cast<VectorType>(valueType)) {
+    if (vecType.getRank() == 1 && vecType.getElementType() == *elementType) {
+      Type normalizedElementType =
+          normalizePayloadTypeForLLVMLowering(*elementType, builder);
+      return getNaturalByteAlignment(normalizedElementType);
+    }
+  }
+
+  return getNaturalByteAlignment(convertedValueType);
 }
 
 static bool hasVPTOConvertibleType(Type type) {
@@ -9431,15 +9468,23 @@ public:
 
     Value elemPtr = adaptor.getPtr();
     if (!matchPattern(offset, m_Zero())) {
+      FailureOr<Type> sourceElemType =
+          getPointerLikeElementTypeForGEPLowering(op.getPtr().getType(),
+                                                  rewriter);
+      if (failed(sourceElemType))
+        return rewriter.notifyMatchFailure(
+            op, "expected !pto.ptr or memref source type");
       elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
-                                             convertedValueType,
+                                             *sourceElemType,
                                              adaptor.getPtr(),
                                              ValueRange{offset});
     }
 
+    unsigned alignment = getPTOAccessByteAlignment(
+        op.getPtr().getType(), op.getValue().getType(), convertedValueType,
+        rewriter);
     rewriter.replaceOpWithNewOp<LLVM::LoadOp>(
-        op, convertedValueType, elemPtr,
-        getNaturalByteAlignment(convertedValueType));
+        op, convertedValueType, elemPtr, alignment);
     return success();
   }
 };
@@ -9581,14 +9626,22 @@ public:
 
     Value elemPtr = adaptor.getPtr();
     if (!matchPattern(offset, m_Zero())) {
+      FailureOr<Type> destinationElemType =
+          getPointerLikeElementTypeForGEPLowering(op.getPtr().getType(),
+                                                  rewriter);
+      if (failed(destinationElemType))
+        return rewriter.notifyMatchFailure(
+            op, "expected !pto.ptr or memref destination type");
       elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
-                                             adaptor.getValue().getType(),
+                                             *destinationElemType,
                                              adaptor.getPtr(), ValueRange{offset});
     }
 
+    unsigned alignment = getPTOAccessByteAlignment(
+        op.getPtr().getType(), op.getValue().getType(),
+        adaptor.getValue().getType(), rewriter);
     rewriter.replaceOpWithNewOp<LLVM::StoreOp>(
-        op, adaptor.getValue(), elemPtr,
-        getNaturalByteAlignment(adaptor.getValue().getType()));
+        op, adaptor.getValue(), elemPtr, alignment);
     return success();
   }
 };
