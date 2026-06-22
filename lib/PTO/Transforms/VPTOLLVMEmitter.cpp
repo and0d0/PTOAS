@@ -149,6 +149,19 @@ static Type normalizeGEPElementTypeForLLVMLowering(Type type,
   return normalizePayloadTypeForLLVMLowering(type, builder);
 }
 
+static FailureOr<Type>
+getPointerLikeElementTypeForGEPLowering(Type type, Builder &builder) {
+  Type elementType;
+  if (auto ptrType = dyn_cast<pto::PtrType>(type)) {
+    elementType = ptrType.getElementType();
+  } else if (auto memRefType = dyn_cast<MemRefType>(type)) {
+    elementType = memRefType.getElementType();
+  } else {
+    return failure();
+  }
+  return normalizeGEPElementTypeForLLVMLowering(elementType, builder);
+}
+
 static Type convertVPTOType(Type type, Builder &builder) {
   if (auto vecType = dyn_cast<pto::VRegType>(type)) {
     Type elementType =
@@ -9442,13 +9455,14 @@ public:
 
     Value elemPtr = adaptor.getPtr();
     if (!matchPattern(offset, m_Zero())) {
-      auto sourcePtrType = dyn_cast<pto::PtrType>(op.getPtr().getType());
-      if (!sourcePtrType)
-        return rewriter.notifyMatchFailure(op, "expected !pto.ptr source type");
-      Type sourceElemType = normalizeGEPElementTypeForLLVMLowering(
-          sourcePtrType.getElementType(), rewriter);
+      FailureOr<Type> sourceElemType =
+          getPointerLikeElementTypeForGEPLowering(op.getPtr().getType(),
+                                                  rewriter);
+      if (failed(sourceElemType))
+        return rewriter.notifyMatchFailure(
+            op, "expected !pto.ptr or memref source type");
       elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
-                                             sourceElemType,
+                                             *sourceElemType,
                                              adaptor.getPtr(),
                                              ValueRange{offset});
     }
@@ -9598,14 +9612,14 @@ public:
 
     Value elemPtr = adaptor.getPtr();
     if (!matchPattern(offset, m_Zero())) {
-      auto destinationPtrType = dyn_cast<pto::PtrType>(op.getPtr().getType());
-      if (!destinationPtrType)
-        return rewriter.notifyMatchFailure(op,
-                                           "expected !pto.ptr destination type");
-      Type destinationElemType = normalizeGEPElementTypeForLLVMLowering(
-          destinationPtrType.getElementType(), rewriter);
+      FailureOr<Type> destinationElemType =
+          getPointerLikeElementTypeForGEPLowering(op.getPtr().getType(),
+                                                  rewriter);
+      if (failed(destinationElemType))
+        return rewriter.notifyMatchFailure(
+            op, "expected !pto.ptr or memref destination type");
       elemPtr = rewriter.create<LLVM::GEPOp>(op.getLoc(), llvmPtrType,
-                                             destinationElemType,
+                                             *destinationElemType,
                                              adaptor.getPtr(), ValueRange{offset});
     }
 
