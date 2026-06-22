@@ -20,7 +20,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 }
 
 // CHECK-LABEL: llvm.func @pto_load_store_vector_element
-// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, vector<2xi8>
+// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, !llvm.vec<2 x i8>
 // CHECK: llvm.load {{.*}} : !llvm.ptr<6> -> !llvm.vec<2 x float8e4m3>
-// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, vector<2xi8>
+// CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<6>, i64) -> !llvm.ptr<6>, !llvm.vec<2 x i8>
 // CHECK: llvm.store {{.*}} : !llvm.vec<2 x float8e4m3>, !llvm.ptr<6>

@@ -67,6 +67,7 @@ static std::string getMemoryElementTypeFragment(Type type);
 static Type getElementTypeFromVectorLike(Type type);
 static std::optional<int64_t> getElementCountFromVectorLike(Type type);
 static unsigned getNaturalByteAlignment(Type type);
+static Type convertVPTOType(Type type, Builder &builder);
 
 static Type getLowPrecisionLLVMType(Type type, MLIRContext *context) {
   if (pto::isPTOHiFloat8Type(type))
@@ -165,7 +166,8 @@ getPointerLikeElementTypeForGEPLowering(Type type, Builder &builder) {
   FailureOr<Type> elementType = getPointerLikeElementType(type);
   if (failed(elementType))
     return failure();
-  return normalizeGEPElementTypeForLLVMLowering(*elementType, builder);
+  Type convertedElementType = convertVPTOType(*elementType, builder);
+  return normalizeGEPElementTypeForLLVMLowering(convertedElementType, builder);
 }
 
 static unsigned getPTOAccessByteAlignment(Type ptrLikeType, Type valueType,

@@ -12,9 +12,13 @@
 #ifndef __CPU_SIM
 #include "acl/acl.h"
 #endif
-extern "C" __global__ [aicore] void pto_contiguous_load_store_kernel(__gm__ float *src,
-                                                                      __gm__ float *dst);
-void LaunchPto_contiguous_load_store_kernel(float *src, float *dst, void *stream) {
-  pto_contiguous_load_store_kernel<<<1, nullptr, stream>>>((__gm__ float *)src,
-                                                           (__gm__ float *)dst);
+extern "C" __global__ [aicore] void pto_contiguous_load_store_kernel(
+    __gm__ float *src_f32, __gm__ float *dst_f32,
+    __gm__ int *src_i32, __gm__ int *dst_i32);
+void LaunchPto_contiguous_load_store_kernel(float *src_f32, float *dst_f32,
+                                            int *src_i32, int *dst_i32,
+                                            void *stream) {
+  pto_contiguous_load_store_kernel<<<1, nullptr, stream>>>(
+      (__gm__ float *)src_f32, (__gm__ float *)dst_f32,
+      (__gm__ int *)src_i32, (__gm__ int *)dst_i32);
 }

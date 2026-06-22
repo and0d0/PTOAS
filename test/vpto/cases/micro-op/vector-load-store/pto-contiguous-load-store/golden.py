@@ -18,17 +18,31 @@ def write_f32(path: Path, values: list[float]) -> None:
     path.write_bytes(struct.pack(f"<{len(values)}f", *values))
 
 
+def write_i32(path: Path, values: list[int]) -> None:
+    path.write_bytes(struct.pack(f"<{len(values)}i", *values))
+
+
 def generate(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    src = [float(i) * 1.25 + 3.0 for i in range(ELEMS)]
-    dst = [-7.0 for _ in range(ELEMS)]
-    golden = list(dst)
-    golden[0:4] = src[4:8]
-    golden[8:12] = src[16:20]
-    golden[32:36] = src[32:36]
-    write_f32(output_dir / "src.bin", src)
-    write_f32(output_dir / "dst.bin", dst)
-    write_f32(output_dir / "golden_dst.bin", golden)
+    src_f32 = [float(i) * 1.25 + 3.0 for i in range(ELEMS)]
+    dst_f32 = [-7.0 for _ in range(ELEMS)]
+    golden_f32 = list(dst_f32)
+    golden_f32[0:4] = src_f32[4:8]
+    golden_f32[8:12] = src_f32[16:20]
+    golden_f32[32:36] = src_f32[32:36]
+
+    src_i32 = [i * 17 - 9 for i in range(ELEMS)]
+    dst_i32 = [-11 for _ in range(ELEMS)]
+    golden_i32 = list(dst_i32)
+    golden_i32[0:4] = src_i32[4:8]
+    golden_i32[8:12] = src_i32[16:20]
+
+    write_f32(output_dir / "src_f32.bin", src_f32)
+    write_f32(output_dir / "dst_f32.bin", dst_f32)
+    write_f32(output_dir / "golden_dst_f32.bin", golden_f32)
+    write_i32(output_dir / "src_i32.bin", src_i32)
+    write_i32(output_dir / "dst_i32.bin", dst_i32)
+    write_i32(output_dir / "golden_dst_i32.bin", golden_i32)
 
 
 def main():

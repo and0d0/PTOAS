@@ -13,25 +13,45 @@ import sys
 from pathlib import Path
 
 
-def read_f32(path: str) -> list[float]:
+def read_values(path: str, fmt: str):
     data = Path(path).read_bytes()
-    if len(data) % 4 != 0:
-        raise ValueError(f"{path} size is not a multiple of f32")
-    return list(struct.unpack(f"<{len(data) // 4}f", data))
+    size = struct.calcsize(fmt)
+    if len(data) % size != 0:
+        raise ValueError(f"{path} size is not a multiple of {fmt}")
+    return list(struct.unpack(f"<{len(data) // size}{fmt}", data))
+
+
+def compare_exact(name: str, golden, out) -> bool:
+    if len(golden) != len(out):
+        print(f"[ERROR] {name} shape mismatch, golden={len(golden)}, out={len(out)}")
+        return False
+    for idx, (expected, actual) in enumerate(zip(golden, out)):
+        if isinstance(expected, float):
+            ok = math.isclose(expected, actual, rel_tol=0.0, abs_tol=0.0)
+        else:
+            ok = expected == actual
+        if not ok:
+            print(
+                f"[ERROR] {name} mismatch at idx={idx}, golden={expected}, out={actual}"
+            )
+            return False
+    return True
 
 
 def main():
-    golden = read_f32("golden_dst.bin")
-    out = read_f32("dst.bin")
-    if len(golden) != len(out):
-        print(f"[ERROR] shape mismatch, golden={len(golden)}, out={len(out)}")
+    ok = True
+    ok = compare_exact(
+        "dst_f32",
+        read_values("golden_dst_f32.bin", "f"),
+        read_values("dst_f32.bin", "f"),
+    ) and ok
+    ok = compare_exact(
+        "dst_i32",
+        read_values("golden_dst_i32.bin", "i"),
+        read_values("dst_i32.bin", "i"),
+    ) and ok
+    if not ok:
         sys.exit(2)
-    for idx, (expected, actual) in enumerate(zip(golden, out)):
-        if not math.isclose(expected, actual, rel_tol=0.0, abs_tol=0.0):
-            print(
-                f"[ERROR] mismatch at idx={idx}, golden={expected}, out={actual}"
-            )
-            sys.exit(2)
     print("[INFO] compare passed")
 
 

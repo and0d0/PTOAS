@@ -7,52 +7,73 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
-  func.func @pto_contiguous_load_store_kernel(%src: !pto.ptr<f32, gm>, %dst: !pto.ptr<f32, gm>) attributes {pto.aicore} {
+  func.func @pto_contiguous_load_store_kernel(
+      %src_f32: !pto.ptr<f32, gm>, %dst_f32: !pto.ptr<f32, gm>,
+      %src_i32: !pto.ptr<i32, gm>, %dst_i32: !pto.ptr<i32, gm>) attributes {pto.aicore} {
     %c0_i64 = arith.constant 0 : i64
     %c1_i64 = arith.constant 1 : i64
     %c256_i64 = arith.constant 256 : i64
     %c512_i64 = arith.constant 512 : i64
+    %c768_i64 = arith.constant 768 : i64
+    %c1024_i64 = arith.constant 1024 : i64
     %dim_x = arith.constant 1 : i32
     %dim_y = arith.constant 1 : i32
     %dim_z = arith.constant 1 : i32
 
-    %ub_src = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
-    %ub_dst = pto.castptr %c512_i64 : i64 -> !pto.ptr<f32, ub>
+    %ub_src_f32 = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
+    %ub_dst_f32 = pto.castptr %c512_i64 : i64 -> !pto.ptr<f32, ub>
+    %ub_src_i32 = pto.castptr %c768_i64 : i64 -> !pto.ptr<i32, ub>
+    %ub_dst_i32 = pto.castptr %c1024_i64 : i64 -> !pto.ptr<i32, ub>
 
-    pto.mte_gm_ub %src, %ub_src, %c0_i64, %c256_i64
+    pto.mte_gm_ub %src_f32, %ub_src_f32, %c0_i64, %c256_i64
       nburst(%c1_i64, %c256_i64, %c256_i64)
       : !pto.ptr<f32, gm>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64
+    pto.mte_gm_ub %src_i32, %ub_src_i32, %c0_i64, %c256_i64
+      nburst(%c1_i64, %c256_i64, %c256_i64)
+      : !pto.ptr<i32, gm>, !pto.ptr<i32, ub>, i64, i64, i64, i64, i64
 
     pto.set_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
     pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
 
-    pto.simt_launch @pto_contiguous_load_store_body<<<%dim_x, %dim_y, %dim_z>>>(%ub_src, %ub_dst)
-      : (!pto.ptr<f32, ub>, !pto.ptr<f32, ub>) -> ()
+    pto.simt_launch @pto_contiguous_load_store_body<<<%dim_x, %dim_y, %dim_z>>>(
+        %ub_src_f32, %ub_dst_f32, %ub_src_i32, %ub_dst_i32)
+      : (!pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<i32, ub>, !pto.ptr<i32, ub>) -> ()
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_dst, %dst, %c256_i64
+    pto.mte_ub_gm %ub_dst_f32, %dst_f32, %c256_i64
       nburst(%c1_i64, %c256_i64, %c256_i64)
       : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+    pto.mte_ub_gm %ub_dst_i32, %dst_i32, %c256_i64
+      nburst(%c1_i64, %c256_i64, %c256_i64)
+      : !pto.ptr<i32, ub>, !pto.ptr<i32, gm>, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
     return
   }
 
-  func.func @pto_contiguous_load_store_body(%src: !pto.ptr<f32, ub>, %dst: !pto.ptr<f32, ub>) attributes {pto.simt_entry} {
+  func.func @pto_contiguous_load_store_body(
+      %src_f32: !pto.ptr<f32, ub>, %dst_f32: !pto.ptr<f32, ub>,
+      %src_i32: !pto.ptr<i32, ub>, %dst_i32: !pto.ptr<i32, ub>) attributes {pto.simt_entry} {
     %c0 = arith.constant 0 : index
     %c4 = arith.constant 4 : index
     %c8 = arith.constant 8 : index
     %c16 = arith.constant 16 : index
     %c32 = arith.constant 32 : index
 
-    %v4 = pto.load %src[%c4] : !pto.ptr<f32, ub> -> vector<4xf32>
-    pto.store %v4, %dst[%c0] : !pto.ptr<f32, ub>, vector<4xf32>
+    %f32_v4 = pto.load %src_f32[%c4] : !pto.ptr<f32, ub> -> vector<4xf32>
+    pto.store %f32_v4, %dst_f32[%c0] : !pto.ptr<f32, ub>, vector<4xf32>
 
-    %v4_mid = pto.load %src[%c16] : !pto.ptr<f32, ub> -> vector<4xf32>
-    pto.store %v4_mid, %dst[%c8] : !pto.ptr<f32, ub>, vector<4xf32>
+    %f32_v4_mid = pto.load %src_f32[%c16] : !pto.ptr<f32, ub> -> vector<4xf32>
+    pto.store %f32_v4_mid, %dst_f32[%c8] : !pto.ptr<f32, ub>, vector<4xf32>
 
-    %v4_tail = pto.load %src[%c32] : !pto.ptr<f32, ub> -> vector<4xf32>
-    pto.store %v4_tail, %dst[%c32] : !pto.ptr<f32, ub>, vector<4xf32>
+    %f32_v4_tail = pto.load %src_f32[%c32] : !pto.ptr<f32, ub> -> vector<4xf32>
+    pto.store %f32_v4_tail, %dst_f32[%c32] : !pto.ptr<f32, ub>, vector<4xf32>
+
+    %i32_v4 = pto.load %src_i32[%c4] : !pto.ptr<i32, ub> -> vector<4xi32>
+    pto.store %i32_v4, %dst_i32[%c0] : !pto.ptr<i32, ub>, vector<4xi32>
+
+    %i32_v4_mid = pto.load %src_i32[%c16] : !pto.ptr<i32, ub> -> vector<4xi32>
+    pto.store %i32_v4_mid, %dst_i32[%c8] : !pto.ptr<i32, ub>, vector<4xi32>
     return
   }
 }
