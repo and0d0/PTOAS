@@ -292,6 +292,18 @@ class AddressValue(_SurfaceValue):
     def __radd__(self, offset):
         return AddressOffsetValue(self, offset)
 
+    def __getitem__(self, offset):
+        if isinstance(offset, slice):
+            raise TypeError("pointer slice indexing is not implemented; use scalar.load(ptr, offset) instead")
+        from . import scalar
+        return scalar.load(self, offset)
+
+    def __setitem__(self, offset, value):
+        if isinstance(offset, slice):
+            raise TypeError("pointer slice indexing is not implemented; use scalar.store(value, ptr, offset) instead")
+        from . import scalar
+        scalar.store(value, self, offset)
+
 
 @dataclass(frozen=True)
 class AddressOffsetValue:
