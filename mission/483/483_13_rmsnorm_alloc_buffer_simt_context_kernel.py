@@ -5,7 +5,6 @@
 #   - UB scratch and lane-local storage both use alloc_buffer.
 # - scalar.load/store support contiguous vector access.
 # - pto.vec(dtype, lanes)(scalar) type def & broadcasts a scalar to a vector.
-# - scalar.reduce(vector, op="add") reduces inside one workitem.(未找到合适接口，再看看或新增)
 # - pto.simt_allreduce_sum(...) reduces across SIMT workitems.
 # - SIMT launch is written as the requested context form: with pto.simt(x, y, z).
 #
@@ -57,7 +56,8 @@ def rmsnorm_4096_token_body(
     tx = pto.get_tid_x()
     local_sum = 0.0
 
-    # 1. Each workitem reads small contiguous chunks and accumulates sum(x^2).
+    # 1. Each workitem uses 128-bit vector values only for UB -> x_frag moves.
+    #    The arithmetic path reads one fp32 from x_frag at a time.
     for r in pto.static_range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
         x_offset = ping * hidden_size + lane_offset
@@ -66,8 +66,9 @@ def rmsnorm_4096_token_body(
         x4 = scalar.load(x_ub, x_offset, contiguous=lanes)
         scalar.store(x4, x_frag, frag_offset)
 
-        sq4 = x4 * x4
-        local_sum = local_sum + scalar.reduce(sq4, op="add")
+        for lane in pto.static_range(0, lanes):
+            x = scalar.load(x_frag, frag_offset + lane)
+            local_sum = local_sum + x * x
 
     # 2. Reduce the per-workitem local sums across the SIMT launch.
     sum_sq = pto.simt_allreduce_sum(
@@ -84,18 +85,17 @@ def rmsnorm_4096_token_body(
     if tx == 0:
         scalar.store(rstd, rstd_ub, ping)
 
-    # 4. y = x * rstd * w. Broadcast scalar rstd to vector<lanesxf32> first.
-    rstd_vec = pto.vec(pto.f32, lanes)(rstd)
-
+    # 4. y = x * rstd * w. Read x_frag/w_frag as scalar fp32 values.
     for r in pto.static_range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
         y_offset = ping * hidden_size + lane_offset
         frag_offset = r * lanes
 
-        x4 = scalar.load(x_frag, frag_offset, contiguous=lanes)
-        w4 = scalar.load(w_frag, frag_offset, contiguous=lanes)
-        y4 = x4 * rstd_vec * w4
-        scalar.store(y4, y_ub, y_offset)
+        for lane in pto.static_range(0, lanes):
+            x = scalar.load(x_frag, frag_offset + lane)
+            w = scalar.load(w_frag, frag_offset + lane)
+            y = x * rstd * w
+            scalar.store(y, y_ub, y_offset + lane)
 
 
 # =============================================================================
