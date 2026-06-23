@@ -4,7 +4,6 @@
 # - pto.alloc_buffer(...) returns a typed pointer.
 #   - UB scratch and lane-local storage both use alloc_buffer.
 # - scalar.load/store support contiguous vector access.
-# - pto.vec(dtype, lanes)(scalar) type def & broadcasts a scalar to a vector.
 # - pto.simt_allreduce_sum(...) reduces across SIMT workitems.
 # - SIMT launch is written as the requested context form: with pto.simt(x, y, z).
 #
@@ -23,7 +22,7 @@ def init_weight_fragment_body(
     *,
     threads: pto.const_expr,
     rounds: pto.const_expr,
-    lanes: pto.const_expr = 4,
+    lanes: pto.const_expr = 2,
 ):
     tx = pto.get_tid_x()
 
@@ -31,8 +30,8 @@ def init_weight_fragment_body(
         ub_offset = r * threads * lanes + tx * lanes
         frag_offset = r * lanes
 
-        w4 = scalar.load(w_ub, ub_offset, contiguous=lanes)
-        scalar.store(w4, w_frag, frag_offset)
+        w_vec = scalar.load(w_ub, ub_offset, contiguous=lanes)
+        scalar.store(w_vec, w_frag, frag_offset)
 
 
 # =============================================================================
@@ -50,21 +49,23 @@ def rmsnorm_4096_token_body(
     *,
     threads: pto.const_expr,
     rounds: pto.const_expr,
-    lanes: pto.const_expr = 4,
+    lanes: pto.const_expr = 2,
     hidden_size: pto.const_expr = 4096,
 ):
     tx = pto.get_tid_x()
     local_sum = 0.0
 
-    # 1. Each workitem uses 128-bit vector values only for UB -> x_frag moves.
+    # 1. Match the TL kernel's float2 movement pattern:
+    #      x_frag[i * 2 : i * 2 + 2] =
+    #          x_ub[ping * 4096 + i * 256 + tx * 2 : ... + 2]
     #    The arithmetic path reads one fp32 from x_frag at a time.
     for r in pto.static_range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
         x_offset = ping * hidden_size + lane_offset
         frag_offset = r * lanes
 
-        x4 = scalar.load(x_ub, x_offset, contiguous=lanes)
-        scalar.store(x4, x_frag, frag_offset)
+        x_vec = scalar.load(x_ub, x_offset, contiguous=lanes)
+        scalar.store(x_vec, x_frag, frag_offset)
 
         for lane in pto.static_range(0, lanes):
             x = scalar.load(x_frag, frag_offset + lane)
@@ -85,7 +86,9 @@ def rmsnorm_4096_token_body(
     if tx == 0:
         scalar.store(rstd, rstd_ub, ping)
 
-    # 4. y = x * rstd * w. Read x_frag/w_frag as scalar fp32 values.
+    # 4. y = x * rstd * w. The TL kernel stores float2 chunks at the same
+    #    i * 256 + tx * 2 layout; this draft computes and stores each fp32
+    #    scalar until vector value construction is added.
     for r in pto.static_range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
         y_offset = ping * hidden_size + lane_offset
@@ -112,7 +115,7 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     *,
     threads: pto.const_expr,
     rounds: pto.const_expr,
-    lanes: pto.const_expr = 4,
+    lanes: pto.const_expr = 2,
     hidden_size: pto.const_expr = 4096,
     n_cores: pto.const_expr = 64,
     tokens_per_core: pto.const_expr = 64,
@@ -214,8 +217,8 @@ def rmsnorm_4096_x128(
         eps,
         batch,
         threads=128,
-        rounds=8,
-        lanes=4,
+        rounds=16,
+        lanes=2,
         tokens_per_core=64,
     )
 
