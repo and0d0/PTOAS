@@ -40,7 +40,7 @@ add_mlir_dialect_library(PTOTransforms
   VMILegalizeArithSelect.cpp
   VMILayoutAssignment.cpp
   VMILayoutFoldConsumers.cpp
-  VMILocalRecipeRegistry.cpp
+  VMILayoutSupport.cpp
   VMILayoutRematerialize.cpp
   VMILayoutSinkMaterialization.cpp
   VMIToVPTO.cpp
