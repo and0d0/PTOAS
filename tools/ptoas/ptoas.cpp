@@ -465,6 +465,11 @@ llvm::cl::opt<bool> mlir::pto::emitVPTO(
     llvm::cl::desc("Write final post-pass VPTO IR to -o"),
     llvm::cl::init(false));
 
+llvm::cl::opt<bool> mlir::pto::emitVPTOLLVMDialect(
+    "emit-vpto-llvm-ir",
+    llvm::cl::desc("Write translated VPTO LLVM IR to -o"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> vptoPrintIR(
     "vpto-print-ir",
     llvm::cl::desc("Print post-pass VPTO backend IR to stderr"),
@@ -491,6 +496,11 @@ llvm::cl::opt<std::string> mlir::pto::ptoSeamIRFile(
     llvm::cl::desc("Write shared pre-backend seam IR to a file"),
     llvm::cl::value_desc("path"),
     llvm::cl::init(""));
+
+llvm::cl::opt<std::string> mlir::pto::cannOutputVersion(
+    "cann-output-version",
+    llvm::cl::desc("Override the CANN version used for lowering and public ABI output selection; examples: 9.0.0, 9.0.0-beta.1"),
+    llvm::cl::value_desc("version"), llvm::cl::init(""));
 
 enum class PTOBuildLevel {
   Level1,
@@ -575,17 +585,6 @@ static bool hasUnexpandedTileOps(ModuleOp module) {
     if (found)
       return;
     if (isa<pto::OpPipeInterface>(op))
-      found = true;
-  });
-  return found;
-}
-
-static bool hasTilelangInlineHelpers(ModuleOp module) {
-  bool found = false;
-  module.walk([&](func::FuncOp func) {
-    if (found)
-      return;
-    if (func->hasAttr("pto.tilelang.inline_proc"))
       found = true;
   });
   return found;
@@ -1128,6 +1127,64 @@ static void rewriteEventIdArrayMarkers(std::string &cpp) {
   rewriteMarkerCallsToSubscripts(cpp, kEventIdMarkerRewrites);
 }
 
+static bool isPreprocessorDirectiveLine(llvm::StringRef trimmedLine) {
+  return trimmedLine.starts_with("#");
+}
+
+// Nested emitc.verbatim ops inside emitc.for / emitc.if regions currently
+// pick up an extra trailing semicolon from EmitC C++ emission, which produces
+// invalid lines such as `#if defined(__DAV_VEC__);` and `set_mask_norm();;`.
+// Trim only those malformed suffixes here so bisheng can compile the emitted
+// source until the upstream printer behavior is fixed.
+static void rewriteMalformedVerbatimSemicolons(std::string &cpp) {
+  if (cpp.empty())
+    return;
+
+  llvm::StringRef input(cpp);
+  std::string rewritten;
+  rewritten.reserve(cpp.size());
+
+  bool prevWasPreprocessorDirective = false;
+  size_t offset = 0;
+  while (offset < input.size()) {
+    size_t newlinePos = input.find('\n', offset);
+    bool hasNewline = newlinePos != llvm::StringRef::npos;
+    llvm::StringRef line =
+        hasNewline ? input.slice(offset, newlinePos) : input.drop_front(offset);
+    std::string current(line.str());
+    llvm::StringRef trimmed = llvm::StringRef(current).trim();
+
+    if (trimmed == ";" && prevWasPreprocessorDirective) {
+      // `#endif ...` in nested verbatim blocks currently materializes as the
+      // directive line followed by a standalone `;` on the next line.
+      prevWasPreprocessorDirective = false;
+    } else {
+      if (isPreprocessorDirectiveLine(trimmed) && trimmed.ends_with(";")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      } else if (!trimmed.empty() && !trimmed.starts_with("//") &&
+                 !trimmed.starts_with("/*") && trimmed.ends_with(";;")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      }
+
+      rewritten.append(current);
+      if (hasNewline)
+        rewritten.push_back('\n');
+      prevWasPreprocessorDirective =
+          isPreprocessorDirectiveLine(llvm::StringRef(current).trim());
+    }
+
+    if (!hasNewline)
+      break;
+    offset = newlinePos + 1;
+  }
+
+  cpp.swap(rewritten);
+}
+
 static bool rewriteAddPtrTraceMarkers(std::string &cpp, bool showTrace) {
   size_t searchPos = 0;
   bool changed = false;
@@ -1517,13 +1574,6 @@ static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module, int argc,
   kernelModulePM.addPass(mlir::createCanonicalizerPass());
 }
 
-static void inlineTilelangHelpersOnVPTOInput(PassManager &pm) {
-  auto &kernelModulePM = pm.nest<ModuleOp>();
-  kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
-  kernelModulePM.addPass(mlir::createSCCPPass());
-  kernelModulePM.addPass(mlir::createCanonicalizerPass());
-}
-
 static pto::VPTOEmissionOptions
 buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion) {
   pto::VPTOEmissionOptions options;
@@ -1542,6 +1592,17 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     module.print(os);
     os << "\n";
     os.flush();
+    return 0;
+  }
+
+  if (emitVPTOLLVMDialect) {
+    result.kind = PTOASCompileResultKind::Text;
+    pto::VPTOEmissionOptions options = buildVPTOEmissionOptions(cannVersion);
+    if (failed(pto::lowerVPTOModuleToLLVMIRText(
+            module, options, result.textOutput, llvm::errs()))) {
+      llvm::errs() << "Error: Failed to lower VPTO to LLVM IR.\n";
+      return 1;
+    }
     return 0;
   }
 
@@ -1570,14 +1631,11 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
                                             int argc, char **argv,
-                                            bool hasTileOpsToExpand,
-                                            bool hasTilelangHelpers) {
+                                            bool hasTileOpsToExpand) {
   PassManager pm(module->getContext());
   pm.enableVerifier();
   pm.addPass(pto::createVPTOSplitCVModulePass());
   pm.addPass(pto::createVPTONormalizeContainerPass());
-  if (!hasTileOpsToExpand && hasTilelangHelpers)
-    inlineTilelangHelpersOnVPTOInput(pm);
   if (hasTileOpsToExpand)
     lowerPTOToVPTOBackend(pm, module.get(), argc, argv);
   prepareVPTOForEmission(pm);
@@ -1601,7 +1659,8 @@ int mlir::pto::compilePTOASModule(
   char **argv = context.getArgv();
 
   if (effectiveBackend != PTOBackend::VPTO &&
-      (emitVPTO || ptoPrintSeamIR || !ptoSeamIRFile.empty())) {
+      (emitVPTO || emitVPTOLLVMDialect || ptoPrintSeamIR ||
+       !ptoSeamIRFile.empty())) {
     llvm::errs() << "Error: VPTO-specific flags require "
                     "--pto-backend=vpto or pto.backend = \"vpto\".\n";
     return 1;
@@ -1721,8 +1780,17 @@ int mlir::pto::compilePTOASModule(
       return 1;
   }
 
+  {
+    PassManager preBackendPM(module->getContext());
+    preBackendPM.enableVerifier();
+    preBackendPM.addPass(pto::createPTONormalizeUncoveredTileSectionsPass());
+    if (failed(preBackendPM.run(module.get()))) {
+      llvm::errs() << "Error: failed to normalize uncovered PTO tile sections.\n";
+      return 1;
+    }
+  }
+
   const bool hasTileOpsToExpand = hasUnexpandedTileOps(*module);
-  const bool hasTilelangHelpers = hasTilelangInlineHelpers(*module);
 
   if (effectiveBackend == PTOBackend::VPTO && !hasTileOpsToExpand) {
     if (ptoPrintSeamIR || !ptoSeamIRFile.empty()) {
@@ -1730,8 +1798,7 @@ int mlir::pto::compilePTOASModule(
                       "skipping the shared PTO-to-VPTO lowering pipeline.\n";
       return 1;
     }
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
-                                      hasTilelangHelpers)))
+    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
                                  context.getCANNVersionOrDefault());
@@ -1790,6 +1857,8 @@ int mlir::pto::compilePTOASModule(
   // Conditionally add one automatic synchronization mode. Barrier-all is a
   // conservative standalone pass; InsertSync and GraphSyncSolver are set/wait
   // solvers, while BufidSync is A5-only get_buf/rls_buf synchronization.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      pto::createPTOVerifySubkernelPipeContractPass());
   if (enableInsertSync)
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOInsertSyncPass());
   else if (enableBufidSync) {
@@ -1823,6 +1892,12 @@ int mlir::pto::compilePTOASModule(
   // backends consume the same post-planning seam IR.
   pm.addPass(pto::createPTOMaterializeTileHandlesPass());
   pm.addPass(createCSEPass());
+  // Inline PTODSL backend helpers only after the shared mainline has
+  // materialized tile-native handles, so helper arguments are restored to the
+  // tile_buf ABI before qk.as_ptr()-style bridges are cloned into callers.
+  pm.addPass(pto::createPTOInlineBackendHelpersPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
   if (failed(applyConfiguredPassManagerCLOptions(pm, "main PTOAS pipeline")))
     return 1;
 
@@ -1842,8 +1917,7 @@ int mlir::pto::compilePTOASModule(
     if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
       return 1;
 
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
-                                      hasTilelangHelpers)))
+    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
                                  context.getCANNVersionOrDefault());
@@ -1889,6 +1963,7 @@ int mlir::pto::compilePTOASModule(
   rewriteEventIdArrayMarkers(cppOutput);
   pto::rewriteLastUseMarkersInCpp(cppOutput);
   rewriteAddPtrTraceMarkers(cppOutput, emitAddPtrTrace);
+  rewriteMalformedVerbatimSemicolons(cppOutput);
   rewriteScalarConstantDecls(cppOutput);
   rewriteHoistedGlobalTensorDecls(cppOutput);
 

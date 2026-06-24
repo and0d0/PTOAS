@@ -39,9 +39,11 @@ std::unique_ptr<Pass> createPTOLowerFrontendPipeOpsPass();
 std::unique_ptr<Pass> createPTOInferValidatePipeInitPass();
 std::unique_ptr<Pass> createPTOResolveReservedBuffersPass();
 std::unique_ptr<Pass> createPTOWrapFunctionsInSectionsPass();
+std::unique_ptr<Pass> createPTONormalizeUncoveredTileSectionsPass();
 std::unique_ptr<Pass> createVPTOSplitCVModulePass();
 std::unique_ptr<Pass> createVPTONormalizeContainerPass();
 std::unique_ptr<Pass> createPTOVerifyTFreePass();
+std::unique_ptr<Pass> createPTOVerifySubkernelPipeContractPass();
 
 // Creates a pass for ...
 std::unique_ptr<Pass> createPTOInsertSyncPass();
@@ -108,6 +110,8 @@ std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass(llvm::StringRef foldMode);
 std::unique_ptr<Pass> createPTOCanonicalizeIRPass();
 std::unique_ptr<Pass>
 createPTOInlineLibCallPass(const PTOInlineLibCallOptions &options = {});
+std::unique_ptr<Pass> createPTOInlineBackendHelpersPass(
+    const PTOInlineBackendHelpersOptions &options = {});
 void registerPTOViewToMemrefPass();
 
 //===----------------------------------------------------------------------===//

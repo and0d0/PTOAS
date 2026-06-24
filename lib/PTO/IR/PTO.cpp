@@ -256,6 +256,53 @@ static int64_t getPTOTypeRank(Type type) {
   return -1;
 }
 
+func::FuncOp mlir::pto::lookupPeerFuncAcrossContainer(Operation *op,
+                                                      FlatSymbolRefAttr peerAttr) {
+  if (!op || !peerAttr)
+    return {};
+
+  auto currentFunc = op->getParentOfType<func::FuncOp>();
+  if (!currentFunc)
+    return {};
+
+  auto currentChildModule = currentFunc->getParentOfType<ModuleOp>();
+  if (!currentChildModule)
+    return {};
+
+  StringRef target = peerAttr.getValue();
+  for (func::FuncOp funcOp : currentChildModule.getOps<func::FuncOp>()) {
+    if (funcOp.getSymName() == target)
+      return funcOp;
+  }
+  if (auto localPeer = dyn_cast_or_null<func::FuncOp>(
+          SymbolTable::lookupSymbolIn(currentChildModule, target))) {
+    return localPeer;
+  }
+
+  Operation *maybeOuter = currentChildModule->getParentOp();
+  auto outerModule = dyn_cast_or_null<ModuleOp>(maybeOuter);
+  if (!outerModule)
+    return {};
+
+  SmallVector<func::FuncOp> fallbackMatches;
+  outerModule.walk([&](func::FuncOp funcOp) {
+    auto visibility = funcOp->getAttrOfType<StringAttr>("sym_visibility");
+    if (visibility && visibility.getValue() == "private")
+      return WalkResult::advance();
+
+    StringRef symbolName = funcOp.getSymName();
+    if (symbolName == target ||
+        (funcOp->hasAttr(kPTODSLLogicalNameAttrName) &&
+         getPTODSLLogicalNameOrSymbolName(funcOp) == target))
+      fallbackMatches.push_back(funcOp);
+    return WalkResult::advance();
+  });
+
+  if (fallbackMatches.size() == 1)
+    return fallbackMatches.front();
+  return {};
+}
+
 static bool isGmAddressSpaceAttr(Attribute memorySpace) {
   if (!memorySpace)
     return true;
@@ -2627,13 +2674,47 @@ bool mlir::pto::hasExplicitPTOEntryAttr(func::FuncOp func) {
                   func->hasAttrOfType<UnitAttr>(kLegacyPTOAICoreAttrName));
 }
 
-static constexpr StringLiteral kEffectivePTOEntryAttrName =
-    "pto.internal.entry";
+bool mlir::pto::hasExplicitPTOEntryAttr(LLVM::LLVMFuncOp func) {
+  return func && (func->hasAttrOfType<UnitAttr>(kPTOEntryAttrName) ||
+                  func->hasAttrOfType<UnitAttr>(kLegacyHACCEntryAttrName) ||
+                  func->hasAttrOfType<UnitAttr>(kPTOKernelAttrName) ||
+                  func->hasAttrOfType<UnitAttr>(kLegacyPTOAICoreAttrName));
+}
 
 bool mlir::pto::isPTOEntryFunction(func::FuncOp func) {
   if (!func || func.isDeclaration())
     return false;
   return hasExplicitPTOEntryAttr(func);
+}
+
+bool mlir::pto::isPTOEntryFunction(LLVM::LLVMFuncOp func) {
+  if (!func || func.isDeclaration())
+    return false;
+  return hasExplicitPTOEntryAttr(func);
+}
+
+bool mlir::pto::hasExternalArtifactVisibility(func::FuncOp func) {
+  if (!func || func.isDeclaration())
+    return false;
+  if (isPTOEntryFunction(func))
+    return true;
+  auto attr = func->getAttrOfType<StringAttr>(kPTOVisibilityAttrName);
+  if (!attr)
+    return false;
+  return attr.getValue() == kPTOVisibilityExternalValue;
+}
+
+void mlir::pto::setExternalArtifactVisibility(func::FuncOp func,
+                                              bool isExternal) {
+  if (!func)
+    return;
+  if (isExternal) {
+    func->setAttr(kPTOVisibilityAttrName,
+                  StringAttr::get(func.getContext(),
+                                  kPTOVisibilityExternalValue));
+    return;
+  }
+  func->removeAttr(kPTOVisibilityAttrName);
 }
 
 LogicalResult mlir::pto::validatePTOEntryFunctions(ModuleOp module) {
@@ -2651,7 +2732,7 @@ LogicalResult mlir::pto::validatePTOEntryFunctions(ModuleOp module) {
   }
 
   for (auto func : module.getOps<func::FuncOp>()) {
-    if (!hasExplicitPTOEntryAttr(func))
+    if (!isPTOEntryFunction(func))
       continue;
     if (func.getFunctionType().getNumResults() != 0) {
       return func.emitOpError()
@@ -2662,11 +2743,7 @@ LogicalResult mlir::pto::validatePTOEntryFunctions(ModuleOp module) {
 }
 
 void mlir::pto::annotatePTOEntryFunctions(ModuleOp module) {
-  if (!module)
-    return;
-
-  for (auto func : module.getOps<func::FuncOp>())
-    func->removeAttr(kEffectivePTOEntryAttrName);
+  (void)module;
 }
 
 //===----------------------------------------------------------------------===//
@@ -13838,8 +13915,8 @@ void AivInitializePipeOp::print(OpAsmPrinter &p) {
   printFrontendInitializePipeOp(*this, p);
 }
 
-static ReserveBufferOp findReserveBufferByName(func::FuncOp funcOp,
-                                               StringRef name) {
+ReserveBufferOp mlir::pto::findReserveBufferByName(func::FuncOp funcOp,
+                                                   StringRef name) {
   ReserveBufferOp found;
   funcOp.walk([&](ReserveBufferOp reserveOp) {
     if (reserveOp.getName() != name)
@@ -13884,8 +13961,7 @@ LogicalResult ImportReservedBufferOp::verify() {
   if (!funcOp)
     return emitOpError("must be nested under a func.func");
 
-  auto peerFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
-      getOperation(), getPeerFuncAttr());
+  auto peerFunc = lookupPeerFuncAcrossContainer(getOperation(), getPeerFuncAttr());
   if (!peerFunc)
     return emitOpError("expects 'peer_func' to reference an existing func.func");
 
