@@ -1028,48 +1028,77 @@ ptr[offset] = value;
 
 #### `pto.load`
 
-- **syntax:** `%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> T`
-- **semantics:** Load one scalar element from a VPTO pointer-like operand.
+- **syntax:**
+  - scalar form: `%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> T`
+  - contiguous vector form: `%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> vector<NxT>`
+  - scalar memref form: `%value = pto.load %memref[%offset] : memref<...xT, memory-space> -> T`
+  - contiguous vector memref form: `%value = pto.load %memref[%offset] : memref<...xT, memory-space> -> vector<NxT>`
+- **semantics:** Load one scalar element, or `N` adjacent scalar elements as one
+  rank-1 builtin vector, from a VPTO pointer-like operand.
 
 ```c
+// scalar form
 value = ptr[offset];
+
+// contiguous vector form
+for i in 0 .. N:
+  value[i] = ptr[offset + i];
 ```
 
 - **inputs:**
-  `%ptr` is a typed PTO pointer `!pto.ptr<T, space>` or a memref operand that
-  will be normalized to a PTO pointer before LLVM emission. `%offset` is an
-  `index` displacement counted in elements.
+  `%ptr` is a typed PTO pointer `!pto.ptr<T, space>` or a memref whose element
+  type is `T`. `%offset` is an `index` displacement counted in elements of
+  `T`, not bytes and not vector groups.
 - **outputs:**
-  `%value` is the loaded scalar element.
+  `%value` is either the loaded scalar element `T`, or a rank-1 builtin vector
+  `vector<NxT>` containing `N` adjacent elements.
 - **constraints and limitations:**
-  The result type MUST match the element type of `%ptr`. This is the preferred
-  scalar memory op for VPTO/SIMT authoring.
+  For scalar form, the result type MUST match the element type of `%ptr`. For
+  vector form, the result type MUST be rank-1 `vector<NxT>` with `N > 0`, and
+  the vector element type `T` MUST match the element type of `%ptr`. If `T` is
+  itself a vector type, loading a result of exactly type `T` is still scalar
+  element access, not contiguous scalar expansion. This is the preferred
+  scalar / contiguous-vector memory op for VPTO/SIMT authoring.
 
 #### `pto.store`
 
-- **syntax:** `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, T`
-- **semantics:** Store one scalar element to a VPTO pointer-like operand.
+- **syntax:**
+  - scalar form: `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, T`
+  - contiguous vector form: `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, vector<NxT>`
+  - scalar memref form: `pto.store %value, %memref[%offset] : memref<...xT, memory-space>, T`
+  - contiguous vector memref form: `pto.store %value, %memref[%offset] : memref<...xT, memory-space>, vector<NxT>`
+- **semantics:** Store one scalar element, or all elements of a rank-1 builtin
+  vector, to a VPTO pointer-like operand.
 
 ```c
+// scalar form
 ptr[offset] = value;
+
+// contiguous vector form
+for i in 0 .. N:
+  ptr[offset + i] = value[i];
 ```
 
 - **inputs:**
-  `%value` is the scalar value to store. `%ptr` is a typed PTO pointer
-  `!pto.ptr<T, space>` or a memref operand that will be normalized to a PTO
-  pointer before LLVM emission. `%offset` is an `index` displacement counted in
-  elements.
+  `%value` is either the scalar value to store or a rank-1 builtin vector
+  `vector<NxT>`. `%ptr` is a typed PTO pointer `!pto.ptr<T, space>` or a memref
+  whose element type is `T`. `%offset` is an `index` displacement counted in
+  elements of `T`, not bytes and not vector groups.
 - **constraints and limitations:**
-  The stored value type MUST match the element type of `%ptr`. This is the
-  preferred scalar memory op for VPTO/SIMT authoring.
+  For scalar form, the stored value type MUST match the element type of
+  `%ptr`. For vector form, `%value` MUST be rank-1 `vector<NxT>` with `N > 0`,
+  and the vector element type `T` MUST match the element type of `%ptr`. If
+  `T` is itself a vector type, storing a value of exactly type `T` is still
+  scalar element access, not contiguous scalar expansion. This is the
+  preferred scalar / contiguous-vector memory op for VPTO/SIMT authoring.
 
 #### Pointer-Based Vector Access Example
 
 The following lowered-style fragment shows how typed PTO pointers flow through
 pointer construction, pointer arithmetic, structured control flow, and PTO
-memory ops. Scalar memory access is expressed on `!pto.ptr<T, space>` in
-general, but the common VPTO pattern here is UB-local scalar access alongside
-UB vector loads/stores:
+memory ops. Scalar memory access is expressed on `!pto.ptr<T, space>` or
+memrefs in general, but the common VPTO pattern here is UB-local scalar access
+alongside contiguous builtin-vector access and vector-register load/store ops:
 
 ```mlir
 %0 = pto.castptr %c0 : i64 -> !pto.ptr<f32, ub>
@@ -1079,6 +1108,8 @@ pto.vecscope {
     %mask, %scalar_out = pto.plt_b32 %arg4 : i32 -> !pto.mask<b32>, i32
     %s = pto.load %1[%c4] : !pto.ptr<f32, ub> -> f32
     pto.store %s, %1[%c8] : !pto.ptr<f32, ub>, f32
+    %v4 = pto.load %1[%c16] : !pto.ptr<f32, ub> -> vector<4xf32>
+    pto.store %v4, %1[%c32] : !pto.ptr<f32, ub>, vector<4xf32>
     %17 = pto.vlds %1[%arg3] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
     %18 = pto.vabs %17, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
     pto.vsts %18, %10[%arg3], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>

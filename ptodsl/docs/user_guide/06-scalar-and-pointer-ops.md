@@ -35,24 +35,31 @@ When in doubt, ask: *can this value change between launches of the same compiled
 
 ## 6.2 Scalar access: load and store
 
-`scalar.load` reads a single scalar element from a typed pointer or tile location. `scalar.store` writes a scalar back. These are the canonical scalar memory ops for SIMT authoring. The offset is counted in elements, not bytes.
+`scalar.load` reads from a typed pointer or tile element location.
+`scalar.store` writes back to the same address forms. By default they operate
+on one scalar element. When `contiguous=N` is provided, they operate on `N`
+adjacent elements as one builtin vector value, such as `vector<4xf32>`. Offsets
+are counted in elements, not bytes.
 
-#### `scalar.load(ptr: PtrType, offset: Index) -> ScalarType`
+#### `scalar.load(ptr_or_location: PtrType | TileElement, offset: Index = 0, *, contiguous: int | None = None) -> ScalarType | VectorType`
 
-**Description**: Loads one scalar element from a typed pointer at the given element offset.
+**Description**: Loads one scalar element, or `contiguous` adjacent elements, from
+a typed pointer or tile element location.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `ptr` | `PtrType` | Typed pointer (`pto.ptr<T, space>`) or the result of `tile.as_ptr()` |
-| `offset` | `Index` | Element displacement from `ptr` |
+| `ptr_or_location` | `PtrType` or `TileElement` | Typed pointer (`pto.ptr<T, space>`), the result of `tile.as_ptr()`, or a tile element reference such as `tile[row, col]` |
+| `offset` | `Index` | Element displacement from the pointer or tile element location; defaults to `0` |
+| `contiguous` | Python `int` or `None` | `None` or `1` loads one element. `N > 1` loads `N` adjacent elements and returns `vector<NxT>` |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `value` | `ScalarType` | The loaded scalar, matching the pointer's element type |
+| `value` | `ScalarType` | Returned when `contiguous` is omitted or `1`; type matches the pointer element type |
+| `value` | `VectorType` | Returned when `contiguous=N` and `N > 1`; type is `vector<NxT>`, where `T` is the pointer element type |
 
 **Tile-index form** — the preferred syntax when loading from a tile:
 
@@ -61,7 +68,10 @@ When in doubt, ask: *can this value change between launches of the same compiled
 val = scalar.load(tile[row, col])
 ```
 
-`tile[row, col]` selects one element. Row and column indices are PTO scalars (or Python integers that the tracer promotes). This form is equivalent to computing the pointer and offset from the tile's base address and layout.
+`tile[row, col]` selects the first element. Row and column indices are PTO
+scalars (or Python integers that the tracer promotes). With the default
+`contiguous=None`, this form loads exactly that element. With `contiguous=N`,
+it loads `N` adjacent elements starting at that tile element.
 
 **Pointer forms**:
 
@@ -71,19 +81,36 @@ val = scalar.load(ptr, offset)       # explicit offset
 val = scalar.load(ptr + offset)      # pointer arithmetic shorthand
 ```
 
+**Contiguous vector form**:
+
+```python
+x4 = scalar.load(ptr, offset, contiguous=4)  # vector<4xT>
+x8 = scalar.load(tile[row, col], contiguous=8)  # vector<8xT>
+```
+
+`offset` still points to the first scalar element. For example, when `ptr` has
+type `pto.ptr(pto.f32, "ub")`, `scalar.load(ptr, 4, contiguous=4)` reads
+elements `ptr[4]`, `ptr[5]`, `ptr[6]`, and `ptr[7]`, and returns
+`vector<4xf32>`.
+
+The width must be a positive Python integer known during tracing. Boolean values
+are rejected to avoid confusing `True` with width `1`.
+
 ---
 
-#### `scalar.store(value: ScalarType, ptr: PtrType, offset: Index) -> None`
+#### `scalar.store(value: ScalarType | VectorType, ptr_or_location: PtrType | TileElement, offset: Index = 0, *, contiguous: int | None = None) -> None`
 
-**Description**: Stores one scalar element to a typed pointer at the given element offset.
+**Description**: Stores one scalar element, or one builtin vector value, to a
+typed pointer or tile element location.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `value` | `ScalarType` | Scalar value to write |
-| `ptr` | `PtrType` | Typed destination pointer |
-| `offset` | `Index` | Element displacement from `ptr` |
+| `value` | `ScalarType` or `VectorType` | Scalar value writes one element. A rank-1 vector value writes adjacent elements |
+| `ptr_or_location` | `PtrType` or `TileElement` | Typed destination pointer, the result of `tile.as_ptr()`, or a tile element reference such as `tile[row, col]` |
+| `offset` | `Index` | Element displacement from the pointer or tile element location; defaults to `0` |
+| `contiguous` | Python `int` or `None` | Optional explicit width check for vector stores. If provided with a vector value, it must match the vector lane count |
 
 **Returns**: None (side-effect operation).
 
@@ -99,6 +126,29 @@ scalar.store(value, tile[row, col])
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.tile_access","symbol":"scalar_ops_tile_access_probe","compile":{}} -->
 ```python
 scalar.store(value, ptr, offset)
+```
+
+**Contiguous vector form**:
+
+```python
+x4 = scalar.load(src, src_offset, contiguous=4)
+scalar.store(x4, dst, dst_offset)
+scalar.store(x4, dst, dst_offset, contiguous=4)  # same store with an explicit width check
+scalar.store(x4, tile[row, col], contiguous=4)
+```
+
+When `value` is `vector<NxT>`, `scalar.store` writes `N` adjacent elements
+starting at `offset`. The vector element type `T` must match the destination
+pointer or tile element type. If `contiguous` is provided, it must equal `N`.
+Vector stores do not apply scalar value adaptation element by element; the
+vector element type must already match the destination element type.
+
+**Invalid contiguous examples**:
+
+```python
+scalar.load(ptr, 0, contiguous=0)       # invalid: width must be positive
+scalar.load(ptr, 0, contiguous=True)    # invalid: width must be an int, not bool
+scalar.store(1.0, ptr, 0, contiguous=4) # invalid: scalar value cannot fill four elements
 ```
 
 ### Scalar value adaptation

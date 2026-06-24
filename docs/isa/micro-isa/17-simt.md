@@ -431,51 +431,94 @@ table, `<st-l2cache>` means one token from the store/atomic L2 cache table,
 
 ### `pto.load`
 
-- **syntax:** `%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> T`
+- **syntax:**
+  - scalar form: `%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> T`
+  - contiguous vector form: `%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> vector<NxT>`
+  - scalar memref form: `%value = pto.load %memref[%offset] : memref<...xT, memory-space> -> T`
+  - contiguous vector memref form: `%value = pto.load %memref[%offset] : memref<...xT, memory-space> -> vector<NxT>`
 - **accepted forms:**
 
 ```mlir
 // Plain scalar load. Uses the ordinary scalar memory path.
 %value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> T
+
+// Contiguous vector load. Reads N adjacent T elements into one builtin vector.
+%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> vector<NxT>
+
+// The same forms are valid for memref operands.
+%value = pto.load %memref[%offset] : memref<16xf32, #pto.address_space<vec>> -> vector<4xf32>
 ```
 
-- **semantics:** Load one scalar element from `%ptr + %offset`.
+- **semantics:** Load one scalar element, or `N` adjacent scalar elements as one
+  rank-1 builtin vector, from `%ptr + %offset`.
 
 ```text
-effective_element = ptr + offset
-result = memory[effective_element]
+// scalar form
+result = memory[ptr + offset]
+
+// contiguous vector form
+for i in 0 .. N:
+  result[i] = memory[ptr + offset + i]
 ```
 
-- **inputs:** `%ptr` is a `!pto.ptr<T, space>` or memref. `%offset` is an
-  `index` element offset, not a byte offset.
-- **outputs:** One scalar value of type `T`.
-- **constraints and limitations:** The result type must match the pointer
-  element type. This op does not accept cache-control clauses; use `pto.ldg`
-  for GM scalar loads that need `l1cache(...)` or `l2cache(...)`.
+- **inputs:** `%ptr` is a `!pto.ptr<T, space>` or a memref whose element type
+  is `T`. `%offset` is an `index` element offset, not a byte offset. For vector
+  form, the offset is still counted in scalar elements of `T`, not in vector
+  groups.
+- **outputs:** One scalar value of type `T`, or one rank-1 builtin vector
+  `vector<NxT>`.
+- **constraints and limitations:** For scalar form, the result type must match
+  the pointer element type. For vector form, the result type must be rank-1
+  `vector<NxT>` with positive `N`, and `T` must match the pointer element type.
+  If `T` is itself a vector type, a result of exactly type `T` is scalar
+  element access, not contiguous scalar expansion.
+  This op does not accept cache-control clauses; use `pto.ldg` for GM scalar
+  loads that need `l1cache(...)` or `l2cache(...)`.
 
 ### `pto.store`
 
-- **syntax:** `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, T`
+- **syntax:**
+  - scalar form: `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, T`
+  - contiguous vector form: `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, vector<NxT>`
+  - scalar memref form: `pto.store %value, %memref[%offset] : memref<...xT, memory-space>, T`
+  - contiguous vector memref form: `pto.store %value, %memref[%offset] : memref<...xT, memory-space>, vector<NxT>`
 - **accepted forms:**
 
 ```mlir
 // Plain scalar store. Uses the ordinary scalar memory path.
 pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, T
+
+// Contiguous vector store. Writes N adjacent T elements from one builtin vector.
+pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, vector<NxT>
+
+// The same forms are valid for memref operands.
+pto.store %value, %memref[%offset] : memref<16xf32, #pto.address_space<vec>>, vector<4xf32>
 ```
 
-- **semantics:** Store one scalar element to `%ptr + %offset`.
+- **semantics:** Store one scalar element, or all elements of one rank-1 builtin
+  vector, to `%ptr + %offset`.
 
 ```text
-effective_element = ptr + offset
-memory[effective_element] = value
+// scalar form
+memory[ptr + offset] = value
+
+// contiguous vector form
+for i in 0 .. N:
+  memory[ptr + offset + i] = value[i]
 ```
 
-- **inputs:** `%value` is the scalar element to write. `%ptr` is a
-  `!pto.ptr<T, space>` or memref. `%offset` is an `index` element offset.
+- **inputs:** `%value` is the scalar element or vector value to write. `%ptr`
+  is a `!pto.ptr<T, space>` or a memref whose element type is `T`. `%offset`
+  is an `index` element offset. For vector form, `%value` is `vector<NxT>` and
+  the offset is still counted in scalar elements of `T`, not in vector groups.
 - **outputs:** None.
-- **constraints and limitations:** `%value` type must match the pointer element
-  type. This op does not accept cache-control clauses; use `pto.stg` for GM
-  scalar stores that need `l1cache(...)` or `l2cache(...)`.
+- **constraints and limitations:** For scalar form, `%value` type must match
+  the pointer element type. For vector form, `%value` must be rank-1
+  `vector<NxT>` with positive `N`, and `T` must match the pointer element type.
+  If `T` is itself a vector type, storing a value of exactly type `T` is scalar
+  element access, not contiguous scalar expansion.
+  This op does not accept cache-control clauses; use `pto.stg` for GM scalar
+  stores that need `l1cache(...)` or `l2cache(...)`.
 
 ### `pto.ldg`
 
@@ -542,6 +585,8 @@ Example:
 %loaded = pto.load %gm[%idx] : !pto.ptr<i32, gm> -> i32
 %sum = arith.addi %loaded, %tx : i32
 pto.store %sum, %gm[%idx] : !pto.ptr<i32, gm>, i32
+%x4 = pto.load %ub[%idx] : !pto.ptr<f32, ub> -> vector<4xf32>
+pto.store %x4, %ub[%idx] : !pto.ptr<f32, ub>, vector<4xf32>
 ```
 
 ---
