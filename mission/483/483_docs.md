@@ -265,7 +265,7 @@ RMSNorm also needs to reduce one scalar from every participating SIMT workitem
 and return the same total to every workitem. Each workitem forms that scalar
 locally before calling `pto.simt_allreduce_sum`.
 
-#### `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0) -> ScalarType`
+#### `pto.simt_allreduce_sum(value, scratch=None, *, threads, scale=1, thread_offset=0) -> ScalarType`
 
 **Description**: Sums one scalar value from each participating SIMT workitem and
 returns the reduced sum to every participating workitem.
@@ -275,11 +275,44 @@ returns the reduced sum to every participating workitem.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `value` | PTO scalar | Per-workitem scalar value to reduce. RMSNorm uses the lane-local sum of squares. |
+| `scratch` | typed UB pointer or `None` | Optional temporary storage for implementations that need UB memory. This is the PTODSL name for the `red_buf` argument in the C++ helper. |
 | `threads` | `int` | Number of participating SIMT workitems. RMSNorm commonly uses `128`. |
-| `scale` | `int` | Optional scale factor matching all-reduce-style interfaces. Defaults to `1`. |
+| `scale` | `int` | Number of independent reduction lanes carried by the group. Defaults to `1`; with larger values, workitems whose logical lane ids have the same `lane % scale` reduce together. |
 | `thread_offset` | `int` | Logical workitem offset. Defaults to `0`. |
-| `scratch` | typed UB pointer or `None` | Optional scratch storage for implementations that need temporary memory. |
-| `scratch_offset` | index-like PTO scalar or Python integer | Element offset into `scratch`. Defaults to `0`. |
+
+The PTODSL interface follows the helper shape:
+
+```cpp
+template <class Reducer, int threads, int scale = 1, int thread_offset = 0>
+struct AscendAllReduce {
+  template <typename T>
+  static __simt_callee__ T run(T x, __ubuf__ T *red_buf = nullptr);
+};
+```
+
+`pto.simt_allreduce_sum` fixes `Reducer` to sum. Runtime data is passed as SSA
+operands, while template-like values are emitted as attributes:
+
+| C++ helper parameter | PTODSL parameter | PTO/VPTO IR representation | Passing mode |
+|----------------------|------------------|-----------------------------|--------------|
+| `T x` | `value` | `%value` operand | runtime SSA |
+| `__ubuf__ T *red_buf` | `scratch` | `%scratch` operand | runtime SSA |
+| `Reducer` | fixed sum | `reducer = #pto<reduce_op sum>` | attribute |
+| `threads` | `threads` | `threads = ... : i32` | attribute |
+| `scale` | `scale` | `scale = ... : i32` | attribute |
+| `thread_offset` | `thread_offset` | `thread_offset = ... : i32` | attribute |
+
+The PTO/VPTO IR is an intermediate IR that is still lowered later. The expected
+operation shape is:
+
+```mlir
+%result = pto.all_reduce %value, %scratch {
+  reducer = #pto<reduce_op sum>,
+  threads = 128 : i32,
+  scale = 1 : i32,
+  thread_offset = 0 : i32
+} : f32, !pto.ptr<f32, ub> -> f32
+```
 
 **Returns**:
 
@@ -297,8 +330,10 @@ for lane in pto.static_range(0, lanes):
 
 sum_sq = pto.simt_allreduce_sum(
     local_sum,
-    threads=128,
     scratch=reduce_scratch,
+    threads=128,
+    scale=1,
+    thread_offset=0,
 )
 ```
 
@@ -315,7 +350,9 @@ for each participating workitem lane:
 |------|-------------|
 | Scalar input | `value` is a scalar per workitem, not a vector. |
 | Participating threads | `threads` must match the SIMT launch/body contract for the reduction. |
-| Scratch | If `scratch` is provided, it must have enough elements for the selected implementation and `threads`. |
+| Compile-time parameters | `threads`, `scale`, and `thread_offset` are compile-time Python integers or `pto.const_expr` values. They are represented as IR attributes, not SSA values. |
+| Reduction shape | `threads >= 1`, `scale >= 1`, and `threads % scale == 0`. |
+| Scratch | If `scratch` is provided, it must be a UB pointer whose element type matches `value`, and it must have enough elements for the selected implementation and `threads`. |
 
 ## 4. Lane-local pointer
 
@@ -455,8 +492,10 @@ def rmsnorm_lane_body(
 
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
-        threads=threads,
         scratch=reduce_scratch,
+        threads=threads,
+        scale=1,
+        thread_offset=0,
     )
 
     rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
@@ -482,5 +521,5 @@ this draft. A later syntax-sugar layer should support the equivalent
 | `scalar.store(value, ptr, offset=0, *, contiguous=None)` | Store one scalar or a contiguous vector to a typed pointer. |
 | `pto.vec(dtype, lanes)` | Define a DSL builtin vector type. |
 | `pto.vec(dtype, lanes, *, init=None)` | Construct a vector value, including scalar broadcast. |
-| `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0)` | Sum one scalar from each participating SIMT workitem and broadcast the result. |
+| `pto.simt_allreduce_sum(value, scratch=None, *, threads, scale=1, thread_offset=0)` | Sum one scalar from each participating SIMT workitem and broadcast the result. |
 | `pto.alloc_buffer(shape, dtype, *, scope, persistent=False)` | Allocate linear UB or lane-local storage and return a typed pointer to it. |

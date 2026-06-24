@@ -74,8 +74,10 @@ def rmsnorm_4096_token_body(
     # 2. Reduce the per-workitem local sums across the SIMT launch.
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
-        threads=threads,
         scratch=reduce_scratch,
+        threads=threads,
+        scale=1,
+        thread_offset=0,
     )
 
     # 3. RMSNorm scale for this token: rstd = rsqrt(sum(x^2) / hidden + eps).

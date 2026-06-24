@@ -236,7 +236,7 @@ y4 = x4 * rstd4 * w4
 
 RMSNorm 还需要把每个参与的 SIMT workitem 各自产生的一个标量做求和，并把同一个求和结果返回给每个 workitem。每个 workitem 会先在本地形成这个标量，再调用 `pto.simt_allreduce_sum`。
 
-#### `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0) -> ScalarType`
+#### `pto.simt_allreduce_sum(value, scratch=None, *, threads, scale=1, thread_offset=0) -> ScalarType`
 
 **描述**：对每个参与的 SIMT workitem 输入的一个标量做求和，并把总和返回给每个参与的 workitem。
 
@@ -245,11 +245,42 @@ RMSNorm 还需要把每个参与的 SIMT workitem 各自产生的一个标量做
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `value` | PTO 标量 | 当前 workitem 贡献给 all-reduce 的标量值。RMSNorm 中通常是当前 lane 算出的局部平方和。 |
+| `scratch` | typed UB pointer 或 `None` | 可选临时空间。某些实现方式可能需要用它暂存中间值。它是 C++ helper 中 `red_buf` 参数在 PTODSL 层的命名。 |
 | `threads` | `int` | 参与规约的 SIMT workitem 数量。RMSNorm 常见值是 `128`。 |
-| `scale` | `int` | 可选缩放因子，用来对齐 all-reduce 风格接口。默认值是 `1`。 |
+| `scale` | `int` | group 内携带的独立 reduction lane 数。默认值是 `1`；更大时，逻辑 lane id 满足相同 `lane % scale` 的 workitem 归约到同一组。 |
 | `thread_offset` | `int` | 逻辑 workitem 偏移。默认值是 `0`。 |
-| `scratch` | typed UB pointer 或 `None` | 可选临时空间。某些实现方式可能需要用它暂存每个 workitem 的中间值。 |
-| `scratch_offset` | index-like PTO 标量或 Python 整数 | `scratch` 内部的元素偏移。默认值是 `0`。 |
+
+PTODSL 接口对应下面的 helper 形态：
+
+```cpp
+template <class Reducer, int threads, int scale = 1, int thread_offset = 0>
+struct AscendAllReduce {
+  template <typename T>
+  static __simt_callee__ T run(T x, __ubuf__ T *red_buf = nullptr);
+};
+```
+
+`pto.simt_allreduce_sum` 固定 `Reducer` 为 sum。运行时数据作为 SSA operand 传入；类似模板参数的值作为 attribute 表达：
+
+| C++ helper 参数 | PTODSL 参数 | PTO/VPTO IR 表达 | 传递方式 |
+|-----------------|-------------|------------------|----------|
+| `T x` | `value` | `%value` operand | runtime SSA |
+| `__ubuf__ T *red_buf` | `scratch` | `%scratch` operand | runtime SSA |
+| `Reducer` | 固定为 sum | `reducer = #pto<reduce_op sum>` | attribute |
+| `threads` | `threads` | `threads = ... : i32` | attribute |
+| `scale` | `scale` | `scale = ... : i32` | attribute |
+| `thread_offset` | `thread_offset` | `thread_offset = ... : i32` | attribute |
+
+PTO/VPTO IR 是后续还会继续 lower 的中间 IR，不是最终 lowered MLIR。预期 op 形态是：
+
+```mlir
+%result = pto.all_reduce %value, %scratch {
+  reducer = #pto<reduce_op sum>,
+  threads = 128 : i32,
+  scale = 1 : i32,
+  thread_offset = 0 : i32
+} : f32, !pto.ptr<f32, ub> -> f32
+```
 
 **返回值**：
 
@@ -267,8 +298,10 @@ for lane in pto.static_range(0, lanes):
 
 sum_sq = pto.simt_allreduce_sum(
     local_sum,
-    threads=128,
     scratch=reduce_scratch,
+    threads=128,
+    scale=1,
+    thread_offset=0,
 )
 ```
 
@@ -285,7 +318,9 @@ sum_sq = pto.simt_allreduce_sum(
 |------|------|
 | 标量输入 | `value` 是每个 workitem 的一个标量，不是 vector。 |
 | 参与线程数 | `threads` 必须和当前 SIMT launch/body 的规约范围匹配。 |
-| 临时空间 | 如果传入 `scratch`，它必须有足够空间支撑对应的实现方式和 `threads` 数量。 |
+| 编译期参数 | `threads`、`scale` 和 `thread_offset` 是编译期 Python 整数或 `pto.const_expr` 值。它们在 IR 中表达为 attribute，不是 SSA value。 |
+| 规约形状 | `threads >= 1`、`scale >= 1`，且 `threads % scale == 0`。 |
+| 临时空间 | 如果传入 `scratch`，它必须是 UB pointer，元素类型需要和 `value` 一致，并且必须有足够空间支撑对应的实现方式和 `threads` 数量。 |
 
 ## 4. Lane-local pointer / alloc_buffer
 
@@ -417,8 +452,10 @@ def rmsnorm_lane_body(
 
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
-        threads=threads,
         scratch=reduce_scratch,
+        threads=threads,
+        scale=1,
+        thread_offset=0,
     )
 
     rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
@@ -443,5 +480,5 @@ def rmsnorm_lane_body(
 | `scalar.store(value, ptr, offset=0, *, contiguous=None)` | 向 typed pointer 写入一个标量或一段连续 vector。 |
 | `pto.vec(dtype, lanes)` | 定义 DSL builtin vector 类型。 |
 | `pto.vec(dtype, lanes, *, init=None)` | 构造 vector 值，包括把标量广播成 vector。 |
-| `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0)` | 把每个参与 SIMT workitem 的一个标量求和，并把结果广播给所有参与 workitem。 |
+| `pto.simt_allreduce_sum(value, scratch=None, *, threads, scale=1, thread_offset=0)` | 把每个参与 SIMT workitem 的一个标量求和，并把结果广播给所有参与 workitem。 |
 | `pto.alloc_buffer(shape, dtype, *, scope, persistent=False)` | 分配线性 UB 或 lane-local storage，并返回 typed pointer。 |
