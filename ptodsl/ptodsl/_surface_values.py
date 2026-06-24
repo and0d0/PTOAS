@@ -284,7 +284,15 @@ class MaskResultValue(_SurfaceValue):
 
 
 class AddressValue(_SurfaceValue):
-    """Author-facing address view backed by either a PTO ptr or a memref."""
+    """Author-facing address view backed by a PTO ptr, memref, or local pointer carrier."""
+
+    def __init__(self, value, *, address_metadata=None):
+        super().__init__(value)
+        self._address_metadata = dict(address_metadata or {})
+
+    @property
+    def surface_metadata(self):
+        return self._address_metadata
 
     def __add__(self, offset):
         return AddressOffsetValue(self, offset)
@@ -547,7 +555,7 @@ def wrap_like_surface_value(template, value):
     if isinstance(template, TileValue):
         return TileValue(value, **template.surface_metadata)
     if isinstance(template, AddressValue):
-        return AddressValue(value)
+        return AddressValue(value, address_metadata=template.surface_metadata)
     return wrap_surface_value(value)
 
 

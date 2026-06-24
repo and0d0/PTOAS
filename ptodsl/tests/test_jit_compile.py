@@ -10,6 +10,7 @@
 from pathlib import Path
 import re
 import sys
+from typing import Optional
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ptodsl"))
@@ -29,7 +30,7 @@ def expect(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def expect_raises(exc_type, func, message_substring: str | None = None) -> Exception:
+def expect_raises(exc_type, func, message_substring: Optional[str] = None) -> Exception:
     try:
         func()
     except exc_type as exc:
@@ -1313,8 +1314,13 @@ def alloc_buffer_local_scope_probe():
 
 
 @pto.jit(target="a5")
-def alloc_buffer_persistent_probe():
+def alloc_buffer_ub_persistent_probe():
     _ = pto.alloc_buffer((8,), pto.f32, scope="ub", persistent=True)
+
+
+@pto.jit(target="a5")
+def alloc_buffer_local_persistent_probe():
+    _ = pto.alloc_buffer((8,), pto.f32, scope="local", persistent=True)
 
 
 @pto.jit(target="a5")
@@ -3656,15 +3662,28 @@ def main() -> None:
         ) is not None,
         "scalar.store(vector, alloc_buffer(...), 4, contiguous=4) should store vector<4xf32>",
     )
-    expect_raises(
-        NotImplementedError,
-        lambda: alloc_buffer_local_scope_probe.compile().mlir_text(),
-        'pto.alloc_buffer(...) currently only supports scope="ub"',
+    alloc_buffer_local_text = alloc_buffer_local_scope_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        alloc_buffer_local_text,
+        "alloc_buffer local scope specialization",
+    )
+    expect(
+        "memref.alloca() : memref<8xf32>" in alloc_buffer_local_text,
+        "pto.alloc_buffer(scope='local') should emit a local memref.alloca carrier",
+    )
+    alloc_buffer_local_persistent_text = alloc_buffer_local_persistent_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        alloc_buffer_local_persistent_text,
+        "alloc_buffer local persistent scope specialization",
+    )
+    expect(
+        "pto.persistent" in alloc_buffer_local_persistent_text,
+        "pto.alloc_buffer(scope='local', persistent=True) should tag the local carrier with pto.persistent",
     )
     expect_raises(
         NotImplementedError,
-        lambda: alloc_buffer_persistent_probe.compile().mlir_text(),
-        "pto.alloc_buffer(..., persistent=True) is not implemented yet",
+        lambda: alloc_buffer_ub_persistent_probe.compile().mlir_text(),
+        'pto.alloc_buffer(scope="ub", persistent=True) is not implemented yet',
     )
     expect_raises(
         ValueError,

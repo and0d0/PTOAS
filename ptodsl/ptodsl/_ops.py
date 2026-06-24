@@ -40,6 +40,7 @@ from ._scalar_adaptation import (
 )
 from ._runtime_scalar_ops import emit_runtime_binary_op
 from ._surface_values import (
+    AddressValue,
     MaskResultValue,
     PartitionTensorViewValue,
     TensorViewValue,
@@ -81,7 +82,9 @@ from mlir.ir import (
     IndexType,
     IntegerType,
     MemRefType,
+    Operation,
     Type,
+    UnitAttr,
 )
 
 # Pipe name shorthands → canonical PIPE_* names
@@ -2201,26 +2204,61 @@ def alloc_buffer(
     """
     ``pto.alloc_buffer``.
 
-    First-step linear buffer allocation for pointer-style scalar access.
-    Currently this reuses tile allocation and returns ``tile.as_ptr()`` so the
-    result can be passed directly to ``scalar.load`` and ``scalar.store``.
+    Linear buffer allocation for pointer-style scalar access. UB buffers reuse
+    tile allocation and return ``tile.as_ptr()``. Local buffers emit a PTODSL
+    local carrier and return an ``AddressValue`` tagged for later scalar
+    load/store expansion.
     """
-    if persistent:
-        raise NotImplementedError("pto.alloc_buffer(..., persistent=True) is not implemented yet")
-    if scope != "ub":
-        raise NotImplementedError('pto.alloc_buffer(...) currently only supports scope="ub"')
     if isinstance(shape, (str, bytes)) or not isinstance(shape, (list, tuple)):
         raise TypeError("pto.alloc_buffer(shape=...) expects a list or tuple of static dimensions")
     if len(shape) == 0:
         raise ValueError("pto.alloc_buffer(shape=...) requires at least one dimension")
 
-    tile = alloc_tile(
-        shape=shape,
-        dtype=dtype,
-        memory_space=scope,
-        valid_shape=shape,
+    if scope == "ub":
+        if persistent:
+            raise NotImplementedError('pto.alloc_buffer(scope="ub", persistent=True) is not implemented yet')
+        tile = alloc_tile(
+            shape=shape,
+            dtype=dtype,
+            memory_space=scope,
+            valid_shape=shape,
+        )
+        return emit_as_ptr(tile)
+    if scope == "local":
+        local_shape = _normalize_static_buffer_shape(shape, context="pto.alloc_buffer(shape=..., scope=\"local\")")
+        return _alloc_local_buffer(local_shape, dtype, persistent=persistent)
+    raise NotImplementedError('pto.alloc_buffer(...) currently supports scope="ub" or scope="local"')
+
+
+def _normalize_static_buffer_shape(shape, *, context: str):
+    dims = []
+    for dim in shape:
+        if isinstance(dim, bool) or not isinstance(dim, int):
+            raise TypeError(f"{context} expects static integer dimensions, got {dim!r}")
+        if dim <= 0:
+            raise ValueError(f"{context} expects positive dimensions, got {dim}")
+        dims.append(dim)
+    return tuple(dims)
+
+
+def _alloc_local_buffer(shape, dtype, *, persistent):
+    element_type = _resolve(dtype)
+    memref_type = MemRefType.get(list(shape), element_type)
+    attributes = {}
+    if persistent:
+        attributes["pto.persistent"] = UnitAttr.get()
+    value = Operation.create("memref.alloca", results=[memref_type], attributes=attributes).results[0]
+    return AddressValue(
+        value,
+        address_metadata={
+            "alloc_buffer_scope": "local",
+            "shape": shape,
+            "dtype": dtype,
+            "element_type": element_type,
+            "address_backend": "memref_alloca",
+            "persistent": persistent,
+        },
     )
-    return emit_as_ptr(tile)
 
 
 def set_tile_valid_shape(tile, valid_shape):
