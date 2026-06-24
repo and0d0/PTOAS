@@ -113,13 +113,9 @@ PTODSL 需要一个前端 vector 抽象，用来表达固定宽度的 builtin ve
 
 这个 vector 抽象和 PTO 硬件 vector register 类型不同，例如 `!pto.vreg<NxT>`。
 
-#### `pto.vec(dtype, lanes) -> VecType`（待定，本次不完成）
+#### `pto.vec(dtype, lanes) -> VecType`
 
-**状态**：待定。本次不实现 `pto.vec(dtype, lanes)` 这个用户可见的类型构造 API。
-
-纯类型构造语法不是当前 RMSNorm kernel 必需的，因为连续 load 可以根据 pointer 元素类型和 `contiguous` 自动推导 vector 返回类型。这里先把它保留为未来可能的类型标注/文档辅助形式，而不是 kernel 必须使用的语法。
-
-如果保留这种写法，RMSNorm 文档示例可以是：
+**描述**：构造一个 DSL builtin vector 类型，包含 `lanes` 个 `dtype` 元素。连续 load 可以根据 pointer 元素类型和 `contiguous` 自动推导这个类型；显式形式可用于类型标注、校验和 vector 值构造。
 
 ```python
 f32x4 = pto.vec(pto.f32, 4)
@@ -152,28 +148,26 @@ lane-local storage 也是一样：
 w4 = scalar.load(w_frag, frag_offset, contiguous=4)
 ```
 
-如果 `w_frag` 指向 `f32`，那么 `w4` 也具有同样的 DSL 类型 `pto.vec(pto.f32, 4)`，并 lower 成 `vector<4xf32>`。
+如果 `w_frag` 指向 `f32`，那么 `w4` 也具有同样的 DSL 类型 `pto.vec(pto.f32, 4)`，并 lower 成 `vector<4xf32>`。RMSNorm x128 kernel 当前使用的 float2 模式也遵循同样规则：`contiguous=2` 产生 `pto.vec(pto.f32, 2)`，并 lower 成 `vector<2xf32>`。
 
 **参数**：
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `dtype` | PTODSL 标量 dtype | vector 元素类型。RMSNorm 使用 `pto.f32`。 |
-| `lanes` | `int` | vector 元素个数。RMSNorm float4 访问使用 `4`。 |
+| `lanes` | `int` | vector 元素个数。RMSNorm 使用它表示 float2 或 float4 连续访问。 |
 
 **返回值**：
 
 | 返回值 | 类型 | 说明 |
 |--------|------|------|
-| `vec_type` | `VecType` | 待定的 builtin vector 纯类型对象，例如 `pto.vec(pto.f32, 4)`。 |
+| `vec_type` | `VecType` | builtin vector 类型对象，例如 `pto.vec(pto.f32, 4)`。 |
 
 ---
 
-#### `pto.vec(dtype, lanes, *, init=value) -> VecValue`（待定，本次不完成）
+#### `pto.vec(dtype, lanes, *, init=value) -> VecValue`
 
-**状态**：待定。本次不实现通过 `pto.vec` 构造 vector 值或把标量广播成 vector。
-
-如果未来补充该 API，它会构造一个类型为 `pto.vec(dtype, lanes)` 的 vector 值。当 `init` 是标量时，把这个标量广播到所有 vector lane。
+**描述**：构造一个类型为 `pto.vec(dtype, lanes)` 的 vector 值。当 `init` 是标量时，把这个标量广播到所有 vector lane；当 `init` 已经是兼容 vector 值时，对它执行类型校验。
 
 **参数**：
 
@@ -203,15 +197,15 @@ y4 = x4 * rstd4 * w4
 
 | 规则 | 说明 |
 |------|------|
-| 类型形式 | `pto.vec(dtype, lanes)` 本身是否作为 `VecType` 暴露仍待定，RMSNorm kernel 不强依赖它。 |
+| 类型形式 | `pto.vec(dtype, lanes)` 构造 builtin vector 类型。 |
 | 值形式 | `pto.vec(dtype, lanes, init=value)` 构造 `VecValue`。 |
 | 广播 | 标量 `init` 会广播到 vector 的每个 lane。 |
 | 算术 | 两个兼容 `VecValue` 对象上的 Python 算术是逐元素算术。 |
 | 类型区分 | `pto.vec(dtype, lanes)` 是 builtin vector 类型，不等同于 `pto.vreg_type(lanes, dtype)`。 |
 
-### Vector 算术运算符重载（待定，本次不完成）
+### Vector 算术运算符重载
 
-Vector 算术运算符重载仍然待定，本次不实现。当前 RMSNorm kernel 只把连续 vector 值用于 load/store 搬运，算术部分从 lane-local storage 标量读取 `fp32` 后完成。
+RMSNorm 输出阶段可以对 `VecValue` 操作数执行逐元素乘法，例如 float2 风格的 `x_vec * rstd_vec * w_vec`。初始运算符重载范围刻意收窄：要求支持兼容 vector 操作数上的 Python `*`。
 
 #### `lhs * rhs -> VecValue`
 
@@ -236,7 +230,7 @@ y4 = x4 * rstd4 * w4
 
 **Lowering 目标**：builtin vector 类型上的逐元素乘法，例如 `vector<4xf32>` 上的 `arith.mulf`。
 
-**待定**：除显式 `pto.vec(..., init=...)` 之外的 scalar-vector 隐式广播，不属于 RMSNorm 初始需求。
+除显式 `pto.vec(..., init=...)` 之外的 scalar-vector 隐式广播，不属于 RMSNorm 初始需求。
 
 ## 3. SIMT all-reduce sum
 
@@ -447,7 +441,7 @@ def rmsnorm_lane_body(
 |------|------|
 | `scalar.load(ptr, offset=0, *, contiguous=None)` | 从 typed pointer 读取一个标量或一段连续 vector。 |
 | `scalar.store(value, ptr, offset=0, *, contiguous=None)` | 向 typed pointer 写入一个标量或一段连续 vector。 |
-| `pto.vec(dtype, lanes)` | 待定；本次不实现用户可见的 DSL builtin vector 类型构造。 |
-| `pto.vec(dtype, lanes, *, init=None)` | 待定；本次不实现 vector 值构造或标量广播。 |
+| `pto.vec(dtype, lanes)` | 定义 DSL builtin vector 类型。 |
+| `pto.vec(dtype, lanes, *, init=None)` | 构造 vector 值，包括把标量广播成 vector。 |
 | `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0)` | 把每个参与 SIMT workitem 的一个标量求和，并把结果广播给所有参与 workitem。 |
 | `pto.alloc_buffer(shape, dtype, *, scope, persistent=False)` | 分配线性 UB 或 lane-local storage，并返回 typed pointer。 |

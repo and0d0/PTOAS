@@ -124,17 +124,12 @@ contiguous memory loads, including the cases that were previously described as
 This vector abstraction is separate from PTO hardware vector-register values
 such as `!pto.vreg<NxT>`.
 
-#### `pto.vec(dtype, lanes) -> VecType` *(TBD, not implemented in this work)*
+#### `pto.vec(dtype, lanes) -> VecType`
 
-**Status**: TBD. This work does not implement `pto.vec(dtype, lanes)` as a
-user-facing type-construction API.
-
-Pure type-construction syntax is not required by the current RMSNorm kernel
-because contiguous loads can infer their vector result type from the pointer
-element type and `contiguous`. Keep this form only as a possible future type
-annotation/documentation helper, not as required kernel syntax.
-
-If kept, the RMSNorm documentation example would be:
+**Description**: Constructs a DSL builtin vector type with `lanes` elements of
+`dtype`. Contiguous loads infer this type automatically from the pointer element
+type and `contiguous`, but the explicit form is available for annotations,
+validation, and value construction.
 
 ```python
 f32x4 = pto.vec(pto.f32, 4)
@@ -168,31 +163,31 @@ w4 = scalar.load(w_frag, frag_offset, contiguous=4)
 ```
 
 If `w_frag` points to `f32`, then `w4` has the same DSL type
-`pto.vec(pto.f32, 4)` and lowers as `vector<4xf32>`.
+`pto.vec(pto.f32, 4)` and lowers as `vector<4xf32>`. The same rule applies to
+the float2 pattern used by the RMSNorm x128 kernel: `contiguous=2` produces
+`pto.vec(pto.f32, 2)` and lowers as `vector<2xf32>`.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `dtype` | PTODSL scalar dtype | Vector element type. RMSNorm uses `pto.f32`. |
-| `lanes` | `int` | Number of vector elements. RMSNorm float4 access uses `4`. |
+| `lanes` | `int` | Number of vector elements. RMSNorm uses this for float2 or float4 contiguous access. |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `vec_type` | `VecType` | TBD pure type object for builtin vectors, for example `pto.vec(pto.f32, 4)`. |
+| `vec_type` | `VecType` | Builtin vector type object, for example `pto.vec(pto.f32, 4)`. |
 
 ---
 
-#### `pto.vec(dtype, lanes, *, init=value) -> VecValue` *(TBD, not implemented in this work)*
+#### `pto.vec(dtype, lanes, *, init=value) -> VecValue`
 
-**Status**: TBD. This work does not implement vector value construction or
-scalar-to-vector broadcast through `pto.vec`.
-
-If added in a future change, this API would construct a vector value of type
-`pto.vec(dtype, lanes)`. When `init` is a scalar, the scalar would be broadcast
-to every vector lane.
+**Description**: Constructs a vector value of type `pto.vec(dtype, lanes)`. When
+`init` is a scalar, the scalar is broadcast to every vector lane. When `init` is
+already a compatible vector value, it is checked against the requested vector
+type.
 
 **Parameters**:
 
@@ -222,18 +217,18 @@ y4 = x4 * rstd4 * w4
 
 | Rule | Description |
 |------|-------------|
-| Type form | `pto.vec(dtype, lanes)` by itself is TBD and not required by the RMSNorm kernel. |
+| Type form | `pto.vec(dtype, lanes)` constructs a builtin vector type. |
 | Value form | `pto.vec(dtype, lanes, init=value)` constructs a `VecValue`. |
 | Broadcast | Scalar `init` is broadcast to every vector lane. |
 | Arithmetic | Python arithmetic on two compatible `VecValue` objects is elementwise. |
 | Type separation | `pto.vec(dtype, lanes)` is a builtin vector type and is not the same as `pto.vreg_type(lanes, dtype)`. |
 
-### Vector arithmetic operator overloading *(TBD, not implemented in this work)*
+### Vector arithmetic operator overloading
 
-Vector arithmetic operator overloading is TBD and is not implemented in this
-work. The current RMSNorm kernel uses contiguous vector values only for
-load/store movement and performs arithmetic through scalar `fp32` loads from
-lane-local storage.
+RMSNorm output can use elementwise multiplication on `VecValue` operands, for
+example `float2`-style `x_vec * rstd_vec * w_vec`. The initial
+operator-overloading scope is intentionally narrow: Python `*` is required for
+compatible vector operands.
 
 #### `lhs * rhs -> VecValue`
 
@@ -261,7 +256,8 @@ y4 = x4 * rstd4 * w4
 **Lowering target**: elementwise multiply on builtin vector types, for example
 `arith.mulf` on `vector<4xf32>`.
 
-**TBD**: Mixed scalar-vector implicit broadcasting beyond the explicit `pto.vec(..., init=...)` form is not part of the initial RMSNorm requirement.
+Mixed scalar-vector implicit broadcasting beyond the explicit
+`pto.vec(..., init=...)` form is not part of the initial RMSNorm requirement.
 
 ## 3. SIMT all-reduce sum
 
@@ -484,7 +480,7 @@ this draft. A later syntax-sugar layer should support the equivalent
 |-----------|---------|
 | `scalar.load(ptr, offset=0, *, contiguous=None)` | Load one scalar or a contiguous vector from a typed pointer. |
 | `scalar.store(value, ptr, offset=0, *, contiguous=None)` | Store one scalar or a contiguous vector to a typed pointer. |
-| `pto.vec(dtype, lanes)` | TBD; user-facing DSL builtin vector type construction is not implemented in this work. |
-| `pto.vec(dtype, lanes, *, init=None)` | TBD; vector value construction and scalar broadcast are not implemented in this work. |
+| `pto.vec(dtype, lanes)` | Define a DSL builtin vector type. |
+| `pto.vec(dtype, lanes, *, init=None)` | Construct a vector value, including scalar broadcast. |
 | `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None, scratch_offset=0)` | Sum one scalar from each participating SIMT workitem and broadcast the result. |
 | `pto.alloc_buffer(shape, dtype, *, scope, persistent=False)` | Allocate linear UB or lane-local storage and return a typed pointer to it. |
