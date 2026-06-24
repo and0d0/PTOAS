@@ -395,13 +395,18 @@ x_frag[i : i + 4] = x4             # scalar.store(x4, x_frag, i, contiguous=4)
 | persistent storage | `persistent=True` 主要用于 local storage，例如 RMSNorm 权重，希望一次读入后跨多次 SIMT launch 复用。 |
 | 访问方式 | 返回的 pointer 通过 `scalar.load/store` 或等价下标语法糖访问。 |
 
-**Lowering 计划**：
+**前端与 lowering 计划**：
 
-| 场景 | 建议 lowering | 原因 |
-|------|---------------|------|
+| 场景 | 当前 / 计划 lowering | 原因 |
+|------|----------------------|------|
 | `scope="ub", persistent=False` | lower 成现有 `alloc_tile` 加 `tile_buf_addr` / pointer extraction。 | 复用当前 PTO IR，避免在 IR 层新增 allocation op。 |
-| `scope="local", persistent=False` | lower 成 lane-local storage，最终是 `llvm.alloca` 或等价 local allocation。 | 让每个 SIMT workitem 都有自己的 `x_frag[32]`。 |
-| `scope="local", persistent=True` | lower 到 persistent-fragment 路径，生成 keep/resume 或等价状态保存恢复逻辑。 | 让 `w_frag` 可以一次加载后跨 token loop 复用。 |
+| `scope="local", persistent=False` | PTODSL 前端先生成 local carrier，例如 `memref.alloca() : memref<NxT>`，并把它包装成带 `alloc_buffer_scope = "local"` 元数据的 `AddressValue`。后续 load/store lowering 再把访问转换成 LLVM pointer-backed local load/store。 | 让每个 SIMT workitem 都有自己的 `x_frag[32]`，同时保持用户层 API 仍然是 pointer-shaped。 |
+| `scope="local", persistent=True` | PTODSL 前端接受该标志，并在 local carrier 上标记 `pto.persistent`；后续 lowering 负责把这个标记转移到最终的 `llvm.alloca`。keep/resume 或等价状态保存恢复 pass 仍是后续工作。 | 让 `w_frag` 可以一次加载后跨 token loop 复用。 |
+
+初始 `scope="local"` 前端改动刻意不修改 `scalar.load` 或 `scalar.store`。
+后续 load/store 扩展需要识别 local `AddressValue` 元数据，并通过 local carrier
+lower 标量或连续 vector 访问，而不是把它当成普通 PTO address-space pointer。
+对于 persistent fragment，allocation carrier 上已经有标记；驻留 keep/resume 生成仍由后续 pass 完成。
 
 **Tile 访问说明**：
 

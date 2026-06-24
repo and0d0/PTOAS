@@ -429,13 +429,20 @@ x_frag[i : i + 4] = x4             # scalar.store(x4, x_frag, i, contiguous=4)
 | Persistent storage | `persistent=True` is intended for local values such as RMSNorm weights that should be loaded once and reused across multiple SIMT launches. |
 | Access | Returned pointers are accessed through `scalar.load/store` or equivalent indexing sugar. |
 
-**Lowering plan**:
+**Frontend and lowering plan**:
 
-| Case | Suggested lowering | Reason |
-|------|--------------------|--------|
+| Case | Current / planned lowering | Reason |
+|------|----------------------------|--------|
 | `scope="ub", persistent=False` | Lower to existing `alloc_tile` plus `tile_buf_addr` / pointer extraction. | Reuses current PTO IR and avoids adding a new allocation op in the IR layer. |
-| `scope="local", persistent=False` | Lower to lane-local storage, ultimately `llvm.alloca` or an equivalent local allocation. | Gives each SIMT workitem private storage such as `x_frag[32]`. |
-| `scope="local", persistent=True` | Lower to the persistent-fragment path for keep/resume or equivalent state preservation. | Enables `w_frag` to be loaded once and reused across token loops. |
+| `scope="local", persistent=False` | The PTODSL frontend emits a local carrier such as `memref.alloca() : memref<NxT>` and wraps it as an `AddressValue` tagged with `alloc_buffer_scope = "local"`. The later load/store lowering turns accesses into LLVM pointer-backed local loads/stores. | Gives each SIMT workitem private storage such as `x_frag[32]` while keeping the user-facing API pointer-shaped. |
+| `scope="local", persistent=True` | The PTODSL frontend accepts the flag and tags the local carrier with `pto.persistent`; the later lowering transfers that marker to the final `llvm.alloca`. The keep/resume or equivalent state preservation pass is still future work. | Enables `w_frag` to be loaded once and reused across token loops. |
+
+The initial `scope="local"` frontend work intentionally does not modify
+`scalar.load` or `scalar.store`. That load/store extension should recognize the
+local `AddressValue` metadata and lower scalar or contiguous vector accesses
+through the local carrier instead of treating it as an ordinary PTO address-space
+pointer. For persistent fragments, the marker is present on the allocation
+carrier, but residency keep/resume generation remains a later pass.
 
 **Tile access note**:
 
