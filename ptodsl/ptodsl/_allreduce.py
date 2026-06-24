@@ -11,7 +11,7 @@ SIMT cross-workitem all-reduce helpers.
 Implements ``AscendAllReduce<Reducer, threads, scale, thread_offset>::run()``
 as PTO IR helper functions that are lazily emitted into the trace module.
 
-Public entry point: ``all_reduce(x, scratch, *, op, threads, scale, thread_offset)``,
+Public entry point: ``simt_allreduce_sum(value, scratch=None, *, threads, scale, thread_offset)``,
 callable from within a ``@pto.simt`` context.
 
 Dispatch tree (mirrors the C++ compile-time dispatch in ``reduce.h``)::
@@ -221,12 +221,10 @@ def _emit_warp_hw_reduce(x, *, threads: int,
 # public API
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def simt_allreduce_sum(value, *,
+def simt_allreduce_sum(value, scratch=None, *,
                threads: int,
                scale: int = 1,
-               thread_offset: int = 0,
-               scratch=None,
-               scratch_offset: int = 0):
+               thread_offset: int = 0):
     """Cross-workitem all-reduce for SIMT VF context.
 
     Dispatch logic mirrors the compile-time tree in
@@ -239,18 +237,17 @@ def simt_allreduce_sum(value, *,
         thread_offset: Thread offset.  Defaults to 0.
         scratch: UB scratch buffer (``!pto.ptr<dtype, ub>``).  Required for
             ``cross_warp_reduce`` and ``ub_reduce`` paths.  Defaults to None.
-        scratch_offset: Element offset into *scratch*.  Defaults to 0.
 
     Returns:
         Lane-uniform scalar (same type as *value*) — the reduced sum.
     """
     return _dispatch_allreduce_helper(
-        value, scratch=scratch, scratch_offset=scratch_offset,
+        value, scratch=scratch,
         threads=threads, scale=scale, thread_offset=thread_offset,
     )
 
 
-def _dispatch_allreduce_helper(value, *, scratch, scratch_offset,
+def _dispatch_allreduce_helper(value, *, scratch,
                                 threads, scale, thread_offset):
     # ── parameter validation (before identity shortcut) ───────────────────
     for name, val in (("threads", threads), ("scale", scale),
@@ -288,7 +285,7 @@ def _dispatch_allreduce_helper(value, *, scratch, scratch_offset,
 
     name = _helper_name(dtype, threads, scale, thread_offset)
     args = dict(dtype=dtype, threads=threads, scale=scale,
-                thread_offset=thread_offset, scratch_offset=scratch_offset)
+                thread_offset=thread_offset)
 
     # ── Path 1: warp_reduce ───────────────────────────────────────────────
     if threads <= 32 and _is_pow2(threads) and _is_pow2(scale):
@@ -338,8 +335,7 @@ def _dispatch_allreduce_helper(value, *, scratch, scratch_offset,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _emit_warp_reduce(helper_fn, *,
-                      dtype, threads, scale, thread_offset,
-                      scratch_offset):
+                      dtype, threads, scale, thread_offset):
     """Build the body of a single-warp all-reduce helper.
 
     Dispatches to:
@@ -386,8 +382,7 @@ def _emit_warp_reduce(helper_fn, *,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _emit_cross_warp_reduce(helper_fn, *,
-                            dtype, threads, scale, thread_offset,
-                            scratch_offset):
+                            dtype, threads, scale, thread_offset):
     """Build the body of a cross-warp all-reduce helper.
 
     Algorithm overview:
@@ -423,7 +418,6 @@ def _emit_cross_warp_reduce(helper_fn, *,
         c_scale = arith.ConstantOp(i32, scale).result
         c_num_warps = arith.ConstantOp(i32, num_warps).result
         c_offset = arith.ConstantOp(i32, thread_offset).result
-        c_scratch_off = arith.ConstantOp(idx_t, scratch_offset).result
         c_identity = arith.ConstantOp(scalar_t, identity_val).result
 
         # ── thread indexing ──────────────────────────────────────────────
@@ -452,8 +446,6 @@ def _emit_cross_warp_reduce(helper_fn, *,
             slot = arith.AddIOp(
                 arith.MulIOp(wid, c_scale).result, lid).result
             slot_idx = arith.IndexCastOp(idx_t, slot).result
-            if scratch_offset:
-                slot_idx = arith.AddIOp(slot_idx, c_scratch_off).result
             _emit_store(scratch, slot_idx, warp_val)
             scf.YieldOp([])
 
@@ -488,8 +480,6 @@ def _emit_cross_warp_reduce(helper_fn, *,
                 inner_if = scf.IfOp(need_load, [scalar_t], hasElse=True)
                 with InsertionPoint(inner_if.then_block):
                     lid_idx = arith.IndexCastOp(idx_t, lid).result
-                    if scratch_offset:
-                        lid_idx = arith.AddIOp(lid_idx, c_scratch_off).result
                     tmp = _emit_load(scalar_t, scratch, lid_idx)
                     scf.YieldOp([tmp])
                 with InsertionPoint(inner_if.else_block):
@@ -510,8 +500,6 @@ def _emit_cross_warp_reduce(helper_fn, *,
                     idx_val = arith.AddIOp(
                         arith.MulIOp(c_w, c_scale).result, my_slot).result
                     slot_idx = arith.IndexCastOp(idx_t, idx_val).result
-                    if scratch_offset:
-                        slot_idx = arith.AddIOp(slot_idx, c_scratch_off).result
                     loaded_v = _emit_load(
                         scalar_t, scratch, slot_idx)
                     result = _apply_sum(result, loaded_v)
@@ -531,8 +519,6 @@ def _emit_cross_warp_reduce(helper_fn, *,
         write_result_if = scf.IfOp(is_global_leader, hasElse=False)
         with InsertionPoint(write_result_if.then_block):
             tx_idx = arith.IndexCastOp(idx_t, tx).result
-            if scratch_offset:
-                tx_idx = arith.AddIOp(tx_idx, c_scratch_off).result
             _emit_store(scratch, tx_idx, partial_reduced)
             scf.YieldOp([])
 
@@ -540,8 +526,6 @@ def _emit_cross_warp_reduce(helper_fn, *,
         _pto.SyncthreadsOp()
         my_slot = arith.RemUIOp(tx, c_scale).result
         load_idx = arith.IndexCastOp(idx_t, my_slot).result
-        if scratch_offset:
-            load_idx = arith.AddIOp(load_idx, c_scratch_off).result
         result = _emit_load(scalar_t, scratch, load_idx)
 
         # ── Stage 7: extra sync to fence scratch reuse ───────────────────
@@ -555,8 +539,7 @@ def _emit_cross_warp_reduce(helper_fn, *,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _emit_ub_reduce(helper_fn, *,
-                    dtype, threads, scale, thread_offset,
-                    scratch_offset):
+                    dtype, threads, scale, thread_offset):
     """Build the body of a UB-scratch all-reduce helper.
 
     Algorithm:
@@ -583,7 +566,6 @@ def _emit_ub_reduce(helper_fn, *,
         c_threads = arith.ConstantOp(i32, threads).result
         c_scale = arith.ConstantOp(i32, scale).result
         c_offset = arith.ConstantOp(i32, thread_offset).result
-        c_scratch_off = arith.ConstantOp(idx_t, scratch_offset).result
 
         # ── thread indexing ──────────────────────────────────────────────
         tid_x = _pto.GetTidXOp().result
@@ -592,10 +574,8 @@ def _emit_ub_reduce(helper_fn, *,
         lane = arith.RemUIOp(tx, c_threads).result
         lane_mod = arith.RemUIOp(lane, c_scale).result
 
-        # ── Stage 1: each lane writes x → scratch[scratch_offset + tx] ──
+        # ── Stage 1: each lane writes x → scratch[tx] ───────────────────
         tx_idx = arith.IndexCastOp(idx_t, tx).result
-        if scratch_offset:
-            tx_idx = arith.AddIOp(tx_idx, c_scratch_off).result
         _emit_store(scratch, tx_idx, x)
 
         # ── Stage 2: sync ────────────────────────────────────────────────
@@ -608,12 +588,10 @@ def _emit_ub_reduce(helper_fn, *,
         reduce_if = scf.IfOp(is_reducer, [scalar_t], hasElse=True)
 
         with InsertionPoint(reduce_if.then_block):
-            # initial: load scratch[scratch_offset + group * threads + lane]
+            # initial: load scratch[group * threads + lane]
             group_offset = arith.MulIOp(group, c_threads).result
             first_elem = arith.AddIOp(group_offset, lane).result
             first_idx = arith.IndexCastOp(idx_t, first_elem).result
-            if scratch_offset:
-                first_idx = arith.AddIOp(first_idx, c_scratch_off).result
             acc = _emit_load(scalar_t, scratch, first_idx)
 
             # scf.for i = scale to threads step scale
@@ -648,19 +626,15 @@ def _emit_ub_reduce(helper_fn, *,
             dst_offset = arith.AddIOp(
                 arith.MulIOp(group, c_threads).result, lane).result
             dst_idx = arith.IndexCastOp(idx_t, dst_offset).result
-            if scratch_offset:
-                dst_idx = arith.AddIOp(dst_idx, c_scratch_off).result
             _emit_store(scratch, dst_idx, flag)
             scf.YieldOp([])
 
-        # ── Stage 6: sync + broadcast scratch[scratch_offset + group*threads + tx%scale] ──
+        # ── Stage 6: sync + broadcast scratch[group*threads + tx%scale] ──
         _pto.SyncthreadsOp()
         my_slot = arith.AddIOp(
             arith.MulIOp(group, c_threads).result,
             arith.RemUIOp(tx, c_scale).result).result
         load_idx = arith.IndexCastOp(idx_t, my_slot).result
-        if scratch_offset:
-            load_idx = arith.AddIOp(load_idx, c_scratch_off).result
         result = _emit_load(scalar_t, scratch, load_idx)
 
         # ── Stage 7: extra sync to fence scratch reuse ───────────────────

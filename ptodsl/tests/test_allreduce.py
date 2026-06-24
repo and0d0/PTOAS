@@ -211,7 +211,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=6, scale=1)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=6, scale=1)
 
     compiled_ub6 = kernel_ub6.compile()
     mlir_ub6 = compiled_ub6.mlir_text()
@@ -235,7 +235,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=6, scale=2)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=6, scale=2)
 
     compiled_ub6s2 = kernel_ub6s2.compile()
     mlir_ub6s2 = compiled_ub6s2.mlir_text()
@@ -265,7 +265,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=6, scale=1,
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=6, scale=1,
                                      thread_offset=4)
 
     compiled_ub_o4 = kernel_ub_o4.compile()
@@ -286,7 +286,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=128, scale=1)
 
     compiled = kernel_128.compile()
     mlir = compiled.mlir_text()
@@ -317,7 +317,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=64, scale=1)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=64, scale=1)
 
     compiled_64 = kernel_64.compile()
     mlir_64 = compiled_64.mlir_text()
@@ -332,7 +332,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=256, scale=1)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=256, scale=1)
 
     compiled_256 = kernel_256.compile()
     mlir_256 = compiled_256.mlir_text()
@@ -351,7 +351,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=2)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=128, scale=2)
 
     compiled_cw_s2 = kernel_cw_s2.compile()
     mlir_cw_s2 = compiled_cw_s2.mlir_text()
@@ -375,7 +375,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=16)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=128, scale=16)
 
     compiled_cw_s16 = kernel_cw_s16.compile()
     mlir_cw_s16 = compiled_cw_s16.mlir_text()
@@ -392,7 +392,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=1,
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=128, scale=1,
                                      thread_offset=4)
 
     compiled_cw_o4 = kernel_cw_o4.compile()
@@ -416,7 +416,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=48, scale=1)
+            _result = pto.simt_allreduce_sum(x, ub_scratch, threads=48, scale=1)
 
     compiled_ub48 = kernel_ub48.compile()
     mlir_ub48 = compiled_ub48.mlir_text()
@@ -440,9 +440,9 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x1 = pto.const(1.0, dtype=pto.f32)
-            _r1 = pto.simt_allreduce_sum(x1, scratch=ub_scratch, threads=128, scale=1)
+            _r1 = pto.simt_allreduce_sum(x1, ub_scratch, threads=128, scale=1)
             x2 = pto.const(2.0, dtype=pto.f32)
-            _r2 = pto.simt_allreduce_sum(x2, scratch=ub_scratch, threads=128, scale=1)
+            _r2 = pto.simt_allreduce_sum(x2, ub_scratch, threads=128, scale=1)
 
     compiled2 = kernel_reuse.compile()
     mlir2 = compiled2.mlir_text()
@@ -465,7 +465,7 @@ def main():
     def kernel_no_scratch_cw(scratch_gm: pto.ptr(pto.f32, "gm")):
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=None, threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, None, threads=128, scale=1)
 
     try:
         kernel_no_scratch_cw.compile()
@@ -479,7 +479,7 @@ def main():
     def kernel_no_scratch_ub(scratch_gm: pto.ptr(pto.f32, "gm")):
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=None, threads=6, scale=1)
+            _result = pto.simt_allreduce_sum(x, None, threads=6, scale=1)
 
     try:
         kernel_no_scratch_ub.compile()
@@ -490,7 +490,7 @@ def main():
 
     # scratch must be a pto.ptr type
     try:
-        simt_allreduce_sum(1.0, scratch="not_a_ptr", threads=6, scale=1)
+        simt_allreduce_sum(1.0, "not_a_ptr", threads=6, scale=1)
         raise AssertionError("expected TypeError for non-ptr scratch")
     except (TypeError, AttributeError):
         pass
@@ -500,7 +500,7 @@ def main():
     def kernel_gm_scratch(scratch_gm: pto.ptr(pto.f32, "gm")):
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=scratch_gm, threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch_gm, threads=128, scale=1)
 
     try:
         kernel_gm_scratch.compile()
@@ -516,7 +516,7 @@ def main():
         ub_i32 = pto.castptr(zero_u64, pto.ptr(pto.i32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.simt_allreduce_sum(x, scratch=ub_i32, threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, ub_i32, threads=128, scale=1)
 
     try:
         kernel_dtype_mismatch.compile()
