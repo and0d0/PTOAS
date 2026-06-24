@@ -568,6 +568,32 @@ def PTO_ReduxMinOp : PTO_Op<"redux_min", [Pure, AllTypesMatch<["value", "result"
   }];
 }
 
+def PTO_AllReduceOp : PTO_Op<"all_reduce", [AllTypesMatch<["value", "result"]>]> {
+  let summary = "SIMT all-reduce across participating workitems";
+  let description = [{
+    Reduces one scalar value from each participating SIMT workitem and returns
+    the reduced value to each participant.  The reducer and launch-shape
+    template parameters are modeled as attributes so they stay compile-time
+    constants in IR instead of SSA operands.
+  }];
+
+  let arguments = (ins
+    AnyTypeOf<[I32, F16, F32], "integer/float scalar">:$value,
+    Optional<PTO_BufferType>:$scratch,
+    PTO_ReduceOpAttr:$reducer,
+    I32Attr:$threads,
+    DefaultValuedAttr<I32Attr, "1">:$scale,
+    DefaultValuedAttr<I32Attr, "0">:$thread_offset,
+    OptionalAttr<PTO_SignednessAttr>:$signedness
+  );
+  let results = (outs AnyTypeOf<[I32, F16, F32], "integer/float scalar">:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $value (`,` $scratch^)? (custom<OptionalSignedness>($signedness)^)? attr-dict
+    `:` type($value) (`,` type($scratch)^)? `->` type($result)
+  }];
+}
+
 class PTO_AtomicBinaryOp<string mnemonic>
     : PTO_Op<mnemonic, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins

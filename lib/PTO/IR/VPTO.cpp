@@ -592,6 +592,39 @@ LogicalResult ReduxMinOp::verify() {
                                   getSignednessAttr(), /*requireSignedness=*/true);
 }
 
+LogicalResult AllReduceOp::verify() {
+  bool requireSignedness = getReducer() != pto::ReduceOp::Sum;
+  if (failed(verifyReduxSemanticType(getOperation(), getValue().getType(),
+                                     getSignednessAttr(), requireSignedness)))
+    return failure();
+
+  int64_t threads = getThreads();
+  int64_t scale = getScale();
+  if (threads < 1)
+    return emitOpError() << "requires threads to be at least 1";
+  if (scale < 1)
+    return emitOpError() << "requires scale to be at least 1";
+  if (threads % scale != 0)
+    return emitOpError() << "requires threads to be divisible by scale";
+
+  if (getThreadOffset() < 0)
+    return emitOpError() << "requires thread_offset to be non-negative";
+
+  if (getScratch()) {
+    auto scratchType = cast<PtrType>(getScratch().getType());
+    if (scratchType.getElementType() != getValue().getType())
+      return emitOpError()
+             << "requires scratch pointer element type to match value type";
+  }
+
+  if (threads != 32 || scale != 1 || getThreadOffset() != 0 || getScratch())
+    return emitOpError()
+           << "currently lowers only the register all-reduce fast path with "
+              "threads = 32, scale = 1, thread_offset = 0, and no scratch";
+
+  return success();
+}
+
 LogicalResult MulhiOp::verify() {
   if (!getResult().getType().isInteger(32) &&
       !getResult().getType().isInteger(64))

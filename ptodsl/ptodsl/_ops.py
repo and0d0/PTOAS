@@ -3913,6 +3913,91 @@ def get_tid_z():
     return wrap_surface_value(_pto.GetTidZOp().result)
 
 
+def _reduce_op_attr(reducer):
+    if isinstance(reducer, str):
+        normalized = reducer.lower()
+        aliases = {
+            "sum": "Sum",
+            "add": "Sum",
+            "max": "Max",
+            "min": "Min",
+        }
+        enum_name = aliases.get(normalized)
+        if enum_name is None:
+            raise ValueError(
+                "all_reduce(reducer=...) expects 'sum', 'max', or 'min', "
+                f"got {reducer!r}"
+            )
+        return getattr(_pto.ReduceOp, enum_name)
+    return reducer
+
+
+def _signedness_attr(signedness):
+    if signedness is None:
+        return None
+    if not isinstance(signedness, str):
+        return signedness
+    normalized = signedness.lower()
+    if normalized not in ("signed", "unsigned"):
+        raise ValueError(
+            "all_reduce(signedness=...) expects 'signed' or 'unsigned', "
+            f"got {signedness!r}"
+        )
+    return normalized
+
+
+def all_reduce(
+    value,
+    scratch=None,
+    *,
+    reducer="sum",
+    threads,
+    scale=1,
+    thread_offset=0,
+    signedness=None,
+):
+    """``pto.all_reduce`` – SIMT all-reduce with template parameters as attrs."""
+    raw_value = unwrap_surface_value(value)
+    common_kwargs = {
+        "reducer": _reduce_op_attr(reducer),
+        "threads": threads,
+        "scale": scale,
+        "thread_offset": thread_offset,
+        "signedness": _signedness_attr(signedness),
+    }
+    if scratch is None:
+        op = _pto.AllReduceOp(raw_value, **common_kwargs)
+    else:
+        op = _pto.AllReduceOp(
+            raw_value,
+            scratch=unwrap_surface_value(scratch),
+            **common_kwargs,
+        )
+    return wrap_surface_value(op.result)
+
+
+def simt_allreduce_sum(
+    value,
+    scratch=None,
+    *,
+    threads,
+    scale=1,
+    thread_offset=0,
+    scratch_offset=0,
+):
+    """Compatibility wrapper for the RMSNorm draft's sum-only all-reduce API."""
+    if scratch_offset != 0:
+        raise ValueError("simt_allreduce_sum(..., scratch_offset=...) is not implemented yet")
+    return all_reduce(
+        value,
+        scratch,
+        reducer="sum",
+        threads=threads,
+        scale=scale,
+        thread_offset=thread_offset,
+    )
+
+
 def pipe_barrier(pipe):
     """``pto.pipe_barrier(pipe)`` – drain the specified hardware pipeline."""
     _pto.BarrierOp(_pipe_attr(pipe))
@@ -4087,6 +4172,7 @@ __all__ = [
     "mad", "mad_acc", "mad_bias", "mad_mx", "mad_mx_acc", "mad_mx_bias",
     "get_block_idx", "get_block_num", "get_subblock_idx", "get_subblock_num",
     "store_vfsimt_info", "get_tid_x", "get_tid_y", "get_tid_z",
+    "all_reduce", "simt_allreduce_sum",
     "pipe_barrier", "get_buf", "rls_buf",
     "set_cross_flag", "wait_cross_flag", "set_intra_flag", "wait_intra_flag",
     "set_flag", "wait_flag",

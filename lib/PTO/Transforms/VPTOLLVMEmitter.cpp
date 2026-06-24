@@ -2502,12 +2502,36 @@ FailureOr<StringRef> buildReduxCallee<pto::ReduxMaxOp>(MLIRContext *context,
 
 template <>
 FailureOr<StringRef> buildReduxCallee<pto::ReduxMinOp>(MLIRContext *context,
-                                                      Type valueType,
-                                                      Attribute signednessAttr) {
+                                                       Type valueType,
+                                                       Attribute signednessAttr) {
   std::string elem = getReduxIntrinsicTypeFragment(valueType, signednessAttr);
   if (elem.empty())
     return failure();
   return StringAttr::get(context, "llvm.hivm.redux.min." + elem).getValue();
+}
+
+static FailureOr<StringRef> buildAllReduceCallee(MLIRContext *context,
+                                                 pto::ReduceOp reducer,
+                                                 Type valueType,
+                                                 Attribute signednessAttr) {
+  std::string elem = getReduxIntrinsicTypeFragment(valueType, signednessAttr);
+  if (elem.empty())
+    return failure();
+
+  StringRef intrinsic;
+  switch (reducer) {
+  case pto::ReduceOp::Sum:
+    intrinsic = "llvm.hivm.redux.add.";
+    break;
+  case pto::ReduceOp::Max:
+    intrinsic = "llvm.hivm.redux.max.";
+    break;
+  case pto::ReduceOp::Min:
+    intrinsic = "llvm.hivm.redux.min.";
+    break;
+  }
+
+  return StringAttr::get(context, (intrinsic + elem).str()).getValue();
 }
 
 template <typename AtomicOp>
@@ -8379,6 +8403,44 @@ private:
   LoweringState &state;
 };
 
+class LowerAllReduceOpPattern final : public OpConversionPattern<pto::AllReduceOp> {
+public:
+  explicit LowerAllReduceOpPattern(TypeConverter &typeConverter,
+                                   MLIRContext *context, LoweringState &state)
+      : OpConversionPattern<pto::AllReduceOp>(typeConverter, context),
+        state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::AllReduceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type resultType = this->getTypeConverter()->convertType(op.getResult().getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "failed to convert all_reduce result type");
+
+    Type valueType = this->getTypeConverter()->convertType(op.getValue().getType());
+    if (!valueType || valueType != resultType)
+      return rewriter.notifyMatchFailure(op, "unexpected converted all_reduce operand type");
+
+    FailureOr<StringRef> calleeName = buildAllReduceCallee(
+        op.getContext(), op.getReducer(), op.getValue().getType(),
+        op.getSignednessAttr());
+    if (failed(calleeName))
+      return rewriter.notifyMatchFailure(op, "unsupported all_reduce VPTO signature");
+
+    auto funcType = rewriter.getFunctionType(TypeRange{resultType},
+                                             TypeRange{resultType});
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), *calleeName,
+                                              TypeRange{resultType},
+                                              ValueRange{adaptor.getValue()});
+    state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
+    rewriter.replaceOp(op, call.getResults());
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
 template <typename AtomicOp>
 class LowerAtomicBinaryOpPattern final : public OpConversionPattern<AtomicOp> {
 public:
@@ -9470,6 +9532,7 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerReduxOpPattern<pto::ReduxAddOp>,
                LowerReduxOpPattern<pto::ReduxMaxOp>,
                LowerReduxOpPattern<pto::ReduxMinOp>,
+               LowerAllReduceOpPattern,
                LowerAtomicCasOpPattern,
                LowerAtomicBinaryOpPattern<pto::AtomicExchOp>,
                LowerAtomicBinaryOpPattern<pto::AtomicAddOp>,
@@ -9605,7 +9668,8 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::VoteUniOp, pto::VoteBallotOp, pto::ShuffleIdxOp,
                       pto::ShuffleUpOp, pto::ShuffleDownOp,
                       pto::ShuffleBflyOp, pto::ReduxAddOp, pto::ReduxMaxOp,
-                      pto::ReduxMinOp, pto::AtomicCasOp, pto::AtomicExchOp,
+                      pto::ReduxMinOp, pto::AllReduceOp, pto::AtomicCasOp,
+                      pto::AtomicExchOp,
                       pto::AtomicAddOp, pto::AtomicSubOp,
                       pto::AtomicMinOp, pto::AtomicMaxOp,
                       pto::AtomicAndOp, pto::AtomicOrOp,

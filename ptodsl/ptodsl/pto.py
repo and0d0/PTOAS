@@ -105,6 +105,7 @@ from ._ops import (             # noqa: F401
     mad, mad_acc, mad_bias, mad_mx, mad_mx_acc, mad_mx_bias,
     get_block_idx, get_block_num, get_subblock_idx, get_subblock_num,
     store_vfsimt_info, get_tid_x, get_tid_y, get_tid_z,
+    all_reduce, simt_allreduce_sum,
     pipe_barrier,
     get_buf, rls_buf,
     set_cross_flag, wait_cross_flag, set_intra_flag, wait_intra_flag,
