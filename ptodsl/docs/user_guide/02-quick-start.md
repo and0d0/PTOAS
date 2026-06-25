@@ -16,7 +16,7 @@ def tile_copy(
     rows: pto.i32,
     cols: pto.i32,
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     """Copy one 2D tensor tile from A to O."""
 
@@ -24,9 +24,8 @@ def tile_copy(
     a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
     o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
 
-    # Allocate UB tiles for one row-strip block.
+    # Allocate a UB tile for one row-strip block.
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
-    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
     # Partition the GM views to cover the current logical slice.
     a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
@@ -34,7 +33,7 @@ def tile_copy(
 
     # Load from GM into UB, then store back out.
     pto.tile.load(a_part, a_tile)
-    pto.tile.store(o_tile, o_part)
+    pto.tile.store(a_tile, o_part)
 ```
 
 Let us step through each piece.
@@ -43,10 +42,17 @@ Let us step through each piece.
 
 ```python
 @pto.jit(target="a5")
-def tile_copy(A, O, *, BLOCK: pto.constexpr = 128):
+def tile_copy(
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+    *,
+    BLOCK: pto.const_expr = 128,
+):
 ```
 
-`@pto.jit` marks this function as a launchable PTO kernel. The positional parameters `A_ptr` and `O_ptr` are explicit GM pointers, while `rows` and `cols` are runtime scalar metadata passed at launch time. The keyword-only argument `BLOCK` is a compile-time constant declared with `pto.constexpr`; the compiler specializes the kernel for each tile width.
+`@pto.jit` marks this function as a launchable PTO kernel. By default `entry=True`, which means it uses the host-visible pointer-first ABI: explicit GM pointers, runtime scalars, and keyword-only `pto.const_expr` compile-time constants. The default compilation backend is `backend="vpto"`. The positional parameters `A_ptr` and `O_ptr` are explicit GM pointers, while `rows` and `cols` are runtime scalar metadata passed at launch time. The keyword-only argument `BLOCK` is a compile-time constant declared with `pto.const_expr`; the compiler specializes the kernel for each tile width.
 
 ### Describing GM tensors
 
@@ -76,7 +82,7 @@ a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
 
 ```python
 pto.tile.load(a_part, a_tile)   # GM → UB
-pto.tile.store(o_tile, o_part)  # UB → GM
+pto.tile.store(a_tile, o_part)  # UB → GM
 ```
 
 `tile.load` copies a block of data from GM (described by a partition) into a UB tile. `tile.store` copies a UB tile back to GM. These are **Tile Ops** — they operate on entire tile buffers at once.
@@ -85,7 +91,7 @@ pto.tile.store(o_tile, o_part)  # UB → GM
 
 ```python
 pto.tile.load(a_part, a_tile)
-pto.tile.store(o_tile, o_part)
+pto.tile.store(a_tile, o_part)
 ```
 
 A copy kernel strips the example down to the essential PTODSL boundary objects:
@@ -114,7 +120,7 @@ def blocked_copy(
     rows: pto.i32,
     cols: pto.i32,
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
     o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
@@ -129,7 +135,7 @@ def blocked_copy(
         pto.tile.store(tile, o_part)
 ```
 
-Here `rows` and `cols` are dynamic launch-time scalars. The loop bound depends on `rows`, so the default AST rewrite records a structured loop in the IR rather than unrolling at trace time. The `BLOCK` parameter stays `constexpr` because it is a tuning knob, not data-dependent. Chapter 5 covers this distinction in detail.
+Here `rows` and `cols` are dynamic launch-time scalars. The loop bound depends on `rows`, so the default AST rewrite records a structured loop in the IR rather than unrolling at trace time. The `BLOCK` parameter stays `const_expr` because it is a tuning knob, not data-dependent. Chapter 5 covers this distinction in detail.
 
 ## 2.3 Compile and launch
 
@@ -213,7 +219,7 @@ def vec_add_micro(
     O_ptr: pto.ptr(pto.f32, "gm"),
     N: pto.i32,
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     a_view = pto.make_tensor_view(A_ptr, shape=[N], strides=[1])
     b_view = pto.make_tensor_view(B_ptr, shape=[N], strides=[1])
@@ -261,3 +267,18 @@ The same pattern also has an `auto` counterpart: keep `@pto.jit` in its
 default mode and replace the explicit `mte_*` sequence with `tile.load` /
 `tile.store`. Chapter 3 covers the full entry model; Chapters 7–10 cover each
 operation family in detail.
+
+## 2.6 Next steps
+
+You now have a complete mental model of a PTODSL kernel: entry points, tile
+allocation, data movement with `tile.load` / `tile.store`, compile, and
+launch. From here:
+
+- **Chapter 3** covers the full kernel entry and module system: `auto` vs
+  `explicit` modes, `vpto` vs `emitc` backends, sub-kernels for custom tile
+  ops, and kernel modules (`@pto.jit(entry=False)`) for decomposing large
+  kernels across independent compilation boundaries.
+- **Chapter 4** details the type system: scalars, tiles, tensor views, and
+  buffer management.
+- **Chapter 5** explains control flow: device-side loops and conditionals,
+  trace-time unrolling, and the AST rewrite model.

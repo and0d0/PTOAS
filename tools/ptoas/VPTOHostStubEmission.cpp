@@ -77,7 +77,7 @@ static LogicalResult collectVPTOKernelStubDecls(
 
   for (ModuleOp module : modules) {
     module.walk([&](func::FuncOp func) {
-      if (!pto::isPTOKernelFunction(func))
+      if (!pto::isPTOEntryFunction(func))
         return;
 
       std::string logicalName = getLogicalKernelName(func.getSymName());
@@ -119,7 +119,7 @@ LogicalResult mlir::pto::emitVPTOHostStubSource(ArrayRef<ModuleOp> modules,
     return failure();
 
   if (stubDecls.empty()) {
-    diagOS << "Error: no pto.kernel functions found for host stub emission.\n";
+    diagOS << "Error: no PTO entry functions found for host stub emission.\n";
     return failure();
   }
 

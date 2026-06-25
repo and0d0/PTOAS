@@ -79,6 +79,20 @@ static LogicalResult verifyMaskTypeLike(Operation *op, Type type,
   return success();
 }
 
+static LogicalResult verifyNonLowPrecisionVRegElementTypeLike(
+    Operation *op, Type type, StringRef roleDescription) {
+  auto vecType = dyn_cast<VRegType>(type);
+  if (!vecType)
+    return success();
+  if (pto::isPTOLowPrecisionType(vecType.getElementType()))
+    return op->emitOpError()
+           << roleDescription
+           << " must not use low-precision vector element type; "
+              "low-precision vreg elements are currently only supported on "
+              "explicit memory/conversion ops such as vlds/vsts/vcvt/vmulscvt/vpack";
+  return success();
+}
+
 static LogicalResult verifyMaskTypeWithGranularityLike(Operation *op, Type type,
                                                        StringRef roleDescription,
                                                        StringRef granularity) {
@@ -783,7 +797,10 @@ static bool isSupportedMovPadScalarType(Type type) {
   return false;
 }
 
-static bool isMxElementType(Type type) { return isa<Float8E4M3FNType>(type); }
+static bool isMxElementType(Type type) {
+  return isa<Float8E4M3FNType, Float8E5M2Type>(type) ||
+         isa<pto::F4E1M2x2Type, pto::F4E2M1x2Type>(type);
+}
 
 static std::optional<StringRef> getVdupMaskGranularity(Type elementType) {
   if (auto intType = dyn_cast<IntegerType>(elementType)) {
@@ -1890,7 +1907,8 @@ static ParseResult parseRequiredOperandWithComma(
     OpAsmParser &parser, OpAsmParser::UnresolvedOperand &operand) {
   if (parser.parseOperand(operand))
     return failure();
-  return parser.parseComma();
+  (void)parser.parseOptionalComma();
+  return success();
 }
 
 static ParseResult parseDmaTripleGroup(
@@ -2700,10 +2718,11 @@ static ParseResult parseStructuredAccStoreClauses(
         return success();
     }
     StringRef keyword;
-    if (parser.parseKeyword(&keyword)) {
+    OptionalParseResult optParseResult = parser.parseOptionalKeyword(&keyword);
+    if (!optParseResult.has_value() || failed(*optParseResult)) {
       if (!seenClause)
         return success();
-      return failure();
+      return parser.emitError(parser.getCurrentLocation(), "expected valid keyword");
     }
     seenClause = true;
 
@@ -3712,7 +3731,8 @@ static LogicalResult verifyMadMxCommon(Operation *op, Type lhsTy, Type rhsTy,
   if (!isMxElementType(lhsType.getElementType()) ||
       !isMxElementType(rhsType.getElementType())) {
     return op->emitOpError(
-        "requires MX lhs/rhs element types (currently f8E4M3FN)");
+        "requires MX lhs/rhs element types (f8E4M3FN, f8E5M2, f4E1M2x2, or "
+        "f4E2M1x2)");
   }
   return success();
 }
@@ -4652,6 +4672,59 @@ LogicalResult SprclrOp::verify() {
   return success();
 }
 
+static LogicalResult verifySprStoreCommon(Operation *op, StringRef opName,
+                                          StringRef spr, Value destination,
+                                          Value offset,
+                                          bool requireImmediateOffset) {
+  if (!isSupportedSprToken(spr))
+    return op->emitOpError("requires spr to be \"AR\"");
+  if (failed(verifyNestedInVecScope(op, opName)))
+    return failure();
+  auto ptrType = dyn_cast<pto::PtrType>(destination.getType());
+  if (!ptrType)
+    return op->emitOpError("requires a pointer-like UB destination");
+  if (classifyMemoryRole(destination.getType()) != MemoryRole::UB)
+    return op->emitOpError("requires a UB-backed destination");
+  auto intType = dyn_cast<IntegerType>(ptrType.getElementType());
+  if (!intType || intType.getWidth() != 32 || intType.isSigned())
+    return op->emitOpError("requires ui32/i32 UB destination element type");
+  if (!offset.getType().isInteger(32))
+    return op->emitOpError("requires i32 offset");
+  if (requireImmediateOffset) {
+    APInt offsetValue;
+    if (!matchPattern(offset, m_ConstantInt(&offsetValue)))
+      return op->emitOpError("requires constant immediate offset");
+    int64_t signedOffset = offsetValue.getSExtValue();
+    if (signedOffset < -128 || signedOffset > 127)
+      return op->emitOpError("requires signed 8-bit immediate offset");
+  }
+  return success();
+}
+
+void SprstiOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
+}
+
+LogicalResult SprstiOp::verify() {
+  return verifySprStoreCommon(getOperation(), "pto.sprsti", getSpr(),
+                              getDestination(), getOffset(),
+                              /*requireImmediateOffset=*/true);
+}
+
+void SprstsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
+}
+
+LogicalResult SprstsOp::verify() {
+  return verifySprStoreCommon(getOperation(), "pto.sprsts", getSpr(),
+                              getDestination(), getOffset(),
+                              /*requireImmediateOffset=*/false);
+}
+
 void VldusOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -4906,6 +4979,29 @@ LogicalResult PltB32Op::verify() {
   return verifyPredicateLaneCountOp(*this, "b32");
 }
 
+template <typename PltmOp>
+static LogicalResult verifyPredicateLoopBoundOp(PltmOp op,
+                                                StringRef granularity) {
+  if (failed(verifyMaskTypeWithGranularityLike(op, op.getMask().getType(),
+                                               "mask type", granularity)))
+    return failure();
+  if (!op.getLoop().getType().isInteger(16))
+    return op.emitOpError("requires loop operand to be i16");
+  if (!op.getBound().getType().isInteger(32))
+    return op.emitOpError("requires bound operand to be i32");
+  return success();
+}
+
+LogicalResult PltmB8Op::verify() {
+  return verifyPredicateLoopBoundOp(*this, "b8");
+}
+LogicalResult PltmB16Op::verify() {
+  return verifyPredicateLoopBoundOp(*this, "b16");
+}
+LogicalResult PltmB32Op::verify() {
+  return verifyPredicateLoopBoundOp(*this, "b32");
+}
+
 LogicalResult PpackOp::verify() {
   if (failed(verifyMaskTypeLike(*this, getInput().getType(), "input type")) ||
       failed(verifyMaskTypeLike(*this, getResult().getType(), "result type")))
@@ -5065,6 +5161,9 @@ static LogicalResult verifyVecScalarMaskedOpLike(OpTy op) {
     return failure();
   if (failed(verifyMaskTypeLike(op, op.getMask().getType(), "mask type")))
     return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          op.getOperation(), op.getInput().getType(), "input type")))
+    return failure();
   return success();
 }
 
@@ -5156,6 +5255,9 @@ static LogicalResult verifyUnaryVecOp(UnaryOp op) {
     return failure();
   if (failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
     return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          op.getOperation(), op.getInput().getType(), "operand type")))
+    return failure();
   if (op.getInput().getType() != op.getResult().getType())
     return op.emitOpError("requires matching register vector shape");
   return success();
@@ -5191,6 +5293,9 @@ static LogicalResult verifyBinaryVecOp(BinaryOp op) {
     return failure();
   if (failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
     return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          op.getOperation(), op.getLhs().getType(), "lhs type")))
+    return failure();
   if (op.getLhs().getType() != op.getRhs().getType() ||
       op.getLhs().getType() != op.getResult().getType())
     return op.emitOpError("requires matching register vector shapes");
@@ -5204,6 +5309,32 @@ LogicalResult VdivOp::verify() { return verifyBinaryVecOp(*this); }
 LogicalResult VandOp::verify() { return verifyBinaryVecOp(*this); }
 LogicalResult VorOp::verify() { return verifyBinaryVecOp(*this); }
 LogicalResult VxorOp::verify() { return verifyBinaryVecOp(*this); }
+
+template <typename TernaryOp>
+static LogicalResult verifyTernaryVecOp(TernaryOp op) {
+  if (failed(verifyVRegTypeLike(op, op.getAcc().getType(), "acc type")) ||
+      failed(verifyVRegTypeLike(op, op.getLhs().getType(), "lhs type")) ||
+      failed(verifyVRegTypeLike(op, op.getRhs().getType(), "rhs type")) ||
+      failed(verifyMaskTypeLike(op, op.getMask().getType(), "mask type")) ||
+      failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
+    return failure();
+  if (op.getAcc().getType() != op.getLhs().getType() ||
+      op.getAcc().getType() != op.getRhs().getType() ||
+      op.getAcc().getType() != op.getResult().getType()) {
+    return op.emitOpError(
+        "requires acc, lhs, rhs, and result to share one vector type");
+  }
+  return success();
+}
+
+LogicalResult VmaddOp::verify() {
+  if (failed(verifyTernaryVecOp(*this)))
+    return failure();
+  Type elemType = cast<VRegType>(getAcc().getType()).getElementType();
+  if (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32())
+    return emitOpError("requires f16/bf16/f32 vector element type");
+  return success();
+}
 LogicalResult VshlOp::verify() {
   if (failed(verifyBinaryVecOp(*this)))
     return failure();
@@ -5260,6 +5391,63 @@ LogicalResult VcpaddOp::verify() {
   return success();
 }
 
+template <typename HistOp>
+static LogicalResult verifyHistogramOp(HistOp op) {
+  if (failed(verifyVRegTypeLike(op, op.getAcc().getType(), "acc type")) ||
+      failed(verifyVRegTypeLike(op, op.getSource().getType(), "source type")) ||
+      failed(verifyMaskTypeWithGranularityLike(op, op.getMask().getType(),
+                                               "mask type", "b8")) ||
+      failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
+    return failure();
+  auto accType = cast<VRegType>(op.getAcc().getType());
+  auto sourceType = cast<VRegType>(op.getSource().getType());
+  auto resultType = cast<VRegType>(op.getResult().getType());
+  auto accElemType = dyn_cast<IntegerType>(accType.getElementType());
+  auto sourceElemType = dyn_cast<IntegerType>(sourceType.getElementType());
+  if (!accElemType || accElemType.getWidth() != 16 ||
+      accType.getElementCount() != 128)
+    return op.emitOpError("requires acc type to be !pto.vreg<128xi16>");
+  if (!sourceElemType || sourceElemType.getWidth() != 8 ||
+      sourceType.getElementCount() != 256)
+    return op.emitOpError("requires source type to be !pto.vreg<256xi8>");
+  if (resultType != accType)
+    return op.emitOpError("requires result type to match acc type");
+  if (!op.getBin().getType().isInteger(32))
+    return op.emitOpError("requires bin operand to be i32");
+  return success();
+}
+
+LogicalResult Chistv2Op::verify() { return verifyHistogramOp(*this); }
+LogicalResult Dhistv2Op::verify() { return verifyHistogramOp(*this); }
+
+template <typename ExtremaOp>
+static LogicalResult verifyExtremaPredicateOp(ExtremaOp op) {
+  if (failed(verifyVRegTypeLike(op, op.getInput().getType(), "input type")) ||
+      failed(verifyMaskTypeLike(op, op.getMask().getType(), "mask type")) ||
+      failed(verifyVRegTypeLike(op, op.getValue().getType(), "value type")) ||
+      failed(verifyMaskTypeLike(op, op.getPredicate().getType(),
+                                "predicate type")))
+    return failure();
+  if (op.getInput().getType() != op.getValue().getType())
+    return op.emitOpError(
+        "requires input and value result to share one vector type");
+  if (op.getMask().getType() != op.getPredicate().getType())
+    return op.emitOpError(
+        "requires mask and predicate result to share one mask type");
+
+  Type elemType = cast<VRegType>(op.getInput().getType()).getElementType();
+  if (elemType.isF16() || elemType.isF32())
+    return success();
+  auto intType = dyn_cast<IntegerType>(elemType);
+  if (!intType || (intType.getWidth() != 8 && intType.getWidth() != 16 &&
+                   intType.getWidth() != 32))
+    return op.emitOpError("requires i8/i16/i32/f16/f32 vector element type");
+  return success();
+}
+
+LogicalResult VcbmaxOp::verify() { return verifyExtremaPredicateOp(*this); }
+LogicalResult VcbminOp::verify() { return verifyExtremaPredicateOp(*this); }
+
 template <typename SelectOp>
 static LogicalResult verifyLaneSelectOp(SelectOp op) {
   if (failed(verifyVRegTypeLike(op, op.getSrc0().getType(), "src0 type")) ||
@@ -5315,6 +5503,9 @@ LogicalResult VselOp::verify() {
       failed(verifyVRegTypeLike(*this, getSrc1().getType(), "src1 type")) ||
       failed(verifyMaskTypeLike(*this, getMask().getType(), "mask type")) ||
       failed(verifyVRegTypeLike(*this, getResult().getType(), "result type")))
+    return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          getOperation(), getSrc0().getType(), "src0 type")))
     return failure();
   if (getSrc0().getType() != getSrc1().getType() ||
       getSrc0().getType() != getResult().getType())
@@ -5500,6 +5691,45 @@ LogicalResult VtrcOp::verify() {
   auto normalized = normalizeRoundModeToken(getRoundMode());
   if (!normalized || !isSupportedVtrcRoundMode(*normalized))
     return emitOpError("round mode must be one of R/A/F/C/Z");
+  return success();
+}
+
+LogicalResult VmulscvtOp::verify() {
+  if (failed(verifyVRegTypeLike(*this, getInput().getType(), "input type")) ||
+      failed(verifyMaskTypeLike(*this, getMask().getType(), "mask type")) ||
+      failed(verifyVRegTypeLike(*this, getResult().getType(), "result type")))
+    return failure();
+
+  auto inputType = cast<VRegType>(getInput().getType());
+  auto resultType = cast<VRegType>(getResult().getType());
+  if (!inputType.getElementType().isF32())
+    return emitOpError("requires f32 input vector element type");
+  if (!resultType.getElementType().isF16())
+    return emitOpError("requires f16 result vector element type");
+
+  auto scalarType = getScalar().getType();
+  if (!scalarType.isF32())
+    return emitOpError("requires f32 scalar operand");
+
+  if (failed(verifyMaskTypeWithGranularityLike(*this, getMask().getType(),
+                                               "mask type", "b32")))
+    return failure();
+
+  auto inputBits = getVRegStorageBitWidth(inputType);
+  auto resultBits = getVRegStorageBitWidth(resultType);
+  if (!inputBits || !resultBits || *inputBits != *resultBits)
+    return emitOpError(
+        "requires source and result to preserve total vector storage width");
+
+  auto normalizedRnd = normalizeRoundModeToken(getRnd());
+  if (!normalizedRnd)
+    return emitOpError("rnd must be one of R/A/F/C/Z/O");
+  if (*normalizedRnd != "A")
+    return emitOpError("currently only supports rnd A");
+
+  auto normalizedPart = normalizeEvenOddPartToken(getPart());
+  if (!normalizedPart)
+    return emitOpError("part must be EVEN or ODD");
   return success();
 }
 
@@ -7211,11 +7441,15 @@ LogicalResult MteL1L0bOp::verify() {
 }
 
 LogicalResult MteL1L0aMxOp::verify() {
-  return verifyCubeBridgeLoadLikeOp(*this, AddressSpace::LEFT, "LEFT");
+  if (failed(verifyCubeBridgeLoadLikeOp(*this, AddressSpace::LEFT, "LEFT")))
+    return failure();
+  return verifyCubeBridgeLoadStart(*this);
 }
 
 LogicalResult MteL1L0bMxOp::verify() {
-  return verifyCubeBridgeLoadLikeOp(*this, AddressSpace::RIGHT, "RIGHT");
+  if (failed(verifyCubeBridgeLoadLikeOp(*this, AddressSpace::RIGHT, "RIGHT")))
+    return failure();
+  return verifyCubeBridgeLoadStart(*this);
 }
 
 void MteL1L0aOp::getEffects(

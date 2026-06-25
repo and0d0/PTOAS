@@ -13,8 +13,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ptodsl"))
 
-from ptodsl import pto
+from ptodsl import pto, scalar
 from ptodsl._ast_rewrite import PTODSLAstRewriteError
+from ptodsl._host_tensors import TensorSpec
 from ptodsl._host_tensors import inspect_host_tensor_metadata
 
 
@@ -59,7 +60,73 @@ def float_addptr_offset_probe():
 
 
 @pto.jit(target="a5")
-def carry_update_mismatch_probe(*, BLOCK: pto.constexpr = 8):
+def float_bitwise_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, 1])
+    value = scalar.load(tile[0, 0])
+    _ = value & 1
+
+
+@pto.jit(target="a5")
+def float_literal_index_store_probe(ptr: pto.ptr(pto.index, "gm")):
+    scalar.store(1.5, ptr)
+
+
+@pto.jit(target="a5")
+def float_literal_index_binary_probe():
+    index_value = pto.const(1, dtype=pto.index)
+    _ = index_value + 1.5
+
+
+@pto.jit(target="a5")
+def same_width_float_store_probe():
+    f16_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f16, valid_shape=[1, 1])
+    bf16_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.bf16, valid_shape=[1, 1])
+    f16_value = scalar.load(f16_tile[0, 0])
+    scalar.store(f16_value, bf16_tile[0, 0])
+
+
+@pto.jit(target="a5")
+def bool_loop_bound_probe():
+    with pto.for_(0, True, step=1):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+
+@pto.jit(target="a5")
+def bool_addptr_offset_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
+    _ = pto.addptr(tile.as_ptr(), True)
+
+
+@pto.jit(target="a5")
+def bool_event_id_probe():
+    pto.wait_flag(pto.Pipe.V, pto.Pipe.MTE2, event_id=True)
+
+
+@pto.jit(target="a5")
+def bool_fixed_integer_probe():
+    _ = pto.make_mask(pto.f32, True)
+
+
+@pto.jit(target="a5")
+def bool_tile_element_probe():
+    tile = pto.alloc_tile(shape=[2, 8], dtype=pto.i32, valid_shape=[2, 4])
+    _ = scalar.load(tile[True, 0])
+
+
+@pto.jit(target="a5")
+def bool_address_sugar_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
+    _ = scalar.load(tile.as_ptr() + True)
+
+
+@pto.jit(target="a5")
+def bool_tile_slice_probe():
+    tile = pto.alloc_tile(shape=[8], dtype=pto.i32, valid_shape=[4])
+    _ = tile[True:]
+
+
+@pto.jit(target="a5")
+def carry_update_mismatch_probe(*, BLOCK: pto.const_expr = 8):
     acc = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     loop = pto.for_(0, 1, step=1).carry(acc=acc)
     with loop:
@@ -67,7 +134,7 @@ def carry_update_mismatch_probe(*, BLOCK: pto.constexpr = 8):
 
 
 @pto.jit(target="a5")
-def carry_final_mismatch_probe(*, BLOCK: pto.constexpr = 8):
+def carry_final_mismatch_probe(*, BLOCK: pto.const_expr = 8):
     acc = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     loop = pto.for_(0, 1, step=1).carry(acc=acc)
     with loop:
@@ -99,7 +166,7 @@ class BadDataHandleTensor:
 
 def define_missing_constexpr_default_probe():
     @pto.jit(target="a5")
-    def bad_probe(*, BLOCK: pto.constexpr):
+    def bad_probe(*, BLOCK: pto.const_expr):
         pto.pipe_barrier(pto.Pipe.ALL)
 
     return bad_probe
@@ -145,9 +212,9 @@ def define_ub_ptr_entry_annotation_probe():
     return bad_probe
 
 
-def define_legacy_tensor_spec_entry_probe():
-    @pto.jit(target="a5")
-    def bad_probe(A: pto.tensor_spec(rank=2, dtype=pto.f32)):
+def define_emitc_ub_ptr_entry_annotation_probe():
+    @pto.jit(target="a5", backend="emitc")
+    def bad_probe(A: pto.ptr(pto.f32, "ub")):
         pto.pipe_barrier(pto.Pipe.ALL)
 
     return bad_probe
@@ -172,6 +239,38 @@ def define_frontend_options_scalar_rewrite_probe():
 def define_frontend_options_dump_source_probe():
     @pto.jit(target="a5", frontend_options={"dump_rewritten_source": True})
     def bad_probe():
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_legacy_tensor_spec_entry_probe():
+    @pto.jit(target="a5")
+    def bad_probe(A: TensorSpec(rank=2, dtype=pto.f32)):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_tile_entry_annotation_probe():
+    @pto.jit(target="a5")
+    def bad_probe(tile: pto.Tile):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_view_entry_annotation_probe():
+    @pto.jit(target="a5")
+    def bad_probe(view: pto.TensorView):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_partition_view_entry_annotation_probe():
+    @pto.jit(target="a5")
+    def bad_probe(view: pto.PartitionTensorView):
         pto.pipe_barrier(pto.Pipe.ALL)
 
     return bad_probe
@@ -255,6 +354,64 @@ def define_ast_for_loop_target_live_after_probe():
         _ = i
 
     return bad_probe
+
+
+def define_helper_missing_annotation_probe():
+    @pto.jit(target="a5", entry=False)
+    def bad_probe(tile):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_helper_constexpr_probe():
+    @pto.jit(target="a5", entry=False)
+    def bad_probe(*, BLOCK: pto.const_expr = 8):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_helper_legacy_tensor_spec_probe():
+    @pto.jit(target="a5", entry=False)
+    def bad_probe(A: TensorSpec(rank=2, dtype=pto.f32)):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_helper_vreg_probe():
+    @pto.jit(target="a5", entry=False)
+    def bad_probe(vec: pto.vreg_type(64, pto.f32)):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_helper_mask_probe():
+    @pto.jit(target="a5", entry=False)
+    def bad_probe(mask: pto.mask_b32):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_kernel_module_return_value_probe():
+    @pto.jit(target="a5", entry=False)
+    def bad_probe(ptr: pto.ptr(pto.f32, "gm"), rows: pto.i32):
+        return rows
+
+    return bad_probe
+
+
+@pto.jit(target="a5")
+def regular_entry_probe(rows: pto.i32):
+    _ = rows
+
+
+@pto.jit(target="a5")
+def entry_calling_entry_probe(rows: pto.i32):
+    regular_entry_probe(rows)
 
 
 @pto.jit(target="a5")
@@ -352,7 +509,7 @@ def main() -> None:
         TypeError,
         "native Python if/while condition",
         "pto.if_(...)",
-        "pto.constexpr",
+        "pto.const_expr",
     )
     expect_raises(
         native_python_range_runtime_metadata_probe.compile,
@@ -374,6 +531,74 @@ def main() -> None:
         "addptr(ptr, offset)",
         "expects an index-like scalar",
         "f32",
+    )
+    expect_raises(
+        float_bitwise_probe.compile,
+        TypeError,
+        "runtime scalar bitwise operator",
+        "expects integer-like operands",
+    )
+    expect_raises(
+        float_literal_index_store_probe.compile,
+        TypeError,
+        "scalar.store(...)",
+        "cannot materialize a floating-point literal against non-floating",
+        "index",
+    )
+    expect_raises(
+        float_literal_index_binary_probe.compile,
+        TypeError,
+        "runtime scalar operators cannot materialize a floating-point literal",
+        "index",
+    )
+    expect_raises(
+        same_width_float_store_probe.compile,
+        TypeError,
+        "cannot coerce between different floating-point types of the same width",
+        "f16",
+        "bf16",
+    )
+    expect_raises(
+        bool_loop_bound_probe.compile,
+        TypeError,
+        "pto.for_(...) loop bound",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_addptr_offset_probe.compile,
+        TypeError,
+        "addptr(ptr, offset)",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_event_id_probe.compile,
+        TypeError,
+        "wait_flag(..., event_id=...)",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_fixed_integer_probe.compile,
+        TypeError,
+        "make_mask(..., value)",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_tile_element_probe.compile,
+        TypeError,
+        "surface index value",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_address_sugar_probe.compile,
+        TypeError,
+        "surface index value",
+        "does not accept bool values",
+    )
+    expect_raises(
+        bool_tile_slice_probe.compile,
+        TypeError,
+        "surface index value",
+        "does not accept bool values",
     )
     expect_raises(
         carry_update_mismatch_probe.compile,
@@ -407,7 +632,7 @@ def main() -> None:
         define_illegal_keyword_only_probe,
         TypeError,
         "@pto.jit keyword-only parameter 'BLOCK' uses unsupported compile-time annotation",
-        "pto.constexpr",
+        "pto.const_expr",
         "move runtime data to positional pointer/scalar parameters",
     )
     expect_raises(
@@ -428,6 +653,13 @@ def main() -> None:
     )
     expect_raises(
         define_ub_ptr_entry_annotation_probe,
+        TypeError,
+        "@pto.jit positional parameter 'A' uses non-GM pointer entry annotation",
+        'pto.ptr(pto.f32, "gm")',
+        "only accepts explicit GM pointers",
+    )
+    expect_raises(
+        define_emitc_ub_ptr_entry_annotation_probe,
         TypeError,
         "@pto.jit positional parameter 'A' uses non-GM pointer entry annotation",
         'pto.ptr(pto.f32, "gm")',
@@ -499,6 +731,81 @@ def main() -> None:
         PTODSLAstRewriteError,
         "cannot expose the loop induction variable outside the loop yet",
         "i",
+    )
+    expect_raises(
+        define_tile_entry_annotation_probe,
+        TypeError,
+        "@pto.jit positional parameter 'tile' uses unsupported entry annotation",
+        "Tile",
+        "do not belong at the host/kernel entry",
+    )
+    expect_raises(
+        define_view_entry_annotation_probe,
+        TypeError,
+        "@pto.jit positional parameter 'view' uses unsupported entry annotation",
+        "TensorView",
+        "do not belong at the host/kernel entry",
+    )
+    expect_raises(
+        define_partition_view_entry_annotation_probe,
+        TypeError,
+        "@pto.jit positional parameter 'view' uses unsupported entry annotation",
+        "PartitionTensorView",
+        "do not belong at the host/kernel entry",
+    )
+    expect_raises(
+        define_helper_missing_annotation_probe,
+        TypeError,
+        "@pto.jit(entry=False) parameter 'tile' does not declare a kernel-module ABI annotation",
+        "pto.Tile",
+        "typed pto.ptr(...)",
+    )
+    expect_raises(
+        define_helper_constexpr_probe,
+        TypeError,
+        "@pto.jit(entry=False) keyword-only parameter 'BLOCK' uses unsupported kernel-module compile-time annotation",
+        "pto.const_expr",
+        "does not support keyword-only constexpr specialization parameters",
+    )
+    expect_raises(
+        define_helper_legacy_tensor_spec_probe,
+        TypeError,
+        "@pto.jit(entry=False) parameter 'A' still uses legacy host-tensor annotation",
+        "does not accept pto.tensor_spec(...)",
+        "Tile / TensorView / PartitionTensorView",
+    )
+    expect_raises(
+        define_helper_vreg_probe,
+        TypeError,
+        "@pto.jit(entry=False) parameter 'vec' uses unsupported kernel-module annotation",
+        "VReg",
+        "do not belong at this kernel-module boundary",
+    )
+    expect_raises(
+        define_helper_mask_probe,
+        TypeError,
+        "@pto.jit(entry=False) parameter 'mask' uses unsupported kernel-module annotation",
+        "mask",
+        "do not belong at this kernel-module boundary",
+    )
+    kernel_module_return_value_probe = define_kernel_module_return_value_probe()
+    expect_raises(
+        kernel_module_return_value_probe.compile,
+        RuntimeError,
+        "@pto.jit(entry=False) kernel module 'bad_probe' is not directly compilable from Python",
+        "Compile an entry kernel that calls this module instead",
+    )
+    expect_raises(
+        lambda: kernel_module_return_value_probe[1, None],
+        RuntimeError,
+        "@pto.jit(entry=False) kernel module 'bad_probe' is not launchable from Python",
+        "Only @pto.jit(entry=True) kernels support compiled[grid, stream](...)",
+    )
+    expect_raises(
+        entry_calling_entry_probe.compile,
+        TypeError,
+        "@pto.jit entry kernel 'regular_entry_probe' is not callable from traced PTODSL bodies",
+        "only @pto.jit(entry=False) kernel modules may be called there",
     )
     expect_raises(
         make_tensor_view_missing_metadata_probe.compile,

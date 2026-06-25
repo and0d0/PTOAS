@@ -43,9 +43,9 @@ def init_weight_fragment_body(
     w_ub,
     w_frag,
     *,
-    threads: pto.constexpr = 128,
-    rounds: pto.constexpr = 16,
-    lanes: pto.constexpr = 2,
+    threads: pto.const_expr = 128,
+    rounds: pto.const_expr = 16,
+    lanes: pto.const_expr = 2,
 ):
     tx = pto.get_tid_x()
 
@@ -67,10 +67,10 @@ def rmsnorm_4096_token_body(
     eps: pto.f32,
     ping: pto.i32,
     *,
-    threads: pto.constexpr = 128,
-    rounds: pto.constexpr = 16,
-    lanes: pto.constexpr = 2,
-    hidden_size: pto.constexpr = 4096,
+    threads: pto.const_expr = 128,
+    rounds: pto.const_expr = 16,
+    lanes: pto.const_expr = 2,
+    hidden_size: pto.const_expr = 4096,
 ):
     tx = pto.get_tid_x()
     local_sum = 0.0
@@ -122,15 +122,15 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     eps: pto.f32,
     batch: pto.i32,
     *,
-    threads: pto.constexpr = 128,
-    rounds: pto.constexpr = 16,
-    lanes: pto.constexpr = 2,
-    hidden_size: pto.constexpr = 4096,
-    n_cores: pto.constexpr = 64,
-    tokens_per_core: pto.constexpr = 64,
+    threads: pto.const_expr = 128,
+    rounds: pto.const_expr = 16,
+    lanes: pto.const_expr = 2,
+    hidden_size: pto.const_expr = 4096,
+    n_cores: pto.const_expr = 64,
+    tokens_per_core: pto.const_expr = 64,
 ):
     core_id = pto.get_block_idx()
-    frag_elems: pto.constexpr = rounds * lanes
+    frag_elems: pto.const_expr = rounds * lanes
 
     w_ub = pto.alloc_buffer((hidden_size,), pto.f32, scope="ub")
     x_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")

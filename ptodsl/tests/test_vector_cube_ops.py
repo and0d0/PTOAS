@@ -21,13 +21,72 @@ import ptodsl._pipe_namespace as _pipe_namespace
 from ptodsl._bootstrap import make_context
 from ptodsl import pto
 from mlir.ir import F32Type
-
-
 def _identity(value):
     return value
 
 
 class VectorCubeSurfaceTest(unittest.TestCase):
+    def test_row_reduction_auto_tmp_prefers_surface_metadata(self):
+        src = SimpleNamespace(
+            type="ignored_type",
+            surface_metadata={
+                "shape": (8, 64),
+                "dtype": "f32_type",
+                "memory_space": "vec",
+                "valid_shape": ("rows", "cols"),
+            },
+        )
+        auto_tmp = object()
+        dst = object()
+        sentinel = object()
+
+        with patch.object(_ops, "parse_tile_type_metadata") as parse_tile_type_metadata, \
+             patch.object(_ops, "alloc_tile", return_value=auto_tmp) as alloc_tile, \
+             patch.object(_ops, "trowmax", return_value=sentinel) as trowmax:
+            result = pto.tile.rowmax(src, dst=dst, tmp=None)
+
+        self.assertIs(result, sentinel)
+        parse_tile_type_metadata.assert_not_called()
+        alloc_tile.assert_called_once_with(
+            shape=[8, 64],
+            dtype="f32_type",
+            memory_space="vec",
+            valid_shape=["rows", "cols"],
+            blayout="RowMajor",
+            slayout="NoneBox",
+        )
+        trowmax.assert_called_once_with(src, auto_tmp, dst)
+
+    def test_row_reduction_auto_tmp_uses_row_major_layout(self):
+        src = SimpleNamespace(type="!pto.tile_buf<vec, 8x64xf32, valid=8x64, blayout=col_major>")
+        auto_tmp = object()
+        dst = object()
+        sentinel = object()
+        element_type = object()
+        metadata = {
+            "shape_dims": (8, 64),
+            "element_type": element_type,
+            "memory_space": "vec",
+            "valid_dims": (8, 64),
+        }
+
+        with patch.object(_ops, "unwrap_surface_value", return_value=src), \
+             patch.object(_ops, "parse_tile_type_metadata", return_value=metadata), \
+             patch.object(_ops, "alloc_tile", return_value=auto_tmp) as alloc_tile, \
+             patch.object(_ops, "trowmax", return_value=sentinel) as trowmax:
+            result = pto.tile.rowmax(src, dst=dst, tmp=None)
+
+        self.assertIs(result, sentinel)
+        alloc_tile.assert_called_once_with(
+            shape=[8, 64],
+            dtype=element_type,
+            memory_space="vec",
+            valid_shape=[8, 64],
+            blayout="RowMajor",
+            slayout="NoneBox",
+        )
+        trowmax.assert_called_once_with(src, auto_tmp, dst)
+
     def test_public_namespace_exports_new_vector_and_cube_apis(self):
         names = [
             "vsub", "vmin", "vand", "vor", "vxor", "vshl", "vshr",
@@ -233,6 +292,9 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         rhs = object()
         dst = object()
         bias = object()
+        lhs_scale = object()
+        rhs_scale = object()
+        acc_in = object()
 
         cube_cases = [
             ("mad_acc", "MadAccOp", (lhs, rhs, dst, 1, 2, 3), (lhs, rhs, dst, "i64:1", "i64:2", "i64:3")),
@@ -245,6 +307,23 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
              patch.object(_ops, "_coerce_i64", side_effect=lambda value, *, context: f"i64:{value}"):
             for func_name, op_name, args, expected_call in cube_cases:
+                with self.subTest(func=func_name):
+                    op_ctor = MagicMock()
+                    with patch.object(_ops._pto, op_name, op_ctor):
+                        getattr(_ops, func_name)(*args)
+                    self.assertEqual(op_ctor.call_args.args, expected_call)
+
+        mx_tileop_cases = [
+            ("tmatmul_mx", "TMatmulMxOp", (lhs, lhs_scale, rhs, rhs_scale, dst), (None, lhs, lhs_scale, rhs, rhs_scale, dst)),
+            ("tmatmul_mx_acc", "TMatmulMxAccOp", (acc_in, lhs, lhs_scale, rhs, rhs_scale, dst), (None, acc_in, lhs, lhs_scale, rhs, rhs_scale, dst)),
+            ("tmatmul_mx_bias", "TMatmulMxBiasOp", (lhs, lhs_scale, rhs, rhs_scale, bias, dst), (None, lhs, lhs_scale, rhs, rhs_scale, bias, dst)),
+            ("tgemv_mx", "TGemvMxOp", (lhs, lhs_scale, rhs, rhs_scale, dst), (None, lhs, lhs_scale, rhs, rhs_scale, dst)),
+            ("tgemv_mx_acc", "TGemvMxAccOp", (acc_in, lhs, lhs_scale, rhs, rhs_scale, dst), (None, acc_in, lhs, lhs_scale, rhs, rhs_scale, dst)),
+            ("tgemv_mx_bias", "TGemvMxBiasOp", (lhs, lhs_scale, rhs, rhs_scale, bias, dst), (None, lhs, lhs_scale, rhs, rhs_scale, bias, dst)),
+        ]
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity):
+            for func_name, op_name, args, expected_call in mx_tileop_cases:
                 with self.subTest(func=func_name):
                     op_ctor = MagicMock()
                     with patch.object(_ops._pto, op_name, op_ctor):
@@ -427,6 +506,73 @@ class VectorCubeSurfaceTest(unittest.TestCase):
                     getattr(pto.tile, name)(src, dst, tmp=tmp)
                 low_level_op.assert_called_once_with(src, tmp, dst)
 
+    def test_tile_sort_gather_wrappers_call_low_level_ops(self):
+        src = object()
+        idx = object()
+        dst = object()
+        tmp = object()
+        block_len = object()
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops._pto, "tsort32") as tsort32_op:
+            pto.tile.sort32(src, idx, dst)
+        self.assertEqual(tsort32_op.call_args.args, (src, idx, dst))
+        self.assertEqual(tsort32_op.call_args.kwargs, {"tmp": None})
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops._pto, "tsort32") as tsort32_op:
+            pto.tile.sort32(src, idx, dst, tmp=tmp)
+        self.assertEqual(tsort32_op.call_args.args, (src, idx, dst))
+        self.assertEqual(tsort32_op.call_args.kwargs, {"tmp": tmp})
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops._pto, "tmrgsort") as tmrgsort_op:
+            pto.tile.mrgsort(src, dst, block_len)
+        self.assertEqual(tmrgsort_op.call_args.args, ([src], [dst]))
+        self.assertEqual(
+            tmrgsort_op.call_args.kwargs,
+            {"block_len": block_len, "tmp": None, "excuted": None, "exhausted": None},
+        )
+
+        parsed_pattern = object()
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops, "_tile_mask_pattern_attr", return_value=parsed_pattern) as mask_attr, \
+             patch.object(_ops._pto, "tgather") as tgather_op:
+            pto.tile.gather(src, dst, mask_pattern="P0101")
+        mask_attr.assert_called_once_with("P0101")
+        self.assertEqual(tgather_op.call_args.args, (src, dst))
+        self.assertEqual(tgather_op.call_args.kwargs["mask_pattern"], parsed_pattern)
+
+        with self.assertRaisesRegex(ValueError, "unsupported tile mask pattern"):
+            pto.tile.gather(src, dst, mask_pattern="PAT_ALL")
+
+    def test_tile_mov_accepts_acc_to_vec_mode(self):
+        src = object()
+        dst = object()
+        parsed_mode = object()
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops.Attribute, "parse", return_value=parsed_mode) as parse_attr, \
+             patch.object(_ops._pto, "TMovOp") as tmov_op:
+            pto.tile.mov(src, dst, mode="split_n")
+
+        parse_attr.assert_called_once_with("#pto<acc_to_vec_mode dual_mode_split_n>")
+        self.assertEqual(tmov_op.call_args.args, (None, src, dst))
+        self.assertEqual(tmov_op.call_args.kwargs, {"accToVecMode": parsed_mode})
+    def test_tile_extract_dispatches_row_and_col_indices(self):
+        src = object()
+        dst = object()
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops, "_coerce_index", side_effect=lambda value, *, context: f"idx:{context}:{value}") as coerce_index, \
+             patch.object(_ops._pto, "TExtractOp") as textract_op:
+            pto.tile.extract(src, dst, 7, 11)
+
+        self.assertEqual(
+            textract_op.call_args.args,
+            (src, "idx:textract(index_row):7", "idx:textract(index_col):11", dst),
+        )
+        self.assertEqual(coerce_index.call_count, 2)
     def test_sync_event_id_rejects_out_of_range_static_values(self):
         cases = [
             (_ops.set_flag, ("MTE2", "V"), {"event_id": 8}, "set_flag(..., event_id=...)"),
@@ -511,10 +657,11 @@ class VectorCubeSurfaceTest(unittest.TestCase):
 
         with patch.object(_pipe_namespace, "unwrap_surface_value", side_effect=_identity), \
              patch.object(_pipe_namespace, "wrap_surface_value", side_effect=_identity), \
-             patch.object(_pipe_namespace, "_infer_global_slot_size", return_value=1024):
+             patch.object(_pipe_namespace, "_infer_unambiguous_global_slot_size", return_value=1024):
             pipe = pto.pipe.c2v(
                 gm_slot_tensor=gm_slot,
                 id=7,
+                nosplit=True,
             )
 
         self.assertEqual(pipe.id, 7)
@@ -538,6 +685,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
 
         expected_init_kwargs = {
             "id": 7,
+            "nosplit": True,
             "gm_slot_tensor": gm_slot,
         }
         aic_init.assert_called_once_with(1, 1024, **expected_init_kwargs)
@@ -623,6 +771,15 @@ class VectorCubeSurfaceTest(unittest.TestCase):
             "v2c_consumer_buf": v2c_buf,
         })
 
+    def test_local_pipe_constructors_still_require_consumer_buffers(self):
+        with self.assertRaises(TypeError) as c2v_exc:
+            pto.pipe.c2v(slot_size=1024, id=3)
+        self.assertIn("requires consumer_buf for local pipes", str(c2v_exc.exception))
+
+        with self.assertRaises(TypeError) as v2c_exc:
+            pto.pipe.v2c(slot_size=2048, id=4)
+        self.assertIn("requires consumer_buf for local pipes", str(v2c_exc.exception))
+
     def test_pipe_constructors_require_explicit_stable_ids(self):
         buf = object()
         with make_context():
@@ -630,7 +787,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         gm_slot = SimpleNamespace(type=gm_slot_type)
 
         with patch.object(_pipe_namespace, "unwrap_surface_value", side_effect=_identity), \
-             patch.object(_pipe_namespace, "_infer_global_slot_size", return_value=1024):
+             patch.object(_pipe_namespace, "_infer_unambiguous_global_slot_size", return_value=1024):
             cases = [
                 lambda: pto.pipe.c2v(gm_slot_tensor=gm_slot),
                 lambda: pto.pipe.v2c(gm_slot_tensor=gm_slot),
@@ -657,6 +814,38 @@ class VectorCubeSurfaceTest(unittest.TestCase):
                 with self.subTest(case=case):
                     with self.assertRaises(TypeError):
                         case()
+
+    def test_global_pipe_slot_size_inference_requires_unambiguous_nosplit(self):
+        with make_context():
+            gm_slot_type = _pipe_namespace._pto.TensorViewType.get([16, 16], F32Type.get())
+        gm_slot = SimpleNamespace(type=gm_slot_type)
+
+        with patch.object(_pipe_namespace, "unwrap_surface_value", side_effect=_identity):
+            for case in (
+                lambda: pto.pipe.c2v(gm_slot_tensor=gm_slot, id=11),
+                lambda: pto.pipe.v2c(gm_slot_tensor=gm_slot, id=12),
+            ):
+                with self.subTest(case=case):
+                    with self.assertRaises(TypeError) as exc:
+                        case()
+                    self.assertIn("requires explicit slot_size", str(exc.exception))
+                    self.assertIn("nosplit=True", str(exc.exception))
+
+    def test_global_pipe_allows_explicit_full_slot_size_for_split_consumer_shape(self):
+        with make_context():
+            gm_slot_type = _pipe_namespace._pto.TensorViewType.get([4, 64, 128], F32Type.get())
+        gm_slot = SimpleNamespace(type=gm_slot_type)
+
+        with patch.object(_pipe_namespace, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_pipe_namespace, "wrap_surface_value", side_effect=_identity):
+            pipe = pto.pipe.c2v(
+                gm_slot_tensor=gm_slot,
+                slot_size=262144,
+                id=13,
+            )
+
+        self.assertEqual(pipe.slot_size, 262144)
+        self.assertEqual(pipe.entry_type, gm_slot_type)
 
     def test_local_pipe_transactions_dispatch_to_tile_entry_frontend_ops(self):
         c2v_buf = object()

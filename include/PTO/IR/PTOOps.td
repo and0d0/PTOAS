@@ -819,7 +819,10 @@ def TTransOp : PTO_TOp<"ttrans", [
   let summary = "PTO matrix trans operation (destination-style, DPS).";
   let description = [{
     DPS form:
-      tile buf:  pto.ttrans ins(%src %tmp) outs(%dst)
+      tile buf:  pto.ttrans ins(%src, %tmp) outs(%dst)
+
+    The current PTO IR form always carries a tmp operand, but PTO IR does not
+    require tmp to match the shape or valid shape of src/dst.
   }];
   let arguments = (ins
     PTODpsType:$src,
@@ -1554,6 +1557,45 @@ class PTO_SectionOp<string mnemonic>
 
 def SectionCubeOp : PTO_SectionOp<"section.cube">;
 def SectionVectorOp : PTO_SectionOp<"section.vector">;
+
+//===----------------------------------------------------------------------===//
+// Tile Fusion Region Ops
+//===----------------------------------------------------------------------===//
+
+def FusionRegionOp : PTO_Op<"fusion_region", [SingleBlock]> {
+  let summary = "Structured region container for one scheduled tile fusion group";
+  let description = [{
+    `pto.fusion_region` wraps one already-scheduled fusion group inside the
+    current function and exposes explicit escaping values as results.
+    The body is a lightweight single-block container and may implicitly capture
+    surrounding SSA values from the parent scope.
+  }];
+
+  let results = (outs Variadic<AnyType>:$outputs);
+  let regions = (region SizedRegion<1>:$body);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $body attr-dict `:` type(results)
+  }];
+}
+
+def YieldOp : PTO_Op<"yield", [Terminator, ParentOneOf<["FusionRegionOp"]>]> {
+  let summary = "Terminate a pto.fusion_region and return its visible outputs";
+  let description = [{
+    `pto.yield` is the dedicated terminator for `pto.fusion_region`. Its
+    operands enumerate the tile/value set that remains externally visible after
+    encapsulation. They define the region outputs in the same order as the
+    parent `pto.fusion_region` results, giving downstream passes a compact
+    summary of which internal tiles still escape the region boundary.
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$values);
+  let results = (outs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $values `)` attr-dict `:` functional-type($values, results)
+  }];
+}
 
 //===----------------------------------------------------------------------===//
 // Frontend TPUSH/TPOP Pipe Communication Ops
@@ -2794,11 +2836,25 @@ def MGatherOp : PTO_TOp<"mgather", [
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
   let summary = "Gather-load elements from memory into a tile using per-element indices (tile world, ins/outs).";
+  let description = [{
+    Two destination forms are supported:
+
+    - **GM -> UB (VEC)**: `mem` is a GM table, `idx` is a UB index tile, and
+      `dst` is a UB (`loc=vec`) tile. This is the default path.
+    - **GM -> L1 (MAT)**: `dst` is an L1 / cube (`loc=mat`) tile in NZ layout,
+      `idx` is supplied as a **GM** tensor (the cube core cannot read UB on
+      A5), and `Coalesce::Elem` additionally requires a contiguous **GM
+      `scratch`** workspace used to stage the gathered elements into NZ layout
+      before the bulk GM -> L1 copy. `Coalesce::Row` needs no scratch. The path
+      is selected by `dst` being a `loc=mat` tile and mirrors the pto-isa
+      `MGATHER` GM -> L1 overloads.
+  }];
 
   let arguments = (ins
     PTODpsType:$mem,
     PTODpsType:$idx,
     PTODpsType:$dst,
+    Optional<PTODpsType>:$scratch,
     OptionalAttr<PTO_CoalesceAttr>:$coalesce,
     DefaultValuedAttr<PTO_GatherOOBAttr, "::mlir::pto::GatherOOB::Undefined">:$gatherOob);
 
@@ -2807,7 +2863,8 @@ def MGatherOp : PTO_TOp<"mgather", [
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    `ins` `(` $mem `,` $idx `:` type($mem) `,` type($idx) `)`
+    `ins` `(` $mem `,` $idx (`,` $scratch^)? `:`
+        type($mem) `,` type($idx) (`,` type($scratch)^)? `)`
     `outs` `(` $dst `:` qualified(type($dst) ) `)`
     attr-dict
   }];
@@ -2815,6 +2872,37 @@ def MGatherOp : PTO_TOp<"mgather", [
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "MGATHER"; }
     ::mlir::pto::PIPE getPipe() {
+      // GM -> L1 gather: the destination is an L1 / cube (loc=mat) tile and the
+      // gather is issued as a GM -> L1 DMA load (copy_gm_to_cbuf / nd2nz) on the
+      // MTE2 pipe on every arch, mirroring pto.tload. The GM -> UB (VEC) path
+      // below keeps its A5 SIMT (PIPE_V) / A2A3 MTE2 selection.
+      //
+      // Resolve the dst address space from BOTH the tile_buf and the lowered
+      // memref form: PTOViewToMemref rewrites dst into a memref<...,mat> before
+      // InsertSync / GraphSyncSolver run, and both consume getPipe() through the
+      // OpPipeInterface. A tile-only check would fall through to PIPE_V on A5.
+      auto getAddressSpace =
+          [](::mlir::Type ty) -> std::optional<::mlir::pto::AddressSpace> {
+        if (auto tb = ::mlir::dyn_cast<::mlir::pto::TileBufType>(ty)) {
+          if (auto as = ::mlir::dyn_cast_or_null<::mlir::pto::AddressSpaceAttr>(
+                  tb.getMemorySpace()))
+            return as.getAddressSpace();
+          return std::nullopt;
+        }
+        if (auto mr = ::mlir::dyn_cast<::mlir::MemRefType>(ty)) {
+          if (auto ms = mr.getMemorySpace()) {
+            if (auto as =
+                    ::mlir::dyn_cast<::mlir::pto::AddressSpaceAttr>(ms))
+              return as.getAddressSpace();
+          }
+          return std::nullopt;
+        }
+        return std::nullopt;
+      };
+      if (auto as = getAddressSpace(getDst().getType());
+          as && *as == ::mlir::pto::AddressSpace::MAT)
+        return ::mlir::pto::PIPE::PIPE_MTE2;
+
       auto isA5Target = [&]() -> bool {
         auto moduleOp = getOperation()->getParentOfType<::mlir::ModuleOp>();
         if (!moduleOp)
@@ -4300,6 +4388,7 @@ def TExtractFPOp : PTO_TOp<"textract_fp", [
 }
 
 def TInsertOp : PTO_TOp<"tinsert", [
+  AttrSizedOperandSegments,
   PTO_DpsInitOpInterface,
   OpPipeInterface,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
@@ -4310,7 +4399,12 @@ def TInsertOp : PTO_TOp<"tinsert", [
     PTODpsType:$src,
     Index:$indexRow,
     Index:$indexCol,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    Optional<PTODpsType>:$fp,
+    Optional<I64>:$preQuantScalar,
+    OptionalAttr<PTO_AccToVecModeAttr>:$accToVecMode,
+    DefaultValuedAttr<PTO_ReluPreModeAttr, "::mlir::pto::ReluPreMode::NoRelu">:$reluPreMode,
+    OptionalAttr<PTO_TInsertModeAttr>:$tinsertMode
   );
 
   let results = (outs);
@@ -4318,7 +4412,10 @@ def TInsertOp : PTO_TOp<"tinsert", [
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    `ins` `(` $src `,` $indexRow `,` $indexCol `:` qualified(type($src)) `,` type($indexRow) `,` type($indexCol) `)`
+    `ins` `(` $src `,` $indexRow `,` $indexCol `:` qualified(type($src)) `,` type($indexRow) `,` type($indexCol)
+    (`,` $fp^ `:` qualified(type($fp)))?
+    (`,` $preQuantScalar^ `:` type($preQuantScalar))?
+    `)`
     `outs` `(` $dst `:` qualified(type($dst) ) `)`
     attr-dict
   }];
@@ -4327,7 +4424,7 @@ def TInsertOp : PTO_TOp<"tinsert", [
     // TINSERT runs on different pipes depending on target/path:
     // - Vec(UB)->Vec(UB): PIPE_V.
     // - A5 Vec(UB)->Mat(L1): PIPE_MTE3 (custom UB->L1 copy path).
-    // - Acc->Mat (A2/A3/A5 regular path): PIPE_FIX.
+    // - Acc->Mat / Acc->Vec (A2/A3/A5 regular path): PIPE_FIX.
     ::mlir::pto::PIPE getPipe() {
       auto isA5Target = [&]() -> bool {
         auto moduleOp = getOperation()->getParentOfType<::mlir::ModuleOp>();
@@ -4397,7 +4494,9 @@ def TInsertFPOp : PTO_TOp<"tinsert_fp", [
     PTODpsType:$fp,
     Index:$indexRow,
     Index:$indexCol,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    OptionalAttr<PTO_AccToVecModeAttr>:$accToVecMode,
+    DefaultValuedAttr<PTO_ReluPreModeAttr, "::mlir::pto::ReluPreMode::NoRelu">:$reluPreMode
   );
 
   let results = (outs);
@@ -4440,7 +4539,33 @@ def TFillPadOp : PTO_TOp<"tfillpad", [
   }];
 
   let extraClassDeclaration = [{
-    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::pto::PIPE getPipe() {
+      auto getASFromType = [](Type ty)
+          -> std::optional<::mlir::pto::AddressSpace> {
+        if (auto tb = ::mlir::dyn_cast<::mlir::pto::TileBufType>(ty)) {
+          if (auto as = ::mlir::dyn_cast_or_null<::mlir::pto::AddressSpaceAttr>(
+                  tb.getMemorySpace()))
+            return as.getAddressSpace();
+          return std::nullopt;
+        }
+        if (auto mr = ::mlir::dyn_cast<::mlir::MemRefType>(ty)) {
+          if (auto ms = mr.getMemorySpace()) {
+            if (auto as = ::mlir::dyn_cast<::mlir::pto::AddressSpaceAttr>(ms))
+              return as.getAddressSpace();
+          }
+          return std::nullopt;
+        }
+        return std::nullopt;
+      };
+
+      auto sOpt = getASFromType(getSrc().getType());
+      auto dOpt = getASFromType(getDst().getType());
+      if (sOpt.has_value() && dOpt.has_value() &&
+          sOpt.value() == ::mlir::pto::AddressSpace::MAT &&
+          dOpt.value() == ::mlir::pto::AddressSpace::MAT)
+        return ::mlir::pto::PIPE::PIPE_MTE1;
+      return ::mlir::pto::PIPE::PIPE_V;
+    }
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
   }];
 }
@@ -4777,7 +4902,7 @@ def TMrgSortOp: PTO_TOp<"tmrgsort", [
   OpPipeInterface,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
-  let summary = "TMRGSORT: Merge sort (format1: ins(src,blockLen) out(dst); format2: ins(2 to 4 srcs), outs(dst,tmp,executed)).";
+  let summary = "TMRGSORT: Merge sort (format1: ins(src, blockLen) outs(dst); format2: ins(2 to 4 srcs, tmp) outs(dst, executed)).";
 
   let arguments = (ins
     Variadic<PTODpsType>:$srcs,
@@ -5278,6 +5403,52 @@ def TQuantOp : PTO_TOp<"tquant", [
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
   }];
 }
+
+def TQuantMxOp : PTO_TOp<"tquant.mx", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "TQUANT MX: Quantize a vec tile into MXFP8/MXFP4 and materialize exp/max/scaling tiles.";
+
+  let description = [{
+    A5-only MX quantization form. Quantizes `src` into `dst` and additionally
+    materializes the auxiliary `exp`, `max`, and `scaling` tiles required by
+    PTO-ISA MX quantization.
+
+    DPS form:
+      pto.tquant.mx ins(%src : <src_type>)
+                    outs(%dst, %exp, %max, %scaling : <dst_type>, <exp_type>, <max_type>, <scaling_type>)
+                    {quant_type = #pto<quant_type MXFP8>}
+  }];
+
+  let arguments = (ins
+    PTODpsType:$src,
+    PTODpsType:$dst,
+    PTODpsType:$exp,
+    PTODpsType:$max,
+    PTODpsType:$scaling,
+    PTO_QuantTypeAttr:$quant_type
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `ins` `(` $src `:` qualified(type($src)) `)`
+    `outs` `(` $dst `,` $exp `,` $max `,` $scaling `:` qualified(type($dst)) `,`
+                  qualified(type($exp)) `,` qualified(type($max)) `,` qualified(type($scaling)) `)`
+    attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::MutableOperandRange getDpsInitsMutable() {
+      return ::mlir::MutableOperandRange(getOperation(), 1, 4);
+    }
+  }];
+}
 //===----------------------------------------------------------------------===//
 // TDequantOp
 //===----------------------------------------------------------------------===//
@@ -5527,7 +5698,7 @@ def TRowExpandDivOp: PTO_TOp<"trowexpanddiv", [
 ]> {
   let summary = "TROWEXPANDDIV: Row-wise broadcast divide: divide each row of src0 by a per-row scalar vector src1.";
   let description = [{
-    pto-isa has overloads with/without tmp; optional tmp for scratch.
+    pto-isa has overloads with/without tmp; on A5 the tmp operand is accepted as a placeholder and does not add extra shape constraints.
   }];
 
   let arguments = (ins
@@ -5560,7 +5731,7 @@ def TRowExpandMulOp: PTO_TOp<"trowexpandmul", [
 ]> {
   let summary = "TROWEXPANDMUL: Row-wise broadcast multiply with per-row scalar vector.";
   let description = [{
-    pto-isa has overloads with/without tmp; optional tmp for scratch.
+    pto-isa has overloads with/without tmp; on A5 the tmp operand is accepted as a placeholder and does not add extra shape constraints.
   }];
 
   let arguments = (ins
@@ -5592,7 +5763,7 @@ def TRowExpandSubOp: PTO_TOp<"trowexpandsub", [
 ]> {
   let summary = "TROWEXPANDSUB: Row-wise broadcast subtract: subtract a per-row scalar vector src1 from each row of src0.";
   let description = [{
-    pto-isa has overloads with/without tmp; optional tmp for scratch.
+    pto-isa has overloads with/without tmp; on A5 the tmp operand is accepted as a placeholder and does not add extra shape constraints.
   }];
 
   let arguments = (ins
@@ -5621,7 +5792,7 @@ def TRowExpandAddOp: PTO_TOp<"trowexpandadd", [
 ]> {
   let summary = "TROWEXPANDADD: Row-wise broadcast add: add a per-row scalar vector src1 to each row of src0.";
   let description = [{
-    pto-isa has overloads with/without tmp; optional tmp for scratch.
+    pto-isa has overloads with/without tmp; on A5 the tmp operand is accepted as a placeholder and does not add extra shape constraints.
   }];
 
   let arguments = (ins
@@ -5649,7 +5820,7 @@ def TRowExpandExpdifOp: PTO_TOp<"trowexpandexpdif", [
 ]> {
   let summary = "TROWEXPANDEXPDIF: Row-wise broadcast expdif with per-row scalar vector.";
   let description = [{
-    pto-isa has overloads with/without tmp on A2/A3; A5 supports the 3-operand form only.
+    pto-isa has overloads with/without tmp; on A5 the tmp operand is accepted as a placeholder and does not add extra shape constraints.
   }];
 
   let arguments = (ins
@@ -5678,7 +5849,7 @@ def TRowExpandMaxOp: PTO_TOp<"trowexpandmax", [
 ]> {
   let summary = "TROWEXPANDMAX: Row-wise broadcast max with per-row scalar vector.";
   let description = [{
-    pto-isa has overloads with/without tmp on A2/A3; A5 supports the 3-operand form only.
+    pto-isa has overloads with/without tmp; on A5 the tmp operand is accepted as a placeholder and does not add extra shape constraints.
   }];
 
   let arguments = (ins
@@ -5707,7 +5878,7 @@ def TRowExpandMinOp: PTO_TOp<"trowexpandmin", [
 ]> {
   let summary = "TROWEXPANDMIN: Row-wise broadcast min with per-row scalar vector.";
   let description = [{
-    pto-isa has overloads with/without tmp on A2/A3; A5 supports the 3-operand form only.
+    pto-isa has overloads with/without tmp; on A5 the tmp operand is accepted as a placeholder and does not add extra shape constraints.
   }];
 
   let arguments = (ins

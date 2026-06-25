@@ -4,6 +4,10 @@ This chapter covers every operation that moves data between memory spaces in PTO
 
 ## 7.1 Tile-level movement: tile.load and tile.store
 
+Section 7.6 on pipe communication is an advanced topic. Most kernels can skip
+it on a first read and come back only when they need explicit cube/vector FIFO
+coordination.
+
 Tile ops move entire blocks between Global Memory and the Unified Buffer in a single call. They are the primary data movement interface inside `@pto.jit`.
 
 #### `pto.tile.load(partition: PartitionTensorView, tile: Tile) -> None`
@@ -84,6 +88,13 @@ Inside explicit-mode orchestration, data movement between memory spaces is expre
 
 All four share a common structure: a required innermost `nburst(...)` group that defines the repeated burst transfer, plus optional outer `loop(...)` groups for multi-level repetition. `pto.mte_gm_ub` additionally supports `pad(...)` for UB row padding.
 
+For day-to-day explicit-mode authoring, PTODSL also exposes the shorthand
+wrappers `pto.mte_load(...)` and `pto.mte_store(...)`. They are ptr-based
+aliases for the canonical `pto.mte_gm_ub(...)` and `pto.mte_ub_gm(...)`
+surfaces and accept the same grouped-DMA shape arguments. Later walkthroughs
+use the shorthand names because they read more naturally in orchestration code;
+this chapter documents the underlying canonical operations.
+
 ### 7.2.1 GM → UB: `pto.mte_gm_ub`
 
 #### `pto.mte_gm_ub(gm_src: PtrType, ub_dst: PtrType, l2_cache_ctl: int, len_burst: int, *, nburst: tuple[int, int, int], loops: list[tuple[int, int, int]] | None = None, pad: tuple[ScalarType, int, int] | tuple[ScalarType] | None = None) -> None`
@@ -96,7 +107,7 @@ All four share a common structure: a required innermost `nburst(...)` group that
 |-----------|------|-------------|
 | `gm_src` | `PtrType` (gm) | GM source pointer |
 | `ub_dst` | `PtrType` (ub) | UB destination pointer (must be 32B-aligned) |
-| `l2_cache_ctl` | `int` | L2 cache allocate control (2 bits) |
+| `l2_cache_ctl` | `int` | L2 cache allocate control (2 bits). PTODSL forwards the integer verbatim; most kernels should pass `0` unless they are matching a backend-specific cache policy |
 | `len_burst` | `int` | Contiguous bytes transferred per burst row |
 | `nburst` | `tuple[int, int, int]` | `(n_burst, src_stride, dst_stride)` — innermost burst group (required) |
 | `loops` | `list[tuple[int, int, int]]` or `None` | Optional outer loop groups, each `(count, src_stride, dst_stride)`. Ordered inner to outer |
@@ -316,9 +327,9 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 
 ---
 
-#### `pto.vlds(tile[row, col:], dist: VLoadDist | None = None, return_updated_base: bool = False) -> VRegType | (VRegType, PtrType)`
-#### `pto.vlds(tile[start:], dist: VLoadDist | None = None, return_updated_base: bool = False) -> VRegType | (VRegType, PtrType)`
-#### `pto.vlds(buf: PtrType, offset: Index, dist: VLoadDist | None = None, return_updated_base: bool = False) -> VRegType | (VRegType, PtrType)`
+#### `pto.vlds(tile[row, col:], *, dist: VLoadDist | None = None) -> VRegType`
+#### `pto.vlds(tile[start:], *, dist: VLoadDist | None = None) -> VRegType`
+#### `pto.vlds(buf: PtrType, offset: Index, *, dist: VLoadDist | None = None, post_update: PostUpdate = PostUpdate.OFF) -> VRegType | (VRegType, PtrType)`
 
 **Description**: Stateless vector load from UB. Reads one vector-width slice.
 
@@ -331,16 +342,26 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 | `buf` | `PtrType` (UB) | Pointer to buffer in UB (pointer form) |
 | `offset` | `Index` | Element offset (pointer form) |
 | `dist` | `VLoadDist` or `None` | Optional load distribution: `NORM` (default), `UNPK_B8`/`UNPK_B16`/`UNPK_B32`, `BRC_B8`/`BRC_B16`/`BRC_B32` |
-| `return_updated_base` | `bool` | When `True`, also returns the post-update base address |
+| `post_update` | `PostUpdate` | Pointer form only. `OFF` (default) — stateless load. `ON` — returns `(vec, updated_buf)` where `updated_buf` is the buffer pointer advanced past the loaded elements |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `vec` | `VRegType` | Loaded vector register |
-| `updated_base` | `PtrType` | Returned with `vec` when `return_updated_base=True` |
+| `vec` | `VRegType` | Loaded vector register (when `post_update=OFF`) |
+| `(vec, updated_buf)` | `(VRegType, PtrType)` | Loaded vector and advanced pointer (when `post_update=ON`, pointer form only) |
 
----
+Low-precision element types use the same pointer/tile forms. Use `b8` masks for 8-bit storage formats, including packed FP4 storage types:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.low_precision_vector_memory","symbol":"data_movement_low_precision_vector_memory_probe","compile":{}} -->
+```python
+mask_b8 = pto.pset_b8(pto.MaskPattern.ALL)
+vec_f8 = pto.vlds(f8_src, pto.const(0))
+pto.vsts(vec_f8, f8_dst, pto.const(0), mask_b8)
+low, high = pto.vldsx2(fp4_src, pto.const(0), pto.DeinterleaveDist.DINTLV_B8)
+pto.vstsx2(low, high, fp4_dst, pto.const(0), pto.InterleaveDist.INTLV_B8, mask_b8)
+```
+
 
 #### `pto.vldsx2(tile[row, col:], dist: DeinterleaveDist) -> (VRegType, VRegType)`
 #### `pto.vldsx2(tile[start:], dist: DeinterleaveDist) -> (VRegType, VRegType)`
@@ -546,12 +567,14 @@ blocks are zero-filled.
 
 Vector stores write `vreg` contents back to UB tiles. Like loads, they support tile-index syntax.
 
-#### `pto.vsts(vec: VRegType, tile[row, col:], mask: MaskType, dist: VStoreDist | None = None, return_updated_base: bool = False) -> PtrType | None`
-#### `pto.vsts(vec: VRegType, tile[start:], mask: MaskType, dist: VStoreDist | None = None, return_updated_base: bool = False) -> PtrType | None`
-#### `pto.vsts(vec: VRegType, buf: PtrType, offset: Index, mask: MaskType, dist: VStoreDist | None = None, return_updated_base: bool = False) -> PtrType | None`
+#### `pto.vsts(vec: VRegType, tile[row, col:], mask: MaskType, dist: VStoreDist | None = None, *, post_update: PostUpdate = PostUpdate.OFF) -> None`
+#### `pto.vsts(vec: VRegType, tile[start:], mask: MaskType, dist: VStoreDist | None = None, *, post_update: PostUpdate = PostUpdate.OFF) -> None`
+#### `pto.vsts(vec: VRegType, buf: PtrType, offset: Index, mask: MaskType, dist: VStoreDist | None = None, *, post_update: PostUpdate = PostUpdate.OFF) -> None | PtrType`
 
-**Description**: Stateless vector store to UB. The mask gates writes for the
-distributions that use predicate masking.
+**Description**: Vector store to UB. The mask gates writes for the distributions
+that use predicate masking. When `post_update=PostUpdate.ON`, the pointer form
+returns the updated destination pointer. Tile-index forms remain side-effect
+only and currently support `post_update=PostUpdate.OFF` only.
 
 **Parameters**:
 
@@ -562,11 +585,11 @@ distributions that use predicate masking.
 | `tile[start:]` | Tile index | 1D destination (vector-width range) |
 | `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
 | `offset` | `Index` | Element offset (pointer form) |
-| `return_updated_base` | `bool` | When `True`, returns the post-update base address |
+| `post_update` | `PostUpdate` | Pointer-form stateful store mode. `ON` returns the updated destination pointer. |
 | `mask` | `MaskType` | Predicate mask gating writes |
 | `dist` | `VStoreDist` or `None` | Store distribution token. When omitted, PTODSL defaults to `NORM_B32` on the current surface. |
 
-**Returns**: None (side-effect operation).
+**Returns**: `None` for tile-index forms and pointer-form stores with `post_update=PostUpdate.OFF`; the updated destination `PtrType` for pointer-form stores with `post_update=PostUpdate.ON`.
 
 **Distribution families**:
 
@@ -623,13 +646,15 @@ into one destination.
 
 ---
 
-#### `pto.vsstb(tile[row, col], block_stride: Index, repeat_stride: Index, mask: MaskType, return_updated_base: bool = False) -> PtrType | None`
-#### `pto.vsstb(tile[pos], block_stride: Index, repeat_stride: Index, mask: MaskType, return_updated_base: bool = False) -> PtrType | None`
-#### `pto.vsstb(buf: PtrType, block_stride: Index, repeat_stride: Index, mask: MaskType, return_updated_base: bool = False) -> PtrType | None`
+#### `pto.vsstb(tile[row, col], block_stride: Index, repeat_stride: Index, mask: MaskType, *, post_update: PostUpdate = PostUpdate.OFF) -> None | PtrType`
+#### `pto.vsstb(tile[pos], block_stride: Index, repeat_stride: Index, mask: MaskType, *, post_update: PostUpdate = PostUpdate.OFF) -> None | PtrType`
+#### `pto.vsstb(buf: PtrType, block_stride: Index, repeat_stride: Index, mask: MaskType, *, post_update: PostUpdate = PostUpdate.OFF) -> None | PtrType`
 
 **Description**: Block-strided store. Stores 32-byte source blocks to a
 block-strided UB destination. Masked-off blocks do not write memory.
-When `return_updated_base=True`, returns the post-update base address.
+When `post_update=PostUpdate.ON`, the pointer form (and the pointer underlying
+tile-index forms) returns the updated destination pointer advanced by the
+repeat-stride distance, enabling stateful store streams.
 
 **Parameters**:
 
@@ -641,8 +666,14 @@ When `return_updated_base=True`, returns the post-update base address.
 | `block_stride` | `Index` | 16-bit block stride field |
 | `repeat_stride` | `Index` | 16-bit repeat stride field |
 | `mask` | `MaskType` | Mask controlling which blocks participate |
+| `post_update` | `PostUpdate` | `OFF` (default) — stateless store. `ON` — returns the destination pointer advanced by the repeat stride |
 
-**Returns**: None (side-effect operation).
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| *(none)* | — | When `post_update=OFF` (default) |
+| `updated_buf` | `PtrType` | Post-update destination pointer (when `post_update=ON`)
 
 ---
 
@@ -789,7 +820,7 @@ pto.vstas(align, ub_dst_f32, pto.const(64))
 | `DeinterleaveDist` | `DINTLV_B8`, `DINTLV_B16`, `DINTLV_B32`, `BDINTLV` | `vldsx2` |
 | `InterleaveDist` | `INTLV_B8`, `INTLV_B16`, `INTLV_B32` | `vstsx2` |
 | `StrideMode` | `S3_B16`, `S4_B64`, `S8_B32`, `S2_B64` | `vsld` |
-| `PostUpdate` | `OFF`, `ON` | `vstur` |
+| `PostUpdate` | `OFF`, `ON` | `vstur`, `vsstb`, `vlds` (pointer form) |
 
 ## 7.5 Cube data movement (cube)
 
@@ -895,12 +926,10 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 ---
 
-#### `pto.mte_l1_l0a_mx(src: PtrType, dst: PtrType, m: int, k: int, *, transpose: bool = False) -> None`
-#### `pto.mte_l1_l0b_mx(src: PtrType, dst: PtrType, k: int, n: int, *, transpose: bool = False) -> None`
+#### `pto.mte_l1_l0a_mx(src: PtrType, dst: PtrType, m: int, k: int, *, start_row: int = 0, start_col: int = 0) -> None`
+#### `pto.mte_l1_l0b_mx(src: PtrType, dst: PtrType, k: int, n: int, *, start_row: int = 0, start_col: int = 0) -> None`
 
 **Description**: MX-mode variants of `mte_l1_l0a` and `mte_l1_l0b` for MX-capable dtypes. Parameters match their non-MX counterparts.
-
-**Compatibility note**: `transpose` is part of the TileLang DSL-compatible API surface. Current VPTO MX backend lowering does not yet consume MX `transpose=True`, so it should be treated as an accepted compatibility flag until the backend path is completed.
 
 ---
 
@@ -1041,7 +1070,14 @@ A full cube matmul (`@pto.cube`) follows this dataflow pattern:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.cube_helper","symbol":"data_movement_cube_helper_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->
 ```python
 @pto.cube
-def qk_matmul(q_tile, k_tile, q_l0a, k_l0b, s_acc, s_tile):
+def qk_matmul(
+    q_tile: pto.Tile,
+    k_tile: pto.Tile,
+    q_l0a: pto.Tile,
+    k_l0b: pto.Tile,
+    s_acc: pto.Tile,
+    s_tile: pto.Tile,
+):
     m = q_tile.valid_shape[0]
     k = q_tile.valid_shape[1]
     n = k_tile.valid_shape[0]
@@ -1081,7 +1117,7 @@ consumer-side local FIFO buffer and do not take `consumer_buf` or
 |-----------|------|-------------|
 | `consumer_buf` | varies | Required for local tile-entry pipes. Consumer-owned FIFO buffer. The consumer side reserves it with `pto.reserve_buffer`; the producer side imports it with `pto.import_reserved_buffer`. Omit for global-entry pipes. |
 | `id` | `int` | Required. Stable pipe identifier shared by the producer and consumer sides. |
-| `slot_size` | `int` | Required for local tile-entry pipes. Optional for global-entry pipes; defaults to the byte size of one slot of `gm_slot_tensor`. |
+| `slot_size` | `int` | Required for local tile-entry pipes. For global-entry pipes, omit it only when `nosplit=True` and `gm_slot_tensor` already describes one full slot; otherwise pass the full-slot byte size explicitly. |
 | `gm_slot_buffer` | `PtrType` | Optional GM FIFO storage pointer for A2/A3 local tile-entry L2G2L lowering. Do not use with `gm_slot_tensor`. |
 | `gm_slot_tensor` | `TensorView` | Optional. When provided, the pipe uses GlobalTensor-like entries and `alloc/pop` infer the entry descriptor type. |
 | `local_slot_num` | `int` | Optional. Local FIFO slot count override for local tile-entry pipes. |
@@ -1182,6 +1218,7 @@ Declaration (shared between Cube and Vector sides):
 c2v = pto.pipe.c2v(
     gm_slot_tensor=gm_slots,
     id=0,
+    nosplit=True,
 )
 ```
 
@@ -1190,7 +1227,7 @@ Cube (producer) side:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"pipe_communication.c2v_global_producer","symbol":"pipe_communication_c2v_global_producer_probe","compile":{}} -->
 ```python
 @pto.cube
-def producer(src_tile):
+def producer(src_tile: pto.Tile):
     c2v.init_cube()
     entry = c2v.alloc(split=0)
     entry_part = pto.partition_view(entry, offsets=[0, 0], sizes=[16, 16])
@@ -1203,7 +1240,7 @@ Vector (consumer) side:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"pipe_communication.c2v_global_consumer","symbol":"pipe_communication_c2v_global_consumer_probe","compile":{}} -->
 ```python
 @pto.simd
-def consumer(dst_tile):
+def consumer(dst_tile: pto.Tile):
     c2v.init_simd()
     entry = c2v.pop(split=0)
     entry_part = pto.partition_view(entry, offsets=[0, 0], sizes=[16, 16])
@@ -1225,6 +1262,7 @@ Declaration:
 v2c = pto.pipe.v2c(
     gm_slot_tensor=gm_slots,
     id=0,
+    nosplit=True,
 )
 ```
 
@@ -1233,7 +1271,7 @@ Vector (producer) side:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"pipe_communication.v2c_global_producer","symbol":"pipe_communication_v2c_global_producer_probe","compile":{}} -->
 ```python
 @pto.simd
-def producer(src_tile):
+def producer(src_tile: pto.Tile):
     v2c.init_simd()
     entry = v2c.alloc(split=0)
     pto.tile.store(src_tile, pto.partition_view(entry, offsets=[0, 0], sizes=[16, 16]))
@@ -1245,7 +1283,7 @@ Cube (consumer) side:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"pipe_communication.v2c_global_consumer","symbol":"pipe_communication_v2c_global_consumer_probe","compile":{}} -->
 ```python
 @pto.cube
-def consumer(dst_tile):
+def consumer(dst_tile: pto.Tile):
     v2c.init_cube()
     entry = v2c.pop(split=0)
     pto.tile.load(pto.partition_view(entry, offsets=[0, 0], sizes=[16, 16]), dst_tile)
@@ -1283,7 +1321,7 @@ Cube (producer) transaction:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"pipe_communication.c2v_local_producer","symbol":"pipe_communication_c2v_local_producer_probe","compile":{}} -->
 ```python
 @pto.cube
-def producer(src_tile):
+def producer(src_tile: pto.Tile):
     c2v_peer.init_cube()
     c2v_peer.push(src_tile, split=0)
 ```
@@ -1293,17 +1331,17 @@ Vector (consumer) transaction:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"pipe_communication.c2v_local_consumer","symbol":"pipe_communication_c2v_local_consumer_probe","compile":{}} -->
 ```python
 @pto.simd
-def consumer(dst_part):
+def consumer(dst_tile: pto.Tile):
     c2v.init_simd()
     tile = c2v.pop(result_type=dst_tile, split=0)
-    pto.tile.store(tile, dst_part)
+    pto.tile.load(tile, dst_tile)
     c2v.free(split=0)
 ```
 
 The local form is the A5-facing form used when Cube and Vector exchange UB/MAT
 tiles through a local FIFO. `push(tile)` emits a tile-entry `tpush`; `pop()`
-emits a tile-entry `tpop`; `free()` can omit the entry because no GM FIFO slot
-descriptor was allocated by the frontend.
+emits a tile-entry `tpop` into the vector-side local tile; `free()` can omit
+the entry because no GM FIFO slot descriptor was allocated by the frontend.
 
 ### 7.6.6 Bidirectional Local Pipe
 
@@ -1333,12 +1371,13 @@ def cube_producer(
     gm_slot_buffer: pto.gm_ptr(pto.f32),
     src: pto.gm_ptr(pto.f32),
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     gm_view = pto.make_tensor_view(gm_slot_buffer, shape=[16, 16], strides=[16, 1])
     c2v = pto.pipe.c2v(
         gm_slot_tensor=gm_view,
         id=0,
+        nosplit=True,
     )
 
     a_part = pto.partition_view(
@@ -1346,8 +1385,7 @@ def cube_producer(
         offsets=[0, 0], sizes=[16, 16])
     a_tile = pto.alloc_tile(shape=[16, 16], dtype=pto.f32)
 
-    @pto.cube
-    def cube_kernel():
+    with pto.cube():
         pto.tile.load(a_part, a_tile)
         c2v.init_cube()
         entry = c2v.alloc(split=0)
@@ -1355,19 +1393,18 @@ def cube_producer(
         pto.tile.store(a_tile, entry_part)
         c2v.push(entry, split=0)
 
-    cube_kernel()
-
 @pto.jit(target="a3")
 def vector_consumer(
     gm_slot_buffer: pto.gm_ptr(pto.f32),
     dst: pto.gm_ptr(pto.f32),
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     gm_view = pto.make_tensor_view(gm_slot_buffer, shape=[16, 16], strides=[16, 1])
     c2v = pto.pipe.c2v(
         gm_slot_tensor=gm_view,
         id=0,
+        nosplit=True,
     )
 
     b_tile = pto.alloc_tile(shape=[16, 16], dtype=pto.f32)
@@ -1375,14 +1412,11 @@ def vector_consumer(
         pto.make_tensor_view(dst, shape=[16, 16], strides=[16, 1]),
         offsets=[0, 0], sizes=[16, 16])
 
-    @pto.simd
-    def vector_kernel():
+    with pto.simd():
         c2v.init_simd()
         entry = c2v.pop(split=0)
         entry_part = pto.partition_view(entry, offsets=[0, 0], sizes=[16, 16])
         pto.tile.load(entry_part, b_tile)
         c2v.free(entry, split=0)
         pto.tile.store(b_tile, b_part)
-
-    vector_kernel()
 ```

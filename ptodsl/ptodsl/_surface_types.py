@@ -10,19 +10,21 @@
 from enum import Enum
 
 from ._bootstrap import make_context  # noqa: F401
-from ._host_tensors import TensorSpec, tensor_spec
 
 from mlir.dialects import pto as _pto
 
 
-class _ConstexprMarker:
-    """Marker annotation for PTODSL compile-time specialization parameters."""
+class _ConstExprHelper:
+    """Callable marker for PTODSL compile-time specialization parameters and branches."""
 
     def __repr__(self):
-        return "pto.constexpr"
+        return "pto.const_expr"
+
+    def __call__(self, value):
+        return bool(value)
 
 
-constexpr = _ConstexprMarker()
+const_expr = _ConstExprHelper()
 
 
 class MemorySpace:
@@ -210,8 +212,61 @@ class SplitMode(str, Enum):
     M = "M"
     N = "N"
 
+class PartMode:
+    """Public PTODSL EVEN/ODD part selectors."""
+
+    EVEN = "EVEN"
+    ODD = "ODD"
+
+
+class PositionMode:
+    """Public PTODSL source-lane selectors for vdup vector input."""
+
+    LOWEST = "LOWEST"
+    HIGHEST = "HIGHEST"
+
+
+class VPackPart:
+    """Public PTODSL pack-half selectors."""
+
+    LOWER = "LOWER"
+    HIGHER = "HIGHER"
+
+
+class VcvtRoundMode:
+    """Public PTODSL vcvt/vtrc rounding-mode tokens."""
+
+    R = "R"
+    A = "A"
+    F = "F"
+    C = "C"
+    Z = "Z"
+    O = "O"
+    H = "H"
+
+
+class VcvtSatMode:
+    """Public PTODSL vcvt saturation-mode tokens."""
+
+    SAT = "SAT"
+    NOSAT = "NOSAT"
+    RS_ENABLE = "SAT"
+    RS_DISABLE = "NOSAT"
+
+
+class VcvtPartMode:
+    """Public PTODSL vcvt part selectors."""
+
+    EVEN = "EVEN"
+    ODD = "ODD"
+    P0 = "P0"
+    P1 = "P1"
+    P2 = "P2"
+    P3 = "P3"
+
 
 AlignType = _pto.AlignType
+RoundMode = _pto.RoundMode
 DivPrecision = _pto.DivPrecision
 ExpPrecision = _pto.ExpPrecision
 LogPrecision = _pto.LogPrecision
@@ -233,8 +288,7 @@ class Tile:
 
 
 __all__ = [
-    "constexpr",
-    "TensorSpec",
+    "const_expr",
     "MemorySpace",
     "BarrierType",
     "Pipe",
@@ -252,7 +306,14 @@ __all__ = [
     "SatMode",
     "Tf32Mode",
     "SplitMode",
+    "PartMode",
+    "PositionMode",
+    "VPackPart",
+    "VcvtRoundMode",
+    "VcvtSatMode",
+    "VcvtPartMode",
     "AlignType",
+    "RoundMode",
     "DivPrecision",
     "ExpPrecision",
     "LogPrecision",
@@ -262,5 +323,4 @@ __all__ = [
     "TensorView",
     "PartitionTensorView",
     "Tile",
-    "tensor_spec",
 ]

@@ -16,8 +16,8 @@ def mat_add(
     M: pto.i32,
     N_: pto.i32,
     *,
-    BLOCK_M: pto.constexpr = 64,
-    BLOCK_N: pto.constexpr = 128,
+    BLOCK_M: pto.const_expr = 64,
+    BLOCK_N: pto.const_expr = 128,
 ):
     a_view = pto.make_tensor_view(A_ptr, shape=[batch, M, N_], strides=[M * N_, N_, 1])
     b_view = pto.make_tensor_view(B_ptr, shape=[batch, M, N_], strides=[M * N_, N_, 1])
@@ -48,10 +48,12 @@ def mat_add(
 
 **Key points**:
 
-- Nested `pto.for_` loops produce a 2D block traversal. Both loops are recorded as device-side control flow — they adapt to the runtime shape `M`.
+- Nested Python `for range(...)` loops produce a 2D block traversal. Under the
+  default AST rewrite path they are recorded as device-side control flow, so
+  they adapt to the runtime shapes `M` and `N_`.
 - Tile shape `[BLOCK_M, BLOCK_N]` is 2D; all three tiles use the same shape so `tile.add` is elementwise.
 - `partition_view` takes 2D offsets and sizes.
-- `BLOCK_M` and `BLOCK_N` are `constexpr` — the compiler specializes the kernel per tile shape.
+- `BLOCK_M` and `BLOCK_N` are `const_expr` — the compiler specializes the kernel per tile shape.
 
 The Python wrapper follows the same pattern as Chapter 2:
 
@@ -114,7 +116,7 @@ def vec_add_with_tail(
     O_ptr: pto.ptr(pto.f32, "gm"),
     N: pto.i32,
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     a_view = pto.make_tensor_view(A_ptr, shape=[N], strides=[1])
     b_view = pto.make_tensor_view(B_ptr, shape=[N], strides=[1])
@@ -192,9 +194,9 @@ def gemm(
     K_: pto.i32,
     N_: pto.i32,
     *,
-    BLOCK_M: pto.constexpr = 64,
-    BLOCK_K: pto.constexpr = 64,
-    BLOCK_N: pto.constexpr = 64,
+    BLOCK_M: pto.const_expr = 64,
+    BLOCK_K: pto.const_expr = 64,
+    BLOCK_N: pto.const_expr = 64,
 ):
     a_view = pto.make_tensor_view(A_ptr, shape=[M, K_], strides=[K_, 1])
     b_view = pto.make_tensor_view(B_ptr, shape=[K_, N_], strides=[N_, 1])
@@ -269,7 +271,16 @@ This pattern extends directly to batch-GEMM: pass a grid of `batch` and use `pto
 
 ### 12.3.4 Comparison with explicit-mode orchestration
 
-For reference, the same GEMM could be written in `mode="explicit"` when the kernel needs micro-instruction control. The direct-call path used above is recommended for most users; explicit mode is for cases that need hand-authored instruction scheduling and ordering.
+This example keeps `mode="explicit"` because the named Cube helper directly
+authors explicit-only surfaces such as `mte_l1_l0a`, `mte_l1_l0b`, and
+`mte_l0c_ub`. Even though the top-level `@pto.jit` body itself stays fairly
+tile-centric, the enclosing kernel still has to opt into explicit mode so that
+the called sub-kernel is legal.
+
+For most users, the direct-call structure shown above is still the recommended
+pattern: keep the orchestration simple, let the named Cube helper own the
+micro-instruction sequence, and only add more top-level explicit scheduling
+when you truly need hand-authored DMA ordering or phase control.
 
 ## 12.4 Online normalization with loop-carried state
 
@@ -296,7 +307,7 @@ def online_layernorm(
     O_ptr: pto.ptr(pto.f32, "gm"),
     N: pto.i32,
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     x_view = pto.make_tensor_view(X_ptr, shape=[N], strides=[1])
     o_view = pto.make_tensor_view(O_ptr, shape=[N], strides=[1])

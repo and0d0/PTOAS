@@ -424,8 +424,15 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
 
 static llvm::cl::opt<bool> enableOpFusion(
     "enable-op-fusion",
-    llvm::cl::desc("Enable frontend tile fusion on the A5 EmitC mainline "
-                   "(requires --pto-arch=a5 and --pto-level=level2|level3)"),
+    llvm::cl::desc("Enable A5 tile fusion on level2/level3. EmitC uses "
+                   "last-use annotation; VPTO uses fusion-region lifecycle."),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableShapeInference(
+    "enable-shape-inference",
+    llvm::cl::desc("Enable shape inference (ShapeConstraintSolver) for A5 tile "
+                  "fusion. Off by default: falls back to static/direct-bound "
+                  "iteration-domain inference."),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> disableInferLayout(
@@ -465,6 +472,11 @@ llvm::cl::opt<bool> mlir::pto::emitVPTO(
     llvm::cl::desc("Write final post-pass VPTO IR to -o"),
     llvm::cl::init(false));
 
+llvm::cl::opt<bool> mlir::pto::emitVPTOLLVMDialect(
+    "emit-vpto-llvm-ir",
+    llvm::cl::desc("Write translated VPTO LLVM IR to -o"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> vptoPrintIR(
     "vpto-print-ir",
     llvm::cl::desc("Print post-pass VPTO backend IR to stderr"),
@@ -491,6 +503,11 @@ llvm::cl::opt<std::string> mlir::pto::ptoSeamIRFile(
     llvm::cl::desc("Write shared pre-backend seam IR to a file"),
     llvm::cl::value_desc("path"),
     llvm::cl::init(""));
+
+llvm::cl::opt<std::string> mlir::pto::cannOutputVersion(
+    "cann-output-version",
+    llvm::cl::desc("Override the CANN version used for lowering and public ABI output selection; examples: 9.0.0, 9.0.0-beta.1"),
+    llvm::cl::value_desc("version"), llvm::cl::init(""));
 
 enum class PTOBuildLevel {
   Level1,
@@ -575,17 +592,6 @@ static bool hasUnexpandedTileOps(ModuleOp module) {
     if (found)
       return;
     if (isa<pto::OpPipeInterface>(op))
-      found = true;
-  });
-  return found;
-}
-
-static bool hasTilelangInlineHelpers(ModuleOp module) {
-  bool found = false;
-  module.walk([&](func::FuncOp func) {
-    if (found)
-      return;
-    if (func->hasAttr("pto.tilelang.inline_proc"))
       found = true;
   });
   return found;
@@ -1128,6 +1134,64 @@ static void rewriteEventIdArrayMarkers(std::string &cpp) {
   rewriteMarkerCallsToSubscripts(cpp, kEventIdMarkerRewrites);
 }
 
+static bool isPreprocessorDirectiveLine(llvm::StringRef trimmedLine) {
+  return trimmedLine.starts_with("#");
+}
+
+// Nested emitc.verbatim ops inside emitc.for / emitc.if regions currently
+// pick up an extra trailing semicolon from EmitC C++ emission, which produces
+// invalid lines such as `#if defined(__DAV_VEC__);` and `set_mask_norm();;`.
+// Trim only those malformed suffixes here so bisheng can compile the emitted
+// source until the upstream printer behavior is fixed.
+static void rewriteMalformedVerbatimSemicolons(std::string &cpp) {
+  if (cpp.empty())
+    return;
+
+  llvm::StringRef input(cpp);
+  std::string rewritten;
+  rewritten.reserve(cpp.size());
+
+  bool prevWasPreprocessorDirective = false;
+  size_t offset = 0;
+  while (offset < input.size()) {
+    size_t newlinePos = input.find('\n', offset);
+    bool hasNewline = newlinePos != llvm::StringRef::npos;
+    llvm::StringRef line =
+        hasNewline ? input.slice(offset, newlinePos) : input.drop_front(offset);
+    std::string current(line.str());
+    llvm::StringRef trimmed = llvm::StringRef(current).trim();
+
+    if (trimmed == ";" && prevWasPreprocessorDirective) {
+      // `#endif ...` in nested verbatim blocks currently materializes as the
+      // directive line followed by a standalone `;` on the next line.
+      prevWasPreprocessorDirective = false;
+    } else {
+      if (isPreprocessorDirectiveLine(trimmed) && trimmed.ends_with(";")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      } else if (!trimmed.empty() && !trimmed.starts_with("//") &&
+                 !trimmed.starts_with("/*") && trimmed.ends_with(";;")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      }
+
+      rewritten.append(current);
+      if (hasNewline)
+        rewritten.push_back('\n');
+      prevWasPreprocessorDirective =
+          isPreprocessorDirectiveLine(llvm::StringRef(current).trim());
+    }
+
+    if (!hasNewline)
+      break;
+    offset = newlinePos + 1;
+  }
+
+  cpp.swap(rewritten);
+}
+
 static bool rewriteAddPtrTraceMarkers(std::string &cpp, bool showTrace) {
   size_t searchPos = 0;
   bool changed = false;
@@ -1464,6 +1528,12 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
 
 static void prepareVPTOForEmission(PassManager &pm) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
+  // Issue #485 workaround: unroll small constant-trip-count scf.for loops
+  // inside pto.simt_entry functions, then constant-fold the induction-variable
+  // dependent scf.if branches so subsequent canonicalize/cse eliminate them.
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      pto::createPTOUnrollSIMTForPass());
+  kernelModulePM.addPass(createSCCPPass());
   kernelModulePM.addPass(createCanonicalizerPass());
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addPass(pto::createVPTOPtrNormalizePass());
@@ -1479,31 +1549,34 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(pto::createPTOValidateVPTOEmissionIRPass());
 }
 
-static void lowerPTOToVPTOBackend(PassManager &pm, int argc, char **argv) {
-  // TileOp Expand path:
-  //   1. ExpandTileOp: instantiate TileLang DSL templates, replace tile ops
-  //      with func.call to template functions (tile_buf params)
-  //   2. InlineLibCall: inline template function bodies
-  //   3. FoldTileBufIntrinsics: fold tile_buf_addr / tile_valid_rows /
-  //      tile_valid_cols to concrete memref/constant values
+static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module, int argc,
+                                  char **argv) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
+  auto moduleArchAttr =
+      module->getAttrOfType<mlir::StringAttr>("pto.target_arch");
+  const bool enableA5VPTOPostLoweringFusionLifecycle =
+      enableOpFusion && moduleArchAttr && moduleArchAttr.getValue() == "a5";
+
   pto::ExpandTileOpOptions expandOpts = resolveExpandTileOpOptions(argc, argv);
   kernelModulePM.addPass(pto::createExpandTileOpPass(expandOpts));
 
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
-      pto::createFoldTileBufIntrinsicsPass());
-  // FoldTileBufIntrinsics materializes many constant branch conditions.
-  // Clean them up immediately on the TileOp expansion path before the
-  // authoring-stage VPTO verifier and let the existing CSE passes remove the
-  // resulting dead values later in the pipeline.
-  kernelModulePM.addPass(mlir::createSCCPPass());
-  kernelModulePM.addPass(mlir::createCanonicalizerPass());
-}
-
-static void inlineTilelangHelpersOnVPTOInput(PassManager &pm) {
-  auto &kernelModulePM = pm.nest<ModuleOp>();
-  kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
+      pto::createFoldTileBufIntrinsicsPass("shape-only"));
+  if (enableA5VPTOPostLoweringFusionLifecycle) {
+    kernelModulePM.addPass(pto::createPTOLowLevelLoopFusionPass());
+    kernelModulePM.addPass(mlir::createCanonicalizerPass());
+    kernelModulePM.addPass(mlir::createCSEPass());
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOFusionPredicateElisionPass());
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOFusionLoadStoreElisionPass());
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOFlattenFusionRegionPass());
+    kernelModulePM.addPass(mlir::createCSEPass());
+  }
+  kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+      pto::createFoldTileBufIntrinsicsPass("addr-only"));
   kernelModulePM.addPass(mlir::createSCCPPass());
   kernelModulePM.addPass(mlir::createCanonicalizerPass());
 }
@@ -1526,6 +1599,17 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     module.print(os);
     os << "\n";
     os.flush();
+    return 0;
+  }
+
+  if (emitVPTOLLVMDialect) {
+    result.kind = PTOASCompileResultKind::Text;
+    pto::VPTOEmissionOptions options = buildVPTOEmissionOptions(cannVersion);
+    if (failed(pto::lowerVPTOModuleToLLVMIRText(
+            module, options, result.textOutput, llvm::errs()))) {
+      llvm::errs() << "Error: Failed to lower VPTO to LLVM IR.\n";
+      return 1;
+    }
     return 0;
   }
 
@@ -1554,16 +1638,13 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
                                             int argc, char **argv,
-                                            bool hasTileOpsToExpand,
-                                            bool hasTilelangHelpers) {
+                                            bool hasTileOpsToExpand) {
   PassManager pm(module->getContext());
   pm.enableVerifier();
   pm.addPass(pto::createVPTOSplitCVModulePass());
   pm.addPass(pto::createVPTONormalizeContainerPass());
-  if (!hasTileOpsToExpand && hasTilelangHelpers)
-    inlineTilelangHelpersOnVPTOInput(pm);
   if (hasTileOpsToExpand)
-    lowerPTOToVPTOBackend(pm, argc, argv);
+    lowerPTOToVPTOBackend(pm, module.get(), argc, argv);
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -1585,7 +1666,8 @@ int mlir::pto::compilePTOASModule(
   char **argv = context.getArgv();
 
   if (effectiveBackend != PTOBackend::VPTO &&
-      (emitVPTO || ptoPrintSeamIR || !ptoSeamIRFile.empty())) {
+      (emitVPTO || emitVPTOLLVMDialect || ptoPrintSeamIR ||
+       !ptoSeamIRFile.empty())) {
     llvm::errs() << "Error: VPTO-specific flags require "
                     "--pto-backend=vpto or pto.backend = \"vpto\".\n";
     return 1;
@@ -1612,9 +1694,13 @@ int mlir::pto::compilePTOASModule(
     }
   }
 
-  const bool enableA5FrontendFusionPath =
+  const bool enableA5FusionPath =
       enableOpFusion && arch == "a5" &&
       effectiveLevel != PTOBuildLevel::Level1;
+  const bool enableA5EmitCFusionPath =
+      enableA5FusionPath && effectiveBackend == PTOBackend::EmitC;
+  const bool enableA5VPTOFusionPath =
+      enableA5FusionPath && effectiveBackend == PTOBackend::VPTO;
 
   bool invalidAutoSyncTailHint = false;
   module->walk([&](mlir::func::FuncOp func) {
@@ -1701,8 +1787,17 @@ int mlir::pto::compilePTOASModule(
       return 1;
   }
 
+  {
+    PassManager preBackendPM(module->getContext());
+    preBackendPM.enableVerifier();
+    preBackendPM.addPass(pto::createPTONormalizeUncoveredTileSectionsPass());
+    if (failed(preBackendPM.run(module.get()))) {
+      llvm::errs() << "Error: failed to normalize uncovered PTO tile sections.\n";
+      return 1;
+    }
+  }
+
   const bool hasTileOpsToExpand = hasUnexpandedTileOps(*module);
-  const bool hasTilelangHelpers = hasTilelangInlineHelpers(*module);
 
   if (effectiveBackend == PTOBackend::VPTO && !hasTileOpsToExpand) {
     if (ptoPrintSeamIR || !ptoSeamIRFile.empty()) {
@@ -1710,8 +1805,7 @@ int mlir::pto::compilePTOASModule(
                       "skipping the shared PTO-to-VPTO lowering pipeline.\n";
       return 1;
     }
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
-                                      hasTilelangHelpers)))
+    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
                                  context.getCANNVersionOrDefault());
@@ -1723,6 +1817,14 @@ int mlir::pto::compilePTOASModule(
   if (failed(applyPassManagerCLOptions(pm)))
     return 1;
 
+  // Rank-2 → rank-5 view canonicalization is currently gated on the VPTO
+  // backend to limit blast radius.  A3/A5 EmitC codegen already pads strides
+  // to rank-5 via InferPTOLayout and buildGlobalTensorShapeAndStride, so it
+  // does not need the canonicalization pass at the IR level.  When VPTO
+  // validation is complete and the pass is proven stable, the gate can be
+  // lifted to make it unconditional for all backends.
+  if (effectiveBackend == PTOBackend::VPTO)
+    pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOCanonicalizeIRPass());
   pm.addNestedPass<mlir::func::FuncOp>(
       pto::createPTOAssignDefaultFrontendPipeIdPass());
   pm.addNestedPass<mlir::func::FuncOp>(
@@ -1738,10 +1840,24 @@ int mlir::pto::compilePTOASModule(
 
   // Keep frontend fusion on tile-native PTO IR and annotate last_use directly
   // on scheduled block-local spans before the shared mainline lowers tiles.
-  if (enableA5FrontendFusionPath) {
-    pm.addNestedPass<mlir::func::FuncOp>(pto::createFusionPlanPass());
+  // The shape-inference switch drives FusionPlan only: that is where the
+  // iteration-domain decisions (static vs ShapeConstraintSolver) are made.
+  // FusionRegionGen consumes only the shared pre-fusion dataflow graph (cached
+  // by the analysis manager and built once by FusionPlan) plus the resulting
+  // pto.fusion.group_id/order metadata; it never consults the domain classes,
+  // so it takes no option here.
+  pto::FusionPlanOptions fusionPlanOpts;
+  fusionPlanOpts.enableShapeInference = enableShapeInference;
+  if (enableA5EmitCFusionPath) {
+    pm.addNestedPass<mlir::func::FuncOp>(
+        pto::createFusionPlanPass(fusionPlanOpts));
     pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOMarkLastUsePass());
+  } else if (enableA5VPTOFusionPath) {
+    pm.addNestedPass<mlir::func::FuncOp>(
+        pto::createFusionPlanPass(fusionPlanOpts));
+    pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
+    pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOFusionRegionGenPass());
   }
 
   pm.addPass(pto::createPTOViewToMemrefPass());
@@ -1758,6 +1874,8 @@ int mlir::pto::compilePTOASModule(
   // Conditionally add one automatic synchronization mode. Barrier-all is a
   // conservative standalone pass; InsertSync and GraphSyncSolver are set/wait
   // solvers, while BufidSync is A5-only get_buf/rls_buf synchronization.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      pto::createPTOVerifySubkernelPipeContractPass());
   if (enableInsertSync)
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOInsertSyncPass());
   else if (enableBufidSync) {
@@ -1791,6 +1909,12 @@ int mlir::pto::compilePTOASModule(
   // backends consume the same post-planning seam IR.
   pm.addPass(pto::createPTOMaterializeTileHandlesPass());
   pm.addPass(createCSEPass());
+  // Inline PTODSL backend helpers only after the shared mainline has
+  // materialized tile-native handles, so helper arguments are restored to the
+  // tile_buf ABI before qk.as_ptr()-style bridges are cloned into callers.
+  pm.addPass(pto::createPTOInlineBackendHelpersPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
   if (failed(applyConfiguredPassManagerCLOptions(pm, "main PTOAS pipeline")))
     return 1;
 
@@ -1810,8 +1934,7 @@ int mlir::pto::compilePTOASModule(
     if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
       return 1;
 
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
-                                      hasTilelangHelpers)))
+    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
                                  context.getCANNVersionOrDefault());
@@ -1857,6 +1980,7 @@ int mlir::pto::compilePTOASModule(
   rewriteEventIdArrayMarkers(cppOutput);
   pto::rewriteLastUseMarkersInCpp(cppOutput);
   rewriteAddPtrTraceMarkers(cppOutput, emitAddPtrTrace);
+  rewriteMalformedVerbatimSemicolons(cppOutput);
   rewriteScalarConstantDecls(cppOutput);
   rewriteHoistedGlobalTensorDecls(cppOutput);
 
