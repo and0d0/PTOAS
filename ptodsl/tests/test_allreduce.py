@@ -310,6 +310,24 @@ def main():
 
     compiled.verify()
 
+    # ── issue 483 integration: alloc_buffer(scope="ub") scratch ─────────────
+    @pto.jit(target="a5", mode="explicit")
+    def kernel_alloc_buffer_scratch():
+        reduce_scratch = pto.alloc_buffer((128,), pto.f32, scope="ub")
+        with pto.simt():
+            x = pto.const(1.0, dtype=pto.f32)
+            _result = pto.simt_allreduce_sum(x, reduce_scratch, threads=128, scale=1)
+
+    compiled_alloc = kernel_alloc_buffer_scratch.compile()
+    mlir_alloc = compiled_alloc.mlir_text()
+    expect("dyn_shared_memory_buf = 512 : i64" in mlir_alloc,
+           "IR: alloc_buffer scratch reserves 128 f32 elements in UB")
+    expect("call @__tl_allreduce_sum_f32_t128_s1_o0" in mlir_alloc,
+           "IR: alloc_buffer scratch can be passed to simt_allreduce_sum")
+    expect("!pto.ptr<f32, ub>" in mlir_alloc,
+           "IR: allreduce scratch keeps typed UB pointer")
+    compiled_alloc.verify()
+
     # ── cross_warp: sum, f32, t=64 (2 warps) ────────────────────────────────
     @pto.jit(target="a5")
     def kernel_64(scratch_gm: pto.ptr(pto.f32, "gm")):
