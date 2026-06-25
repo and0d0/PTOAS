@@ -105,9 +105,7 @@ def rmsnorm_4096_token_body(
 
     rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
 
-    with pto.if_(tx == 0) as br:
-        with br.then_:
-            scalar.store(rstd, rstd_ub, ping * 8)
+    scalar.store(rstd, rstd_ub, ping * 8)
 
     with pto.for_(0, rounds, step=1) as r:
         lane_offset = r * threads * lanes + tx * lanes
