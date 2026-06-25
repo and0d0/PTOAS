@@ -152,6 +152,22 @@ Direct run on a real NPU:
 python3 ptodsl/examples/flash_attention_softmax_launch.py
 ```
 
+### `rmsnorm_alloc_buffer_simt.py`
+
+Compile-only RMSNorm example for explicit-mode SIMT kernels. It exercises
+`pto.alloc_buffer(...)`, contiguous `scalar.load` / `scalar.store`, `pto.vec`,
+`pto.simt_allreduce_sum(...)`, and a runtime token loop that lowers to
+`scf.for`.
+
+```bash
+python3 ptodsl/examples/rmsnorm_alloc_buffer_simt.py --variant x128 > /tmp/rmsnorm_x128.mlir
+python3 ptodsl/examples/rmsnorm_alloc_buffer_simt.py --variant x64 > /tmp/rmsnorm_x64.mlir
+```
+
+Expected: MLIR containing `@rmsnorm_4096_alloc_buffer_simt_context_kernel`,
+`scf.for`, `vector<2xf32>` for `x128`, `vector<4xf32>` for `x64`, and the
+`__tl_allreduce_sum` helper.
+
 ### Launch artifacts
 
 - `~/.cache/ptodsl/` — JIT-compiled kernel `.so` cache
@@ -167,6 +183,7 @@ python3 ptodsl/tests/test_jit_compile.py
 python3 ptodsl/tests/test_jit_diagnostics.py
 python3 ptodsl/tests/test_subkernel_diagnostics.py
 python3 ptodsl/tests/test_flash_attention_demo_compile.py
+python3 ptodsl/tests/test_rmsnorm_example_compile.py
 python3 ptodsl/tests/test_ptoas_frontend_verify.py
 python3 ptodsl/tests/test_docs_as_test.py
 ```
@@ -178,6 +195,7 @@ ptodsl_jit_compile: PASS
 ptodsl_jit_diagnostics: PASS
 ptodsl_subkernel_diagnostics: PASS
 ptodsl_flash_attention_demo_compile: PASS
+ptodsl_rmsnorm_example_compile: PASS
 ptodsl_ptoas_frontend_verify: PASS
 ptodsl_docs_as_test: PASS
 ```

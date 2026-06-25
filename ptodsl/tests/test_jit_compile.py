@@ -905,8 +905,8 @@ def rmsnorm_alloc_buffer_layout_probe(
 ):
     w_ub = pto.alloc_buffer((4096,), pto.f32, scope="ub")
     x_ub = pto.alloc_buffer((2, 4096), pto.f32, scope="ub")
-    rstd_ub = pto.alloc_buffer((16,), pto.f32, scope="ub")
     y_ub = pto.alloc_buffer((2, 4096), pto.f32, scope="ub")
+    rstd_ub = pto.alloc_buffer((2,), pto.f32, scope="ub")
     reduce_scratch = pto.alloc_buffer((128,), pto.f32, scope="ub")
 
     pto.mte_gm_ub(W, w_ub, 0, 4096 * 4, nburst=(1, 0, 0))
@@ -4045,10 +4045,10 @@ def main() -> None:
     rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm alloc_buffer layout specialization")
     expect(
-        "dyn_shared_memory_buf = 82496 : i64" in rmsnorm_alloc_buffer_text,
+        "dyn_shared_memory_buf = 82464 : i64" in rmsnorm_alloc_buffer_text,
         "RMSNorm alloc_buffer layout should reserve the same UB scratch size as the expanded RMSNorm kernel",
     )
-    for expected_offset in (16384, 49152, 49216, 81984):
+    for expected_offset in (16384, 49152, 81920, 81952):
         expect(
             f"arith.constant {expected_offset} : index" in rmsnorm_alloc_buffer_text,
             f"RMSNorm alloc_buffer layout should materialize UB byte offset {expected_offset}",

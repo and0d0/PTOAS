@@ -179,6 +179,7 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 
 Use `pto.alloc_buffer(...)` in explicit-mode kernels to allocate scratch storage that is addressed through pointer-style operations:
 
+<!-- ptodsl-doc-pending: {"reason":"illustrative fragment; covered by test_jit_compile alloc_buffer probes"} -->
 ```python
 ub_scratch = pto.alloc_buffer((4096,), pto.f32, scope="ub")
 fragment = pto.alloc_buffer((32,), pto.f32, scope="local", persistent=True)
@@ -186,9 +187,11 @@ fragment = pto.alloc_buffer((32,), pto.f32, scope="local", persistent=True)
 
 `scope="ub"` reserves space in the function-level Unified Buffer scratch area and returns a typed UB pointer. The allocation contributes to the kernel's dynamic shared-memory size and can be passed to explicit data-movement helpers such as `pto.mte_gm_ub(...)` and `pto.mte_ub_gm(...)`.
 
-`scope="local"` creates SIMT-local fragment storage for use by lower-level load/store surfaces. It is intended for per-workitem arrays such as `x_frag[]` and `w_frag[]`. The `persistent` flag is accepted as lifetime metadata for callers that need to distinguish reusable fragment storage from ordinary temporary scratch.
+UB allocations are laid out in bytes during tracing. Each allocation starts at a 32-byte-aligned offset, and the final reserved size is rounded up to 32 bytes before it is written to the kernel's `dyn_shared_memory_buf` attribute. The returned value is a typed pointer to the requested element type, not a high-level buffer object.
 
-Shapes must be static positive integers so the frontend can compute storage size and layout while tracing.
+`scope="local"` creates SIMT-local fragment storage for use by lower-level load/store surfaces. It lowers inside the active SIMT helper as an `llvm.alloca`. It is intended for per-workitem arrays such as `x_frag[]` and `w_frag[]`. The `persistent` flag is accepted as lifetime metadata for callers that need to distinguish reusable fragment storage from ordinary temporary scratch; it does not change the returned pointer type.
+
+Shapes must be static positive integers so the frontend can compute storage size and layout while tracing. `alloc_buffer` lowers directly to the pointer arithmetic and local allocation operations needed by the kernel; it does not introduce a new high-level PTO IR operation.
 
 ## 4.6 TensorView
 
