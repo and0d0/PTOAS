@@ -53,6 +53,7 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
     expect("func.func @rmsnorm_4096_alloc_buffer_simt_context_kernel" in text, f"{label}: missing entry")
     expect(f"dyn_shared_memory_buf = {ub_size} : i64" in text, f"{label}: unexpected UB scratch size")
     expect("scf.for" in text, f"{label}: tokens_per_core loop should lower to scf.for")
+    expect(text.count("scf.for") >= 4, f"{label}: SIMT inner loops should lower to compact scf.for ops")
     expect("pto.mte_gm_ub" in text, f"{label}: missing GM->UB transfer")
     expect("pto.mte_ub_gm" in text, f"{label}: missing UB->GM transfer")
     expect(vector_type in text, f"{label}: missing contiguous vector access type {vector_type}")
@@ -67,6 +68,14 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
     expect(
         text.count("pto.mte_ub_gm") == 2,
         f"{label}: expected compact transfer structure with 2 UB->GM ops",
+    )
+    expect(
+        text.count("pto.castptr") <= 12,
+        f"{label}: SIMT inner loops should not be trace-time expanded into many castptr ops",
+    )
+    expect(
+        text.count("pto.store ") <= 8,
+        f"{label}: SIMT inner loops should not be trace-time expanded into many scalar stores",
     )
 
 
