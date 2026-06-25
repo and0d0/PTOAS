@@ -30,9 +30,10 @@ from ._types import (           # noqa: F401
     si8, si16, si32, si64,
     ui8, ui16, ui32, ui64,
     index,
-    ptr, vreg_type, mask_type,
+    ptr, vreg_type, vec_type, mask_type,
     _resolve,
 )
+from ._builtin_vector import vec  # noqa: F401
 from ._surface_types import (   # noqa: F401
     const_expr,
     BarrierType,

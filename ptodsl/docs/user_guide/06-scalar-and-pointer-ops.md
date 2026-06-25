@@ -35,11 +35,11 @@ When in doubt, ask: *can this value change between launches of the same compiled
 
 ## 6.2 Scalar access: load and store
 
-`scalar.load` reads a single scalar element from a typed pointer or tile location. `scalar.store` writes a scalar back. These are the canonical scalar memory ops for SIMT authoring. The offset is counted in elements, not bytes.
+`scalar.load` reads one scalar element from a typed pointer or tile location. With `contiguous=N`, it reads `N` adjacent elements as a builtin MLIR vector value. `scalar.store` writes either a scalar or one of those builtin vector values back. These are the canonical memory ops for SIMT authoring. Offsets are counted in elements, not bytes.
 
-#### `scalar.load(ptr: PtrType, offset: Index) -> ScalarType`
+#### `scalar.load(ptr: PtrType, offset: Index, *, contiguous: int | None = None) -> ScalarType | VecValue`
 
-**Description**: Loads one scalar element from a typed pointer at the given element offset.
+**Description**: Loads one scalar element from a typed pointer at the given element offset, or `contiguous` adjacent elements as `vector<NxT>`.
 
 **Parameters**:
 
@@ -47,12 +47,14 @@ When in doubt, ask: *can this value change between launches of the same compiled
 |-----------|------|-------------|
 | `ptr` | `PtrType` | Typed pointer (`pto.ptr<T, space>`) or the result of `tile.as_ptr()` |
 | `offset` | `Index` | Element displacement from `ptr` |
+| `contiguous` | `int` or `None` | `None` and `1` load one scalar; `N > 1` loads `N` adjacent elements |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
 | `value` | `ScalarType` | The loaded scalar, matching the pointer's element type |
+| `value` | `pto.vec(T, N)` | Returned when `contiguous=N > 1`; lowers as builtin `vector<NxT>` |
 
 **Tile-index form** — the preferred syntax when loading from a tile:
 
@@ -71,19 +73,28 @@ val = scalar.load(ptr, offset)       # explicit offset
 val = scalar.load(ptr + offset)      # pointer arithmetic shorthand
 ```
 
+**Contiguous vector form**:
+
+```python
+x4 = scalar.load(ptr, offset, contiguous=4)
+```
+
+For a `pto.ptr(pto.f32, "ub")`, this produces a value with DSL type `pto.vec(pto.f32, 4)` and MLIR type `vector<4xf32>`. The frontend lowers this directly to low-level pointer arithmetic plus an LLVM vector load; it does not introduce a new PTO semantic op.
+
 ---
 
-#### `scalar.store(value: ScalarType, ptr: PtrType, offset: Index) -> None`
+#### `scalar.store(value: ScalarType | VecValue, ptr: PtrType, offset: Index, *, contiguous: int | None = None) -> None`
 
-**Description**: Stores one scalar element to a typed pointer at the given element offset.
+**Description**: Stores one scalar element or a builtin vector value to a typed pointer at the given element offset.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `value` | `ScalarType` | Scalar value to write |
+| `value` | `ScalarType` or `pto.vec(T, N)` | Scalar value or contiguous vector value to write |
 | `ptr` | `PtrType` | Typed destination pointer |
 | `offset` | `Index` | Element displacement from `ptr` |
+| `contiguous` | `int` or `None` | Optional width check for vector stores; if provided, it must match the vector lane count |
 
 **Returns**: None (side-effect operation).
 
@@ -147,6 +158,28 @@ The following conversions are not implicit:
 
 Use an explicit conversion operation when you need a semantic numeric
 conversion, or a bitcast operation when you need bit reinterpretation.
+
+### Contiguous vector form
+
+```python
+scalar.store(x4, ptr, offset)
+scalar.store(x4, ptr, offset, contiguous=4)  # optional width check
+```
+
+Vector stores lower directly to an LLVM vector store. Scalar stores remain scalar stores;
+`scalar.store(scalar_value, ptr, offset, contiguous=N)` is rejected because scalar values
+are not implicitly broadcast for stores.
+
+#### `pto.vec(dtype, lanes, *, init=None)`
+
+`pto.vec(dtype, lanes)` names a builtin vector type such as `vector<4xf32>`. When `init` is provided, it constructs a vector value. A scalar initializer is broadcast to every lane:
+
+```python
+rstd4 = pto.vec(pto.f32, 4, init=rstd)
+y4 = x4 * rstd4
+```
+
+The initial vector arithmetic surface is intentionally narrow: multiplication of compatible `VecValue` operands lowers to elementwise `arith.mulf` on builtin vector types.
 
 ---
 
