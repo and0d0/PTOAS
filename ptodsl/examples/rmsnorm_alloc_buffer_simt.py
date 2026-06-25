@@ -128,13 +128,18 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     eps: pto.f32,
     batch: pto.i32,
     *,
-    threads: pto.constexpr = 128,
-    rounds: pto.constexpr = 16,
-    lanes: pto.constexpr = 2,
-    hidden_size: pto.constexpr = 4096,
-    n_cores: pto.constexpr = 64,
-    tokens_per_core: pto.constexpr = 64,
+    threads: pto.const_expr = 128,
+    rounds: pto.const_expr = 16,
+    lanes: pto.const_expr = 2,
+    hidden_size: pto.const_expr = 4096,
+    n_cores: pto.const_expr = 64,
+    tokens_per_core: pto.const_expr = 64,
+    f32_bytes: pto.const_expr = 4,
 ):
+    assert threads * rounds * lanes == hidden_size, (
+        "threads * rounds * lanes must equal hidden_size for RMSNorm SIMT partitioning"
+    )
+
     core_id = pto.get_block_idx()
     frag_elems: pto.constexpr = rounds * lanes
 
@@ -150,8 +155,8 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
         W,
         w_ub,
         0,
-        hidden_size * 4,
-        nburst=(1, hidden_size * 4, hidden_size * 4),
+        hidden_size * f32_bytes,
+        nburst=(1, hidden_size * f32_bytes, hidden_size * f32_bytes),
     )
 
     with pto.simt():
@@ -170,9 +175,9 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
         pto.mte_gm_ub(
             pto.addptr(X, token_id * hidden_size),
             x_ub,
-            ping * hidden_size * 4,
-            hidden_size * 4,
-            nburst=(1, hidden_size * 4, hidden_size * 4),
+            ping * hidden_size * f32_bytes,
+            hidden_size * f32_bytes,
+            nburst=(1, hidden_size * f32_bytes, hidden_size * f32_bytes),
         )
 
         with pto.simt():
@@ -193,15 +198,15 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
         pto.mte_ub_gm(
             pto.addptr(y_ub, ping * hidden_size),
             pto.addptr(Y, token_id * hidden_size),
-            hidden_size * 4,
-            nburst=(1, hidden_size * 4, hidden_size * 4),
+            hidden_size * f32_bytes,
+            nburst=(1, hidden_size * f32_bytes, hidden_size * f32_bytes),
         )
 
         pto.mte_ub_gm(
             pto.addptr(rstd_ub, ping * 8),
             pto.addptr(RSTD, token_id),
-            4,
-            nburst=(1, 4, 4),
+            f32_bytes,
+            nburst=(1, f32_bytes, f32_bytes),
         )
 
 
