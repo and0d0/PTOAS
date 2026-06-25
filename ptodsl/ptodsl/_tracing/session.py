@@ -21,7 +21,7 @@ from .._surface_values import unwrap_surface_value, wrap_like_surface_value
 
 from mlir.dialects import arith, func
 from mlir.dialects import pto as _pto
-from mlir.ir import InsertionPoint, IntegerType, UnitAttr
+from mlir.ir import InsertionPoint, IntegerAttr, IntegerType, UnitAttr
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,8 @@ class TraceSession:
         self._helpers: dict[str, object] = {}
         self._subkernel_stack: list[SubkernelTraceFrame] = []
         self._carry_loop_stack = []
+        self._ub_base_i8_ptr = None
+        self._ub_scratch_next_byte = 0
 
     @property
     def current_function(self):
@@ -80,6 +82,32 @@ class TraceSession:
     def bind_entry_block(self, entry_block) -> None:
         """Record the root entry block for the active trace."""
         self.entry_block = entry_block
+
+    @property
+    def ub_scratch_size(self) -> int:
+        return self._ub_scratch_next_byte
+
+    def get_or_create_ub_base_i8_ptr(self):
+        """Return the shared UB byte-base pointer for explicit scratch buffers."""
+        if self._ub_base_i8_ptr is not None:
+            return self._ub_base_i8_ptr
+        from .._ops import castptr
+        from .._types import int8, ptr
+
+        i64 = IntegerType.get_signless(64)
+        zero = arith.ConstantOp(i64, 0).result
+        self._ub_base_i8_ptr = castptr(zero, ptr(int8, "ub")).value
+        return self._ub_base_i8_ptr
+
+    def allocate_ub_scratch(self, byte_size: int, *, alignment: int = 32) -> int:
+        """Reserve one aligned byte range in the function-level UB scratch area."""
+        if not isinstance(byte_size, int) or byte_size <= 0:
+            raise ValueError(f"UB scratch allocation expects a positive byte size, got {byte_size!r}")
+        if not isinstance(alignment, int) or alignment <= 0:
+            raise ValueError(f"UB scratch allocation expects a positive alignment, got {alignment!r}")
+        offset = _align_up(self._ub_scratch_next_byte, alignment)
+        self._ub_scratch_next_byte = offset + byte_size
+        return offset
 
     @contextmanager
     def enter_function(self, ir_fn):
@@ -216,6 +244,16 @@ class TraceSession:
             raise RuntimeError("PTODSL trace-session exited with an open subkernel lowering frame")
         if self._carry_loop_stack:
             raise RuntimeError("PTODSL trace-session exited with an open loop-carry lowering frame")
+        if self._ub_scratch_next_byte:
+            i64 = IntegerType.get_signless(64)
+            self.entry_function.attributes["dyn_shared_memory_buf"] = IntegerAttr.get(
+                i64,
+                _align_up(self._ub_scratch_next_byte, 32),
+            )
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
 
 
 __all__ = [

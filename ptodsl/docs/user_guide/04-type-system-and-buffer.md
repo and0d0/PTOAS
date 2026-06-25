@@ -171,7 +171,22 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 | `MemorySpace.ACC` | Cube L0C accumulator buffer |
 | `MemorySpace.BIAS` | Cube bias table buffer |
 
-## 4.5 TensorView
+## 4.5 Explicit scratch buffers
+
+Use `pto.alloc_buffer(...)` in explicit-mode kernels to allocate scratch storage that is addressed through pointer-style operations:
+
+```python
+ub_scratch = pto.alloc_buffer((4096,), pto.f32, scope="ub")
+fragment = pto.alloc_buffer((32,), pto.f32, scope="local", persistent=True)
+```
+
+`scope="ub"` reserves space in the function-level Unified Buffer scratch area and returns a typed UB pointer. The allocation contributes to the kernel's dynamic shared-memory size and can be passed to explicit data-movement helpers such as `pto.mte_gm_ub(...)` and `pto.mte_ub_gm(...)`.
+
+`scope="local"` creates SIMT-local fragment storage for use by lower-level load/store surfaces. It is intended for per-workitem arrays such as `x_frag[]` and `w_frag[]`. The `persistent` flag is accepted as lifetime metadata for callers that need to distinguish reusable fragment storage from ordinary temporary scratch.
+
+Shapes must be static positive integers so the frontend can compute storage size and layout while tracing.
+
+## 4.6 TensorView
 
 `TensorView` is a descriptor for a tensor in Global Memory. Create one inside a `@pto.jit` body with `make_tensor_view`:
 
@@ -201,7 +216,7 @@ def kernel(
 
 Strides support non-contiguous tensors. Pass `strides=A.strides` from the source tensor for the default row-major layout, or supply explicit strides for sub-views. Use `tv.as_ptr()` to obtain a typed GM pointer for use with MTE Ops in explicit-mode orchestration.
 
-## 4.6 PartitionTensorView
+## 4.7 PartitionTensorView
 
 `partition_view` creates a sub-view of a TensorView at a given offset and size. It describes *which part* of the GM tensor a `tile.load` or `tile.store` should operate on:
 
@@ -212,7 +227,7 @@ part = pto.partition_view(tv, offsets=[row_offset, 0], sizes=[BLOCK, dim])
 
 The result is a `PartitionTensorView` — a lightweight descriptor, not a data buffer. It carries the partition's shape, strides, and element type (inherited from the source TensorView). Use `part.as_ptr()` to obtain a typed GM pointer for MTE Ops in explicit-mode orchestration.
 
-## 4.7 Tile
+## 4.8 Tile
 
 A `Tile` is an on-chip buffer allocated in UB or cube-local memory. Allocate tiles with `alloc_tile`:
 

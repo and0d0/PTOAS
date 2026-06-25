@@ -280,6 +280,46 @@ class AddressValue(_SurfaceValue):
         return AddressOffsetValue(self, offset)
 
 
+class AllocatedBufferValue(AddressValue):
+    """Address returned by ``pto.alloc_buffer`` with allocation metadata."""
+
+    def __init__(
+        self,
+        value,
+        *,
+        scope,
+        shape,
+        dtype,
+        element_type,
+        element_count,
+        byte_size,
+        byte_offset=None,
+        persistent=False,
+    ):
+        super().__init__(value)
+        self.scope = scope
+        self.shape = tuple(shape)
+        self.dtype = dtype
+        self.element_type = element_type
+        self.element_count = element_count
+        self.byte_size = byte_size
+        self.byte_offset = byte_offset
+        self.persistent = bool(persistent)
+
+    @property
+    def surface_metadata(self):
+        return {
+            "scope": self.scope,
+            "shape": self.shape,
+            "dtype": self.dtype,
+            "element_type": self.element_type,
+            "element_count": self.element_count,
+            "byte_size": self.byte_size,
+            "byte_offset": self.byte_offset,
+            "persistent": self.persistent,
+        }
+
+
 @dataclass(frozen=True)
 class AddressOffsetValue:
     """Address view plus an element offset, used by scalar.load/store sugar."""
@@ -961,6 +1001,7 @@ def _coerce_index_value(value):
 
 
 __all__ = [
+    "AllocatedBufferValue",
     "AddressOffsetValue",
     "AddressValue",
     "MaskResultValue",
