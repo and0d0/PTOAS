@@ -979,6 +979,45 @@ def scalar_pointer_offset_probe():
 
 
 @pto.jit(target="a5")
+def scalar_contiguous_vector_probe():
+    data_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32, valid_shape=[1, 16])
+    data_ptr = data_tile.as_ptr()
+    x4 = scalar.load(data_ptr, 0, contiguous=4)
+    scale4 = pto.vec(pto.f32, 4, init=1.0)
+    y4 = x4 * scale4
+    scalar.store(y4, data_ptr, 4)
+
+
+@pto.simt
+def scalar_contiguous_local_alloc_buffer_helper():
+    data = pto.alloc_buffer((16,), pto.f32, scope="local")
+    x4 = scalar.load(data, 0, contiguous=4)
+    scale4 = pto.vec(pto.f32, 4, init=1.0)
+    y4 = x4 * scale4
+    scalar.store(y4, data, 4)
+
+
+@pto.jit(target="a5", mode="explicit")
+def scalar_contiguous_local_alloc_buffer_probe():
+    scalar_contiguous_local_alloc_buffer_helper()
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_width_mismatch_probe():
+    data_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32, valid_shape=[1, 16])
+    data_ptr = data_tile.as_ptr()
+    x4 = scalar.load(data_ptr, 0, contiguous=4)
+    scalar.store(x4, data_ptr, 4, contiguous=2)
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_scalar_store_probe():
+    data_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32, valid_shape=[1, 16])
+    data_ptr = data_tile.as_ptr()
+    scalar.store(1.0, data_ptr, 0, contiguous=4)
+
+
+@pto.jit(target="a5")
 def addptr_surface_probe():
     meta_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
     meta_ptr = meta_tile.as_ptr()
@@ -1777,6 +1816,7 @@ def main() -> None:
     make_mask_index_roundtrip_probe.verify()
     integer_loop_bound_probe.verify()
     scalar_pointer_offset_probe.verify()
+    scalar_contiguous_vector_probe.verify()
     addptr_surface_probe.verify()
     simt_pointer_offset_probe.verify()
     scalar_store_element_coercion_probe.verify()
@@ -2756,6 +2796,40 @@ def main() -> None:
     expect(
         re.search(r"pto\.load %\d+\[%c2(?:_\d+)?\]", scalar_pointer_offset_text) is not None,
         "scalar.load(ptr + 2) should lower as element offset 2",
+    )
+
+    scalar_contiguous_text = scalar_contiguous_vector_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(scalar_contiguous_text, "scalar contiguous vector specialization")
+    expect("llvm.load" in scalar_contiguous_text, "scalar.load(..., contiguous=N) should lower to llvm.load")
+    expect("llvm.store" in scalar_contiguous_text, "scalar.store(vector, ...) should lower to llvm.store")
+    expect("vector<4xf32>" in scalar_contiguous_text, "contiguous=4 over f32 should produce vector<4xf32>")
+    expect("llvm.insertelement" in scalar_contiguous_text, "pto.vec(..., init=scalar) should broadcast with insertelement")
+    expect("arith.mulf" in scalar_contiguous_text, "VecValue multiplication should lower to arith.mulf")
+    expect(
+        "pto.load" not in scalar_contiguous_text and "pto.store" not in scalar_contiguous_text,
+        "contiguous vector memory access should not lower through scalar pto.load/store",
+    )
+    scalar_contiguous_local_text = scalar_contiguous_local_alloc_buffer_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        scalar_contiguous_local_text,
+        "scalar contiguous local alloc_buffer specialization",
+    )
+    expect("llvm.alloca" in scalar_contiguous_local_text, "local alloc_buffer should lower to llvm.alloca")
+    expect("llvm.load" in scalar_contiguous_local_text, "local alloc_buffer contiguous load should lower to llvm.load")
+    expect("llvm.store" in scalar_contiguous_local_text, "local alloc_buffer contiguous store should lower to llvm.store")
+    expect(
+        "vector<4xf32>" in scalar_contiguous_local_text,
+        "local alloc_buffer contiguous access should preserve vector lane type",
+    )
+    expect_raises(
+        ValueError,
+        lambda: scalar_contiguous_width_mismatch_probe.compile(),
+        "does not match vector lane count",
+    )
+    expect_raises(
+        TypeError,
+        lambda: scalar_contiguous_scalar_store_probe.compile(),
+        "scalar.store(scalar, ..., contiguous=N) is not supported",
     )
 
     addptr_surface_text = addptr_surface_probe.compile().mlir_text()
