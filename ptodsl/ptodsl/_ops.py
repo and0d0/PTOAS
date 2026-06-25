@@ -41,6 +41,7 @@ from ._scalar_adaptation import (
 )
 from ._runtime_scalar_ops import emit_runtime_binary_op
 from ._surface_values import (
+    AllocatedBufferValue,
     MaskResultValue,
     PartitionTensorViewValue,
     TensorViewValue,
@@ -65,6 +66,7 @@ from ._types import (
     mask_type,
     part_tensor_view_type,
     part_tensor_view_type_from_dims,
+    ptr,
     tensor_view_type,
     tensor_view_type_from_dims,
     vreg_type,
@@ -82,7 +84,9 @@ from mlir.ir import (
     IndexType,
     IntegerType,
     MemRefType,
+    Operation,
     Type,
+    TypeAttr,
 )
 
 # Pipe name shorthands → canonical PIPE_* names
@@ -2313,6 +2317,142 @@ def _tile_transfer_partition(tv, tile, *, offsets=None, sizes=None, context: str
             f"{len(normalized_offsets)} and {len(normalized_sizes)}"
         )
     return partition_view(tv, offsets=normalized_offsets, sizes=normalized_sizes)
+
+
+def alloc_buffer(shape, dtype, *, scope="ub", persistent=False):
+    """
+    Allocate explicit scratch storage and return an address-like surface value.
+
+    ``scope="ub"`` reserves a byte range in the function-level UB scratch area
+    and returns a typed PTO pointer. ``scope="local"`` emits an LLVM stack
+    allocation for SIMT lane-local fragment storage. Access lowering for local
+    buffers is intentionally left to the scalar/vector load-store surfaces.
+    """
+    _require_explicit_mode("pto.alloc_buffer(...)")
+    normalized_scope = _normalize_alloc_buffer_scope(scope)
+    element_type = _resolve(dtype)
+    element_count = _static_alloc_buffer_element_count(shape)
+    elem_bytes = _element_bytewidth(element_type)
+    byte_size = element_count * elem_bytes
+
+    if normalized_scope == "ub":
+        return _alloc_ub_buffer(
+            shape,
+            dtype,
+            element_type,
+            element_count,
+            byte_size,
+            persistent=persistent,
+        )
+    if normalized_scope == "local":
+        return _alloc_local_buffer(
+            shape,
+            dtype,
+            element_type,
+            element_count,
+            byte_size,
+            persistent=persistent,
+        )
+    raise AssertionError(f"unhandled alloc_buffer scope {normalized_scope!r}")
+
+
+def _normalize_alloc_buffer_scope(scope):
+    if not isinstance(scope, str):
+        try:
+            space = _normalize_address_space(scope)
+        except Exception:
+            space = None
+        if space == _pto.AddressSpace.VEC:
+            return "ub"
+        raise TypeError("pto.alloc_buffer(..., scope=...) expects 'ub' or 'local'")
+    normalized = scope.strip().lower()
+    if normalized in {"ub", "vec"}:
+        return "ub"
+    if normalized in {"local", "private"}:
+        return "local"
+    raise ValueError("pto.alloc_buffer(..., scope=...) expects one of 'ub' or 'local'")
+
+
+def _static_alloc_buffer_element_count(shape):
+    if isinstance(shape, int):
+        dims = (shape,)
+    elif isinstance(shape, (list, tuple)):
+        dims = tuple(shape)
+    else:
+        raise TypeError("pto.alloc_buffer(shape, ...) expects an int or a tuple/list of static dimensions")
+    if not dims:
+        raise ValueError("pto.alloc_buffer(shape, ...) expects at least one dimension")
+    count = 1
+    for dim in dims:
+        raw_dim = unwrap_surface_value(dim)
+        if isinstance(raw_dim, bool):
+            raise TypeError("pto.alloc_buffer(shape, ...) does not accept bool dimensions")
+        if not isinstance(raw_dim, int):
+            raise TypeError(
+                "pto.alloc_buffer(shape, ...) requires static integer dimensions; "
+                f"got {getattr(raw_dim, 'type', type(raw_dim).__name__)}"
+            )
+        if raw_dim <= 0:
+            raise ValueError(f"pto.alloc_buffer(shape, ...) dimensions must be positive, got {raw_dim}")
+        count *= raw_dim
+    return count
+
+
+def _alloc_ub_buffer(shape, dtype, element_type, element_count, byte_size, *, persistent):
+    from ._tracing.active import current_session
+
+    session = current_session()
+    if session is None:
+        raise RuntimeError("pto.alloc_buffer(scope='ub') may only be used while tracing a PTODSL kernel")
+
+    byte_offset = session.allocate_ub_scratch(byte_size, alignment=32)
+    ub_base_i8 = wrap_surface_value(session.get_or_create_ub_base_i8_ptr())
+    if byte_offset:
+        ptr_i8_value = addptr(ub_base_i8, arith.ConstantOp(IndexType.get(), byte_offset).result)
+    else:
+        ptr_i8_value = ub_base_i8
+    ptr_value = castptr(ptr_i8_value, ptr(element_type, "ub"))
+    return AllocatedBufferValue(
+        unwrap_surface_value(ptr_value),
+        scope="ub",
+        shape=_normalize_alloc_buffer_shape_metadata(shape),
+        dtype=dtype,
+        element_type=element_type,
+        element_count=element_count,
+        byte_size=byte_size,
+        byte_offset=byte_offset,
+        persistent=persistent,
+    )
+
+
+def _alloc_local_buffer(shape, dtype, element_type, element_count, byte_size, *, persistent):
+    i32 = IntegerType.get_signless(32)
+    count = _materialize_integer_literal(i32, element_count)
+    llvm_ptr_type = Type.parse("!llvm.ptr")
+    alloca = Operation.create(
+        "llvm.alloca",
+        results=[llvm_ptr_type],
+        operands=[count],
+        attributes={
+            "elem_type": TypeAttr.get(element_type),
+        },
+    ).results[0]
+    return AllocatedBufferValue(
+        alloca,
+        scope="local",
+        shape=_normalize_alloc_buffer_shape_metadata(shape),
+        dtype=dtype,
+        element_type=element_type,
+        element_count=element_count,
+        byte_size=byte_size,
+        persistent=persistent,
+    )
+
+
+def _normalize_alloc_buffer_shape_metadata(shape):
+    if isinstance(shape, int):
+        return (shape,)
+    return tuple(unwrap_surface_value(dim) for dim in shape)
 
 
 def alloc_tile(
@@ -5464,7 +5604,7 @@ __all__ = [
     "vaxpy", "vaddrelu", "vsubrelu",
     "vsel",
     "make_tensor_view", "partition_view",
-    "alloc_tile",
+    "alloc_buffer", "alloc_tile",
     "tload", "tstore", "tmov", "tinsert",
     "tmatmul", "tmatmul_acc", "tmatmul_mx", "tmatmul_mx_acc", "tmatmul_mx_bias",
     "tgemv_mx", "tgemv_mx_acc", "tgemv_mx_bias",
