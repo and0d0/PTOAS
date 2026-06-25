@@ -1,0 +1,233 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
+"""
+RMSNorm compile-only PTODSL example for issue 483.
+
+The example exercises the PTODSL surfaces needed by the RMSNorm SimtVF kernel:
+
+- ``pto.alloc_buffer(...)`` for UB scratch and lane-local storage
+- contiguous scalar ``load`` / ``store`` vector accesses
+- ``pto.simt_allreduce_sum(...)`` for cross-workitem sum reduction
+- runtime ``range(...)`` for the token loop so the AST rewrite emits ``scf.for``
+
+Run this file directly to print the emitted MLIR for one specialization.
+"""
+
+import argparse
+from pathlib import Path
+import sys
+
+
+if __package__ in {None, ""}:
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        if (candidate / "ptodsl" / "__init__.py").exists():
+            sys.path.insert(0, str(candidate))
+            break
+    else:
+        raise RuntimeError(
+            "Unable to locate the PTODSL Python package root from rmsnorm_alloc_buffer_simt.py"
+        )
+
+
+from ptodsl import pto, scalar
+
+
+def init_weight_fragment_body(
+    w_ub,
+    w_frag,
+    *,
+    threads: pto.constexpr = 128,
+    rounds: pto.constexpr = 16,
+    lanes: pto.constexpr = 2,
+):
+    tx = pto.get_tid_x()
+
+    for r in pto.static_range(0, rounds):
+        ub_offset = r * threads * lanes + tx * lanes
+        frag_offset = r * lanes
+
+        w_vec = scalar.load(w_ub, ub_offset, contiguous=lanes)
+        scalar.store(w_vec, w_frag, frag_offset)
+
+
+def rmsnorm_4096_token_body(
+    x_ub,
+    y_ub,
+    rstd_ub,
+    reduce_scratch,
+    x_frag,
+    w_frag,
+    eps: pto.f32,
+    ping: pto.i32,
+    *,
+    threads: pto.constexpr = 128,
+    rounds: pto.constexpr = 16,
+    lanes: pto.constexpr = 2,
+    hidden_size: pto.constexpr = 4096,
+):
+    tx = pto.get_tid_x()
+    local_sum = 0.0
+
+    for r in pto.static_range(0, rounds):
+        lane_offset = r * threads * lanes + tx * lanes
+        x_offset = ping * hidden_size + lane_offset
+        frag_offset = r * lanes
+
+        x_vec = scalar.load(x_ub, x_offset, contiguous=lanes)
+        scalar.store(x_vec, x_frag, frag_offset)
+
+        for lane in pto.static_range(0, lanes):
+            x = scalar.load(x_frag, frag_offset + lane)
+            local_sum = local_sum + x * x
+
+    sum_sq = pto.simt_allreduce_sum(
+        local_sum,
+        reduce_scratch,
+        threads=threads,
+        scale=1,
+        thread_offset=0,
+    )
+
+    rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
+
+    with pto.if_(tx == 0) as br:
+        with br.then_:
+            scalar.store(rstd, rstd_ub, ping)
+
+    for r in pto.static_range(0, rounds):
+        lane_offset = r * threads * lanes + tx * lanes
+        y_offset = ping * hidden_size + lane_offset
+        frag_offset = r * lanes
+
+        for lane in pto.static_range(0, lanes):
+            x = scalar.load(x_frag, frag_offset + lane)
+            w = scalar.load(w_frag, frag_offset + lane)
+            y = x * rstd * w
+            scalar.store(y, y_ub, y_offset + lane)
+
+
+@pto.jit(target="a5", mode="explicit")
+def rmsnorm_4096_alloc_buffer_simt_context_kernel(
+    X: pto.ptr(pto.f32, "gm"),
+    W: pto.ptr(pto.f32, "gm"),
+    Y: pto.ptr(pto.f32, "gm"),
+    RSTD: pto.ptr(pto.f32, "gm"),
+    eps: pto.f32,
+    batch: pto.i32,
+    *,
+    threads: pto.constexpr = 128,
+    rounds: pto.constexpr = 16,
+    lanes: pto.constexpr = 2,
+    hidden_size: pto.constexpr = 4096,
+    n_cores: pto.constexpr = 64,
+    tokens_per_core: pto.constexpr = 64,
+):
+    core_id = pto.get_block_idx()
+    frag_elems: pto.constexpr = rounds * lanes
+
+    w_ub = pto.alloc_buffer((hidden_size,), pto.f32, scope="ub")
+    x_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
+    y_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
+    rstd_ub = pto.alloc_buffer((2,), pto.f32, scope="ub")
+    reduce_scratch = pto.alloc_buffer((threads,), pto.f32, scope="ub")
+
+    x_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local")
+    w_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local", persistent=True)
+
+    pto.mte_gm_ub(
+        W,
+        w_ub,
+        0,
+        hidden_size * 4,
+        nburst=(1, hidden_size * 4, hidden_size * 4),
+    )
+
+    with pto.simt():
+        init_weight_fragment_body(
+            w_ub,
+            w_frag,
+            threads=threads,
+            rounds=rounds,
+            lanes=lanes,
+        )
+
+    for local_token in range(0, tokens_per_core):
+        token_id = local_token * n_cores + core_id
+        ping = local_token % 2
+
+        pto.mte_gm_ub(
+            pto.addptr(X, token_id * hidden_size),
+            x_ub,
+            ping * hidden_size * 4,
+            hidden_size * 4,
+            nburst=(1, hidden_size * 4, hidden_size * 4),
+        )
+
+        with pto.simt():
+            rmsnorm_4096_token_body(
+                x_ub,
+                y_ub,
+                rstd_ub,
+                reduce_scratch,
+                x_frag,
+                w_frag,
+                eps,
+                ping,
+                threads=threads,
+                rounds=rounds,
+                lanes=lanes,
+                hidden_size=hidden_size,
+            )
+
+        pto.mte_ub_gm(
+            y_ub,
+            pto.addptr(Y, token_id * hidden_size),
+            hidden_size * 4,
+            nburst=(1, hidden_size * 4, hidden_size * 4),
+        )
+
+        pto.mte_ub_gm(
+            rstd_ub,
+            pto.addptr(RSTD, token_id),
+            4,
+            nburst=(1, 4, 4),
+        )
+
+
+def build_x128():
+    return rmsnorm_4096_alloc_buffer_simt_context_kernel.compile(
+        threads=128,
+        rounds=16,
+        lanes=2,
+        tokens_per_core=64,
+    )
+
+
+def build_x64():
+    return rmsnorm_4096_alloc_buffer_simt_context_kernel.compile(
+        threads=64,
+        rounds=16,
+        lanes=4,
+        tokens_per_core=64,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Emit RMSNorm PTODSL MLIR")
+    parser.add_argument("--variant", choices=("x128", "x64"), default="x128")
+    args = parser.parse_args()
+
+    compiled = build_x128() if args.variant == "x128" else build_x64()
+    compiled.verify()
+    print(compiled.mlir_text())
+
+
+if __name__ == "__main__":
+    main()
