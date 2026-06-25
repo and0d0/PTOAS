@@ -63,7 +63,6 @@ def rmsnorm_4096_token_body(
     y_ub,
     rstd_ub,
     reduce_scratch,
-    x_frag,
     w_frag,
     eps: pto.f32,
     ping: pto.i32,
@@ -74,12 +73,13 @@ def rmsnorm_4096_token_body(
     hidden_size: pto.const_expr = 4096,
 ):
     tx = pto.get_tid_x()
-    local_sum = pto.const(0.0, dtype=pto.f32)
+    frag_elems: pto.const_expr = rounds * lanes
+    x_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local")
+    sum_sq = pto.alloc_buffer((1,), pto.f32, scope="local")
 
-    sum_loop = pto.for_(0, rounds, step=1).carry(local_sum=local_sum)
-    with sum_loop:
-        r = sum_loop.iv
-        local_sum = sum_loop.local_sum
+    scalar.store(pto.const(0.0, dtype=pto.f32), sum_sq, 0)
+
+    with pto.for_(0, rounds, step=1) as r:
         lane_offset = r * threads * lanes + tx * lanes
         x_offset = ping * hidden_size + lane_offset
         frag_offset = r * lanes
@@ -88,11 +88,12 @@ def rmsnorm_4096_token_body(
         scalar.store(x_vec, x_frag, frag_offset)
 
         for lane in pto.static_range(0, lanes):
+            local_sum = scalar.load(sum_sq, 0)
             x = scalar.load(x_frag, frag_offset + lane)
             local_sum = local_sum + x * x
-        sum_loop.update(local_sum=local_sum)
+            scalar.store(local_sum, sum_sq, 0)
 
-    local_sum = sum_loop.final("local_sum")
+    local_sum = scalar.load(sum_sq, 0)
 
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
@@ -106,18 +107,18 @@ def rmsnorm_4096_token_body(
 
     with pto.if_(tx == 0) as br:
         with br.then_:
-            scalar.store(rstd, rstd_ub, ping)
+            scalar.store(rstd, rstd_ub, ping * 8)
 
     with pto.for_(0, rounds, step=1) as r:
         lane_offset = r * threads * lanes + tx * lanes
         y_offset = ping * hidden_size + lane_offset
         frag_offset = r * lanes
 
-        for lane in pto.static_range(0, lanes):
-            x = scalar.load(x_frag, frag_offset + lane)
-            w = scalar.load(w_frag, frag_offset + lane)
-            y = x * rstd * w
-            scalar.store(y, y_ub, y_offset + lane)
+        x_vec = scalar.load(x_frag, frag_offset, contiguous=lanes)
+        w_vec = scalar.load(w_frag, frag_offset, contiguous=lanes)
+        rstd_vec = pto.vec(pto.f32, lanes, init=rstd)
+        y_vec = x_vec * rstd_vec * w_vec
+        scalar.store(y_vec, y_ub, y_offset)
 
 
 @pto.jit(target="a5", mode="explicit")
@@ -142,10 +143,9 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     w_ub = pto.alloc_buffer((hidden_size,), pto.f32, scope="ub")
     x_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
     y_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
-    rstd_ub = pto.alloc_buffer((2,), pto.f32, scope="ub")
+    rstd_ub = pto.alloc_buffer((2, 8), pto.f32, scope="ub")
     reduce_scratch = pto.alloc_buffer((threads,), pto.f32, scope="ub")
 
-    x_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local")
     w_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local", persistent=True)
 
     pto.mte_gm_ub(
@@ -183,7 +183,6 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
                 y_ub,
                 rstd_ub,
                 reduce_scratch,
-                x_frag,
                 w_frag,
                 eps,
                 ping,
@@ -194,14 +193,14 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
             )
 
         pto.mte_ub_gm(
-            y_ub,
+            pto.addptr(y_ub, ping * hidden_size),
             pto.addptr(Y, token_id * hidden_size),
             hidden_size * 4,
             nburst=(1, hidden_size * 4, hidden_size * 4),
         )
 
         pto.mte_ub_gm(
-            rstd_ub,
+            pto.addptr(rstd_ub, ping * 8),
             pto.addptr(RSTD, token_id),
             4,
             nburst=(1, 4, 4),
