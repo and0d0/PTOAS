@@ -13,14 +13,19 @@ import re
 from dataclasses import dataclass
 
 from ._diagnostics import native_python_control_flow_error
-from ._runtime_scalar_ops import emit_runtime_binary_op, emit_runtime_bitwise_op, emit_runtime_compare
+from ._runtime_scalar_ops import (
+    emit_runtime_binary_op,
+    emit_runtime_bitwise_op,
+    emit_runtime_compare,
+    normalize_runtime_binary_operands,
+)
 from ._surface_types import PartitionTensorView, TensorView, Tile
 from ._types import _normalize_address_space, _resolve, ptr
 
 from mlir.dialects import arith
 from mlir.dialects import memref
 from mlir.dialects import pto as _pto
-from mlir.ir import IndexType, IntegerAttr, IntegerType, MemRefType, ShapedType, StridedLayoutAttr, Type
+from mlir.ir import IndexType, IntegerAttr, IntegerType, MemRefType, ShapedType, StridedLayoutAttr, Type, VectorType
 
 
 def unwrap_surface_value(value):
@@ -145,6 +150,8 @@ def wrap_surface_value(
         return AddressValue(value)
     except Exception:
         pass
+    if VectorType.isinstance(type_obj):
+        return VecValue(value)
     return RuntimeValue(value)
 
 
@@ -256,6 +263,37 @@ class RuntimeValue(_SurfaceValue):
 
     def __rxor__(self, other):
         return wrap_surface_value(emit_runtime_bitwise_op("xor", unwrap_surface_value(other), self.value))
+
+
+class VecValue(_SurfaceValue):
+    """Author-facing builtin vector value backed by an MLIR vector SSA value."""
+
+    def __init__(self, value):
+        if not VectorType.isinstance(value.type):
+            raise TypeError(f"VecValue expects an MLIR vector value, got {value.type}")
+        super().__init__(value)
+        vec_type = VectorType(value.type)
+        if vec_type.rank != 1:
+            raise TypeError(f"PTODSL builtin vectors must be rank-1, got {value.type}")
+        self.lanes = int(vec_type.shape[0])
+        self.element_type = vec_type.element_type
+
+    def __mul__(self, other):
+        return _emit_vec_binary_op("mul", self, other)
+
+    def __rmul__(self, other):
+        return _emit_vec_binary_op("mul", other, self)
+
+
+def _emit_vec_binary_op(op_name: str, lhs, rhs):
+    lhs_raw = unwrap_surface_value(lhs)
+    rhs_raw = unwrap_surface_value(rhs)
+    if not (VectorType.isinstance(lhs_raw.type) and VectorType.isinstance(rhs_raw.type)):
+        raise TypeError("PTODSL VecValue arithmetic expects compatible vector operands")
+    lhs_raw, rhs_raw, kind = normalize_runtime_binary_operands(lhs_raw, rhs_raw)
+    if kind != "float":
+        raise TypeError(f"PTODSL VecValue operator '{op_name}' currently supports only floating-point vectors")
+    return VecValue(emit_runtime_binary_op(op_name, lhs_raw, rhs_raw))
 
 
 class MaskResultValue(_SurfaceValue):
@@ -967,6 +1005,7 @@ __all__ = [
     "PartitionSpec",
     "PartitionTensorViewValue",
     "RuntimeValue",
+    "VecValue",
     "TileElementRef",
     "TileSliceValue",
     "TensorViewValue",
