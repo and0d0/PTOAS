@@ -58,7 +58,7 @@ def init_weight_fragment_body(
         scalar.store(w_vec, w_frag, frag_offset)
 
 
-def rmsnorm_4096_token_body(
+def rmsnorm_simt_token_body(
     x_ub,
     y_ub,
     rstd_ub,
@@ -176,7 +176,7 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
         )
 
         with pto.simt():
-            rmsnorm_4096_token_body(
+            rmsnorm_simt_token_body(
                 x_ub,
                 y_ub,
                 rstd_ub,
