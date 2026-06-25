@@ -15,6 +15,7 @@ The example exercises the PTODSL surfaces needed by the RMSNorm SimtVF kernel:
 - contiguous scalar ``load`` / ``store`` vector accesses
 - ``pto.simt_allreduce_sum(...)`` for cross-workitem sum reduction
 - runtime ``range(...)`` for the token loop so the AST rewrite emits ``scf.for``
+- explicit ``pto.for_(...)`` loops inside SIMT helpers to avoid trace-time expansion
 
 Run this file directly to print the emitted MLIR for one specialization.
 """
@@ -49,7 +50,7 @@ def init_weight_fragment_body(
 ):
     tx = pto.get_tid_x()
 
-    for r in pto.static_range(0, rounds):
+    with pto.for_(0, rounds, step=1) as r:
         ub_offset = r * threads * lanes + tx * lanes
         frag_offset = r * lanes
 
@@ -73,9 +74,12 @@ def rmsnorm_4096_token_body(
     hidden_size: pto.const_expr = 4096,
 ):
     tx = pto.get_tid_x()
-    local_sum = 0.0
+    local_sum = pto.const(0.0, dtype=pto.f32)
 
-    for r in pto.static_range(0, rounds):
+    sum_loop = pto.for_(0, rounds, step=1).carry(local_sum=local_sum)
+    with sum_loop:
+        r = sum_loop.iv
+        local_sum = sum_loop.local_sum
         lane_offset = r * threads * lanes + tx * lanes
         x_offset = ping * hidden_size + lane_offset
         frag_offset = r * lanes
@@ -86,6 +90,9 @@ def rmsnorm_4096_token_body(
         for lane in pto.static_range(0, lanes):
             x = scalar.load(x_frag, frag_offset + lane)
             local_sum = local_sum + x * x
+        sum_loop.update(local_sum=local_sum)
+
+    local_sum = sum_loop.final("local_sum")
 
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
@@ -101,7 +108,7 @@ def rmsnorm_4096_token_body(
         with br.then_:
             scalar.store(rstd, rstd_ub, ping)
 
-    for r in pto.static_range(0, rounds):
+    with pto.for_(0, rounds, step=1) as r:
         lane_offset = r * threads * lanes + tx * lanes
         y_offset = ping * hidden_size + lane_offset
         frag_offset = r * lanes
