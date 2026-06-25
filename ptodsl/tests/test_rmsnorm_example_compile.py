@@ -24,6 +24,22 @@ def expect(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def expect_raises(exc_type, func, message_substring: str | None = None) -> Exception:
+    try:
+        func()
+    except exc_type as exc:
+        if message_substring is not None and message_substring not in str(exc):
+            raise AssertionError(
+                f"expected {exc_type.__name__} containing {message_substring!r}, got {exc!r}"
+            ) from exc
+        return exc
+    except Exception as exc:
+        raise AssertionError(
+            f"expected {exc_type.__name__}, got {exc.__class__.__name__}: {exc}"
+        ) from exc
+    raise AssertionError(f"expected {exc_type.__name__} to be raised")
+
+
 def expect_parse_roundtrip_and_verify(text: str, label: str) -> None:
     with make_context() as ctx:
         parsed = Module.parse(text, ctx)
@@ -108,6 +124,16 @@ def main() -> None:
 
     expect(hasattr(example, "build_x128"), "RMSNorm example should export build_x128()")
     expect(hasattr(example, "build_x64"), "RMSNorm example should export build_x64()")
+    expect_raises(
+        AssertionError,
+        lambda: example.rmsnorm_4096_alloc_buffer_simt_context_kernel.compile(
+            threads=128,
+            rounds=16,
+            lanes=2,
+            hidden_size=4097,
+        ),
+        "threads * rounds * lanes must equal hidden_size",
+    )
 
     check_variant(
         example.build_x128(),
