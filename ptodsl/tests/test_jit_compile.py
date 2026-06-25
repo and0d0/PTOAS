@@ -905,8 +905,8 @@ def rmsnorm_alloc_buffer_layout_probe(
 ):
     w_ub = pto.alloc_buffer((4096,), pto.f32, scope="ub")
     x_ub = pto.alloc_buffer((2, 4096), pto.f32, scope="ub")
-    rstd_ub = pto.alloc_buffer((16,), pto.f32, scope="ub")
     y_ub = pto.alloc_buffer((2, 4096), pto.f32, scope="ub")
+    rstd_ub = pto.alloc_buffer((2,), pto.f32, scope="ub")
     reduce_scratch = pto.alloc_buffer((128,), pto.f32, scope="ub")
 
     pto.mte_gm_ub(W, w_ub, 0, 4096 * 4, nburst=(1, 0, 0))
@@ -3998,6 +3998,57 @@ def main() -> None:
     expect("pto.get_tid_y" in simt_text, "SIMT helper body should contain pto.get_tid_y")
     expect("pto.get_tid_z" in simt_text, "SIMT helper body should contain pto.get_tid_z")
 
+    alloc_buffer_ub_text = alloc_buffer_ub_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(alloc_buffer_ub_text, "alloc_buffer UB specialization")
+    expect(
+        "dyn_shared_memory_buf = 256 : i64" in alloc_buffer_ub_text,
+        "alloc_buffer(scope='ub') should size the function-level UB scratch area",
+    )
+    expect(
+        "pto.castptr %c0_i64" in alloc_buffer_ub_text and "!pto.ptr<i8, ub>" in alloc_buffer_ub_text,
+        "alloc_buffer(scope='ub') should materialize a shared UB byte-base pointer",
+    )
+    expect(
+        "pto.mte_gm_ub" in alloc_buffer_ub_text and "pto.mte_ub_gm" in alloc_buffer_ub_text,
+        "alloc_buffer(scope='ub') result should be accepted by explicit MTE helpers",
+    )
+
+    alloc_buffer_local_text = alloc_buffer_local_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(alloc_buffer_local_text, "alloc_buffer local specialization")
+    expect(
+        "llvm.alloca" in alloc_buffer_local_text and "x f32" in alloc_buffer_local_text,
+        "alloc_buffer(scope='local') should lower to an LLVM stack allocation in the SIMT helper",
+    )
+    expect(
+        re.search(
+            r"func\.func @alloc_buffer_local_helper__simt_\d+\(\) attributes \{pto\.simt_entry\}",
+            alloc_buffer_local_text,
+        )
+        is not None,
+        "alloc_buffer(scope='local') probe should keep allocation inside the SIMT helper body",
+    )
+
+    rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm alloc_buffer layout specialization")
+    expect(
+        "dyn_shared_memory_buf = 82464 : i64" in rmsnorm_alloc_buffer_text,
+        "RMSNorm alloc_buffer layout should reserve the same UB scratch size as the expanded RMSNorm kernel",
+    )
+    for expected_offset in (16384, 49152, 81920, 81952):
+        expect(
+            f"arith.constant {expected_offset} : index" in rmsnorm_alloc_buffer_text,
+            f"RMSNorm alloc_buffer layout should materialize UB byte offset {expected_offset}",
+        )
+    expect(
+        rmsnorm_alloc_buffer_text.count("llvm.alloca") == 2,
+        "RMSNorm alloc_buffer fragment helper should allocate x_frag and persistent w_frag locally",
+    )
+    expect(
+        re.search(r"call @rmsnorm_alloc_buffer_frag_helper__simt_\d+\(", rmsnorm_alloc_buffer_text)
+        is not None,
+        "RMSNorm alloc_buffer layout should pass UB scratch pointers through the existing SIMT helper call path",
+    )
+
     simt_launch_text = simt_explicit_launch_probe.compile(TRACE_TOKEN=1).mlir_text()
     expect_parse_roundtrip_and_verify(simt_launch_text, "explicit simt launch specialization")
     expect(
@@ -4187,52 +4238,6 @@ def main() -> None:
         TypeError,
         lambda: simt_invalid_atomic_signedness_launch.compile(TRACE_TOKEN=1).mlir_text(),
         "does not accept signedness",
-    )
-
-    alloc_buffer_ub_text = alloc_buffer_ub_probe.compile().mlir_text()
-    expect_parse_roundtrip_and_verify(alloc_buffer_ub_text, "alloc_buffer UB specialization")
-    expect(
-        "dyn_shared_memory_buf = 256 : i64" in alloc_buffer_ub_text,
-        "alloc_buffer(scope='ub') should size the function-level UB scratch area",
-    )
-    expect(
-        "pto.castptr %c0_i64" in alloc_buffer_ub_text and "!pto.ptr<i8, ub>" in alloc_buffer_ub_text,
-        "alloc_buffer(scope='ub') should materialize a shared UB byte-base pointer",
-    )
-    expect(
-        "pto.mte_gm_ub" in alloc_buffer_ub_text and "pto.mte_ub_gm" in alloc_buffer_ub_text,
-        "alloc_buffer(scope='ub') result should be accepted by explicit MTE helpers",
-    )
-
-    alloc_buffer_local_text = alloc_buffer_local_probe.compile().mlir_text()
-    expect_parse_roundtrip_and_verify(alloc_buffer_local_text, "alloc_buffer local specialization")
-    expect(
-        "llvm.alloca" in alloc_buffer_local_text and "x f32" in alloc_buffer_local_text,
-        "alloc_buffer(scope='local') should lower to an LLVM stack allocation in the SIMT helper",
-    )
-    expect(
-        "func.func @alloc_buffer_local_helper() attributes {pto.simt_entry}" in alloc_buffer_local_text,
-        "alloc_buffer(scope='local') probe should keep allocation inside the SIMT helper body",
-    )
-
-    rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
-    expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm alloc_buffer layout specialization")
-    expect(
-        "dyn_shared_memory_buf = 82496 : i64" in rmsnorm_alloc_buffer_text,
-        "RMSNorm alloc_buffer layout should reserve the same UB scratch size as the expanded RMSNorm kernel",
-    )
-    for expected_offset in (16384, 49152, 49216, 81984):
-        expect(
-            f"arith.constant {expected_offset} : index" in rmsnorm_alloc_buffer_text,
-            f"RMSNorm alloc_buffer layout should materialize UB byte offset {expected_offset}",
-        )
-    expect(
-        rmsnorm_alloc_buffer_text.count("llvm.alloca") == 2,
-        "RMSNorm alloc_buffer fragment helper should allocate x_frag and persistent w_frag locally",
-    )
-    expect(
-        "call @rmsnorm_alloc_buffer_frag_helper" in rmsnorm_alloc_buffer_text,
-        "RMSNorm alloc_buffer layout should pass UB scratch pointers through the existing SIMT helper call path",
     )
 
     ast_subkernel_runtime_for_text = ast_subkernel_runtime_for_probe.compile().mlir_text()
