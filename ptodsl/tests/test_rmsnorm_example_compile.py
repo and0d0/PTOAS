@@ -9,6 +9,7 @@
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import re
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +78,29 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
         text.count("pto.store ") <= 8,
         f"{label}: SIMT inner loops should not be trace-time expanded into many scalar stores",
     )
+    expect(text.count("llvm.alloca") == 3, f"{label}: expected w_frag plus x_frag/sum_sq local buffers")
+    expect(
+        re.search(
+            r"func\.func @inline_simt_1__ptodsl_[^{]+\{(?:(?!func\.func @).)*"
+            r"llvm\.alloca(?:(?!func\.func @).)*llvm\.alloca",
+            text,
+            re.S,
+        )
+        is not None,
+        f"{label}: x_frag and sum_sq should be allocated inside the token SIMT helper",
+    )
+    expect(
+        re.search(
+            rf"llvm\.insertelement .* : {re.escape(vector_type)}(?:(?!func\.func @).)*"
+            rf"arith\.mulf .* : {re.escape(vector_type)}(?:(?!func\.func @).)*"
+            rf"arith\.mulf .* : {re.escape(vector_type)}(?:(?!func\.func @).)*"
+            rf"llvm\.store .* : {re.escape(vector_type)}",
+            text,
+            re.S,
+        )
+        is not None,
+        f"{label}: y = x * rstd * w should lower as vector broadcast/mul/store",
+    )
 
 
 def main() -> None:
@@ -90,14 +114,14 @@ def main() -> None:
         label="x128",
         vector_type="vector<2xf32>",
         helper_name_fragment="__tl_allreduce_sum_f32_t128_s1_o0",
-        ub_size=82464,
+        ub_size=82496,
     )
     check_variant(
         example.build_x64(),
         label="x64",
         vector_type="vector<4xf32>",
         helper_name_fragment="__tl_allreduce_sum_f32_t64_s1_o0",
-        ub_size=82208,
+        ub_size=82240,
     )
 
     print("ptodsl_rmsnorm_example_compile: PASS")
