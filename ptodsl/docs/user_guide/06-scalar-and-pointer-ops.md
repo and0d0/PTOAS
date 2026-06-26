@@ -35,26 +35,28 @@ When in doubt, ask: *can this value change between launches of the same compiled
 
 ## 6.2 Scalar access: load and store
 
-`scalar.load` reads one scalar element from a typed pointer or tile location. With `contiguous=N`, it reads `N` adjacent elements as a builtin MLIR vector value. `scalar.store` writes either a scalar or one of those builtin vector values back. These are the canonical memory ops for SIMT authoring. Offsets are counted in elements, not bytes.
+`scalar.load` and `scalar.store` access typed pointers and tile locations.
+Offsets are counted in elements, not bytes.
 
-#### `scalar.load(ptr: PtrType, offset: Index, *, contiguous: int | None = None) -> ScalarType | VecValue`
+### Scalar load
 
-**Description**: Loads one scalar element from a typed pointer at the given element offset, or `contiguous` adjacent elements as `vector<NxT>`.
+#### `scalar.load(ptr_or_ref, offset=None) -> ScalarType`
+
+**Description**: Loads one scalar element from a typed pointer, pointer view, or
+tile element reference.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `ptr` | `PtrType` | Typed pointer (`pto.ptr<T, space>`) or the result of `tile.as_ptr()` |
-| `offset` | `Index` | Element displacement from `ptr` |
-| `contiguous` | `int` or `None` | `None` and `1` load one scalar; `N > 1` loads `N` adjacent elements |
+| `ptr_or_ref` | Typed pointer, pointer view, or tile element reference | Source location |
+| `offset` | `Index` or `None` | Element displacement from `ptr_or_ref`; omit when the offset is already encoded in `ptr_or_ref` |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
 | `value` | `ScalarType` | The loaded scalar, matching the pointer's element type |
-| `value` | `pto.vec(T, N)` | Returned when `contiguous=N > 1`; lowers as builtin `vector<NxT>` |
 
 **Tile-index form** — the preferred syntax when loading from a tile:
 
@@ -73,28 +75,52 @@ val = scalar.load(ptr, offset)       # explicit offset
 val = scalar.load(ptr + offset)      # pointer arithmetic shorthand
 ```
 
-**Contiguous vector form**:
+### Contiguous vector load
 
-```python
-x4 = scalar.load(ptr, offset, contiguous=4)
-```
+#### `scalar.load(ptr_or_ref, offset=None, *, contiguous: int) -> VecValue`
 
-For a `pto.ptr(pto.f32, "ub")`, this produces a value with DSL type `pto.vec(pto.f32, 4)` and MLIR type `vector<4xf32>`. The frontend lowers this directly to low-level pointer arithmetic plus an LLVM vector load; it does not introduce a new PTO semantic op.
-
----
-
-#### `scalar.store(value: ScalarType | VecValue, ptr: PtrType, offset: Index, *, contiguous: int | None = None) -> None`
-
-**Description**: Stores one scalar element or a builtin vector value to a typed pointer at the given element offset.
+**Description**: Loads `contiguous` adjacent elements from a typed pointer as
+one vector value.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `value` | `ScalarType` or `pto.vec(T, N)` | Scalar value or contiguous vector value to write |
-| `ptr` | `PtrType` | Typed destination pointer |
-| `offset` | `Index` | Element displacement from `ptr` |
-| `contiguous` | `int` or `None` | Optional width check for vector stores; if provided, it must match the vector lane count |
+| `ptr_or_ref` | Typed pointer or pointer view | Source location |
+| `offset` | `Index` or `None` | First element to load; omit when the offset is already encoded in `ptr_or_ref` |
+| `contiguous` | Positive Python `int` greater than `1` | Number of adjacent elements to load |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `value` | `pto.vec(T, N)` | Vector value with `N == contiguous` and element type `T` |
+
+**Example**:
+
+```python
+x4 = scalar.load(ptr, offset, contiguous=4)
+```
+
+For a `pto.ptr(pto.f32, "ub")`, this produces a DSL vector value with type
+`pto.vec(pto.f32, 4)`.
+
+---
+
+### Scalar store
+
+#### `scalar.store(value: ScalarType, ptr_or_ref, offset=None) -> None`
+
+**Description**: Stores one scalar element to a typed pointer, pointer view, or
+tile element reference.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `ScalarType` | Scalar value to write |
+| `ptr_or_ref` | Typed pointer, pointer view, or tile element reference | Destination location |
+| `offset` | `Index` or `None` | Element displacement from `ptr_or_ref`; omit when the offset is already encoded in `ptr_or_ref` |
 
 **Returns**: None (side-effect operation).
 
@@ -112,14 +138,33 @@ scalar.store(value, tile[row, col])
 scalar.store(value, ptr, offset)
 ```
 
-**Contiguous vector form**:
+### Contiguous vector store
+
+#### `scalar.store(value: VecValue, ptr_or_ref, offset=None, *, contiguous: int | None = None) -> None`
+
+**Description**: Stores a vector value to adjacent elements of a typed pointer.
+The store width is taken from the vector lane count. If `contiguous` is
+provided, it must match that lane count.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `pto.vec(T, N)` | Vector value to write |
+| `ptr_or_ref` | Typed pointer or pointer view | Destination location |
+| `offset` | `Index` or `None` | First element to store; omit when the offset is already encoded in `ptr_or_ref` |
+| `contiguous` | `int` or `None` | Optional width check; when provided, it must equal `N` |
+
+**Example**:
 
 ```python
 scalar.store(x4, ptr, offset)
 scalar.store(x4, ptr, offset, contiguous=4)  # optional width check
 ```
 
-Vector stores lower directly to an LLVM vector store. Scalar stores remain scalar stores; `scalar.store(scalar_value, ptr, offset, contiguous=N)` is rejected because scalar values are not implicitly broadcast for stores.
+`scalar.store(scalar_value, ptr, offset, contiguous=N)` is rejected because
+scalar values are not implicitly broadcast for vector stores. Use `pto.vec(...)`
+to build an explicit vector value first.
 
 #### `pto.vec(dtype, lanes, *, init=None)`
 
