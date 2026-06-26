@@ -887,7 +887,7 @@ def alloc_buffer_ub_probe(
 
 @pto.simt
 def alloc_buffer_local_helper():
-    _ = pto.alloc_buffer((32,), pto.f32, scope="local", persistent=True)
+    _ = pto.alloc_buffer((32,), pto.f32, scope="local")
 
 
 @pto.jit(target="a5", mode="explicit")
@@ -905,11 +905,6 @@ def alloc_buffer_private_scope_probe():
     _ = pto.alloc_buffer((1,), pto.f32, scope="private")
 
 
-@pto.jit(target="a5", mode="explicit")
-def alloc_buffer_non_bool_persistent_probe():
-    _ = pto.alloc_buffer((1,), pto.f32, scope="local", persistent=1)
-
-
 @pto.simt
 def rmsnorm_alloc_buffer_frag_helper(
     w_ub: pto.ptr(pto.f32, pto.MemorySpace.UB),
@@ -919,7 +914,7 @@ def rmsnorm_alloc_buffer_frag_helper(
     _ = w_ub
     _ = x_ub
     _ = pto.alloc_buffer((32,), pto.f32, scope="local")
-    _ = pto.alloc_buffer((32,), pto.f32, scope="local", persistent=True)
+    _ = pto.alloc_buffer((1,), pto.f32, scope="local")
 
 
 @pto.jit(target="a5", mode="explicit")
@@ -4088,12 +4083,6 @@ def main() -> None:
         lambda: alloc_buffer_private_scope_probe.compile(),
         "expects one of 'ub' or 'local'",
     )
-    expect_raises(
-        TypeError,
-        lambda: alloc_buffer_non_bool_persistent_probe.compile(),
-        "expects True or False",
-    )
-
     rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm alloc_buffer layout specialization")
     expect(
@@ -4107,7 +4096,7 @@ def main() -> None:
         )
     expect(
         rmsnorm_alloc_buffer_text.count("llvm.alloca") == 2,
-        "RMSNorm alloc_buffer fragment helper should allocate x_frag and persistent w_frag locally",
+        "RMSNorm alloc_buffer fragment helper should allocate x_frag and sum_sq locally",
     )
     expect(
         re.search(r"call @rmsnorm_alloc_buffer_frag_helper__simt_\d+\(", rmsnorm_alloc_buffer_text)

@@ -2319,7 +2319,7 @@ def _tile_transfer_partition(tv, tile, *, offsets=None, sizes=None, context: str
     return partition_view(tv, offsets=normalized_offsets, sizes=normalized_sizes)
 
 
-def alloc_buffer(shape, dtype, *, scope="ub", persistent=False):
+def alloc_buffer(shape, dtype, *, scope="ub"):
     """
     Allocate explicit scratch storage and return an address-like surface value.
 
@@ -2330,7 +2330,6 @@ def alloc_buffer(shape, dtype, *, scope="ub", persistent=False):
     """
     _require_explicit_mode("pto.alloc_buffer(...)")
     normalized_scope = _normalize_alloc_buffer_scope(scope)
-    persistent = _normalize_alloc_buffer_persistent(persistent)
     element_type = _resolve(dtype)
     element_count = _static_alloc_buffer_element_count(shape)
     elem_bytes = _element_bytewidth(element_type)
@@ -2343,7 +2342,6 @@ def alloc_buffer(shape, dtype, *, scope="ub", persistent=False):
             element_type,
             element_count,
             byte_size,
-            persistent=persistent,
         )
     if normalized_scope == "local":
         return _alloc_local_buffer(
@@ -2352,7 +2350,6 @@ def alloc_buffer(shape, dtype, *, scope="ub", persistent=False):
             element_type,
             element_count,
             byte_size,
-            persistent=persistent,
         )
     raise AssertionError(f"unhandled alloc_buffer scope {normalized_scope!r}")
 
@@ -2366,12 +2363,6 @@ def _normalize_alloc_buffer_scope(scope):
     if normalized == "local":
         return "local"
     raise ValueError("pto.alloc_buffer(..., scope=...) expects one of 'ub' or 'local'")
-
-
-def _normalize_alloc_buffer_persistent(persistent):
-    if not isinstance(persistent, bool):
-        raise TypeError("pto.alloc_buffer(..., persistent=...) expects True or False")
-    return persistent
 
 
 def _static_alloc_buffer_element_count(shape):
@@ -2399,7 +2390,7 @@ def _static_alloc_buffer_element_count(shape):
     return count
 
 
-def _alloc_ub_buffer(shape, dtype, element_type, element_count, byte_size, *, persistent):
+def _alloc_ub_buffer(shape, dtype, element_type, element_count, byte_size):
     from ._tracing.active import current_session
 
     session = current_session()
@@ -2422,11 +2413,10 @@ def _alloc_ub_buffer(shape, dtype, element_type, element_count, byte_size, *, pe
         element_count=element_count,
         byte_size=byte_size,
         byte_offset=byte_offset,
-        persistent=persistent,
     )
 
 
-def _alloc_local_buffer(shape, dtype, element_type, element_count, byte_size, *, persistent):
+def _alloc_local_buffer(shape, dtype, element_type, element_count, byte_size):
     i32 = IntegerType.get_signless(32)
     count = _materialize_integer_literal(i32, element_count)
     llvm_ptr_type = Type.parse("!llvm.ptr")
@@ -2446,7 +2436,6 @@ def _alloc_local_buffer(shape, dtype, element_type, element_count, byte_size, *,
         element_type=element_type,
         element_count=element_count,
         byte_size=byte_size,
-        persistent=persistent,
     )
 
 

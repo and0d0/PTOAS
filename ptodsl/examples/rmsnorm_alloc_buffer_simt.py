@@ -14,6 +14,7 @@ The example exercises the PTODSL surfaces needed by the RMSNorm SimtVF kernel:
 - ``pto.alloc_buffer(...)`` for UB scratch and lane-local storage
 - contiguous scalar ``load`` / ``store`` vector accesses
 - ``pto.simt_allreduce_sum(...)`` for cross-workitem sum reduction
+- W stays in UB after the GM->UB preload and is read directly by the token SIMT body
 - runtime ``range(...)`` for the token loop so the AST rewrite emits ``scf.for``
 - Python ``range(...)`` loops inside SIMT helpers to emit compact runtime loops
 
@@ -40,30 +41,13 @@ if __package__ in {None, ""}:
 from ptodsl import pto, scalar
 
 
-def init_weight_fragment_body(
-    w_ub,
-    w_frag,
-    *,
-    threads: pto.constexpr = 128,
-    rounds: pto.constexpr = 16,
-    lanes: pto.constexpr = 2,
-):
-    tx = pto.get_tid_x()
-
-    with pto.for_(0, rounds, step=1) as r:
-        ub_offset = r * threads * lanes + tx * lanes
-        frag_offset = r * lanes
-
-        w_vec = scalar.load(w_ub, ub_offset, contiguous=lanes)
-        scalar.store(w_vec, w_frag, frag_offset)
-
-
+@pto.simt
 def rmsnorm_simt_token_body(
     x_ub,
     y_ub,
     rstd_ub,
     reduce_scratch,
-    w_frag,
+    w_ub,
     eps: pto.f32,
     pingpong: pto.i32,
     *,
@@ -108,12 +92,14 @@ def rmsnorm_simt_token_body(
     scalar.store(rstd, rstd_ub, pingpong * 8)
 
     for r in range(0, rounds):
-        lane_offset = r * threads * lanes + tx * lanes
-        y_offset = pingpong * hidden_size + lane_offset
+        round_offset = r * threads * lanes
+        thread_offset = tx * lanes
+        lane_base = round_offset + thread_offset
+        y_offset = pingpong * hidden_size + lane_base
         frag_offset = r * lanes
 
         x_vec = scalar.load(x_frag, frag_offset, contiguous=lanes)
-        w_vec = scalar.load(w_frag, frag_offset, contiguous=lanes)
+        w_vec = scalar.load(w_ub, lane_base, contiguous=lanes)
         rstd_vec = pto.vec(pto.f32, lanes, init=rstd)
         y_vec = x_vec * rstd_vec * w_vec
         scalar.store(y_vec, y_ub, y_offset)
@@ -140,15 +126,12 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     )
 
     core_id = pto.get_block_idx()
-    frag_elems: pto.constexpr = rounds * lanes
 
     w_ub = pto.alloc_buffer((hidden_size,), pto.f32, scope="ub")
     x_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
     y_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
     rstd_ub = pto.alloc_buffer((2, 8), pto.f32, scope="ub")
     reduce_scratch = pto.alloc_buffer((threads,), pto.f32, scope="ub")
-
-    w_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local", persistent=True)
 
     pto.mte_gm_ub(
         W,
@@ -159,15 +142,6 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     )
     pto.set_flag("MTE2", "V", event_id=3)
     pto.wait_flag("MTE2", "V", event_id=3)
-
-    with pto.simt(threads, 1, 1):
-        init_weight_fragment_body(
-            w_ub,
-            w_frag,
-            threads=threads,
-            rounds=rounds,
-            lanes=lanes,
-        )
 
     pto.set_flag("V", "MTE2", event_id=0)
     pto.set_flag("MTE3", "V", event_id=0)
@@ -190,20 +164,19 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
 
         pto.wait_flag("MTE2", "V", event_id=pingpong)
         pto.wait_flag("MTE3", "V", event_id=pingpong)
-        with pto.simt(threads, 1, 1):
-            rmsnorm_simt_token_body(
-                x_ub,
-                y_ub,
-                rstd_ub,
-                reduce_scratch,
-                w_frag,
-                eps,
-                pingpong,
-                threads=threads,
-                rounds=rounds,
-                lanes=lanes,
-                hidden_size=hidden_size,
-            )
+        rmsnorm_simt_token_body[threads, 1, 1](
+            x_ub,
+            y_ub,
+            rstd_ub,
+            reduce_scratch,
+            w_ub,
+            eps,
+            pingpong,
+            threads=threads,
+            rounds=rounds,
+            lanes=lanes,
+            hidden_size=hidden_size,
+        )
         pto.set_flag("V", "MTE2", event_id=pingpong)
         pto.set_flag("V", "MTE3", event_id=pingpong)
 
