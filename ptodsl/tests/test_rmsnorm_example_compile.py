@@ -138,7 +138,7 @@ def main() -> None:
     check_variant(
         example.build_x128(),
         label="x128",
-        vector_type="vector<2xf32>",
+        vector_type="vector<4xf32>",
         helper_name_fragment="__tl_allreduce_sum_f32_t128_s1_o0",
         ub_size=82496,
     )

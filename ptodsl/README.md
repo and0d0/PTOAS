@@ -165,7 +165,7 @@ python3 ptodsl/examples/rmsnorm_alloc_buffer_simt.py --variant x64 > /tmp/rmsnor
 ```
 
 Expected: MLIR containing `@rmsnorm_4096_alloc_buffer_simt_context_kernel`,
-`scf.for`, `vector<2xf32>` for `x128`, `vector<4xf32>` for `x64`, and the
+`scf.for`, `vector<4xf32>` for both `x128` and `x64`, and the
 `__tl_allreduce_sum` helper.
 
 ### Launch artifacts
