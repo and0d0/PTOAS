@@ -122,15 +122,14 @@ def rmsnorm_simt_token_body(
 @pto.jit(target="a5", mode="explicit")
 def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     X: pto.ptr(pto.f32, "gm"),
-    W: pto.ptr(pto.f32, "gm"),
     Y: pto.ptr(pto.f32, "gm"),
+    W: pto.ptr(pto.f32, "gm"),
     RSTD: pto.ptr(pto.f32, "gm"),
     eps: pto.f32,
-    batch: pto.i32,
     *,
     threads: pto.const_expr = 128,
-    rounds: pto.const_expr = 16,
-    lanes: pto.const_expr = 2,
+    rounds: pto.const_expr = 8,
+    lanes: pto.const_expr = 4,
     hidden_size: pto.const_expr = 4096,
     n_cores: pto.const_expr = 64,
     tokens_per_core: pto.const_expr = 64,
@@ -213,8 +212,8 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
 def build_x128():
     return rmsnorm_4096_alloc_buffer_simt_context_kernel.compile(
         threads=128,
-        rounds=16,
-        lanes=2,
+        rounds=8,
+        lanes=4,
         tokens_per_core=64,
     )
 
