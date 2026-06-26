@@ -177,7 +177,11 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 
 ## 4.5 Explicit scratch buffers
 
-Use `pto.alloc_buffer(...)` in explicit-mode kernels to allocate scratch storage that is addressed through pointer-style operations:
+Use `pto.alloc_buffer(...)` in explicit-mode kernels to allocate scratch storage that is addressed through pointer-style operations.
+
+```text
+pto.alloc_buffer(shape, dtype, *, scope="ub", persistent=False)
+```
 
 <!-- ptodsl-doc-pending: {"reason":"illustrative fragment; covered by test_jit_compile alloc_buffer probes"} -->
 ```python
@@ -185,12 +189,22 @@ ub_scratch = pto.alloc_buffer((4096,), pto.f32, scope="ub")
 fragment = pto.alloc_buffer((32,), pto.f32, scope="local", persistent=True)
 ```
 
-| Scope | Storage | Returned value | Typical use | Layout notes |
-|-------|---------|----------------|-------------|--------------|
-| `"ub"` | Function-level Unified Buffer scratch | Typed `!pto.ptr<T, ub>` | MTE source/destination buffers, cross-SIMT scratch such as reductions | Contributes to `dyn_shared_memory_buf`; the frontend may insert alignment padding between allocations |
-| `"local"` | SIMT-helper local storage | Typed local pointer backed by `llvm.alloca` | Per-workitem fragments such as `x_frag[]` and `w_frag[]` | Lives inside the active SIMT helper; `persistent=True` is lifetime metadata and does not change the pointer type |
+| Parameter | Description |
+|-----------|-------------|
+| `shape` | Static positive integer shape. Pass an `int`, `tuple[int, ...]`, or `list[int]`. |
+| `dtype` | Element type of the returned buffer, such as `pto.f32` or `pto.i32`. |
+| `scope` | Scratch storage kind. Recommended values are `"ub"` and `"local"`; `"vec"` aliases `"ub"`, and `"private"` aliases `"local"`. |
+| `persistent` | Lifetime metadata for the frontend. It does not change the returned pointer type. |
 
-Shapes must be static positive integers so the frontend can compute storage size and layout while tracing. `alloc_buffer` lowers directly to the pointer arithmetic and local allocation operations needed by the kernel; it does not introduce a new high-level PTO IR operation.
+| Scope | Meaning | Returned value |
+|-------|---------|----------------|
+| `"ub"` | Function-level Unified Buffer scratch, typically used by MTE transfers or shared SIMT scratch. | Typed `!pto.ptr<T, ub>` |
+| `"local"` | SIMT-helper local scratch for per-workitem temporary fragments. | Typed local pointer backed by `llvm.alloca` |
+
+For `"ub"` buffers, the generated kernel records the total required UB scratch
+size in `dyn_shared_memory_buf`, measured in bytes and including any frontend
+alignment padding. `alloc_buffer` lowers directly to pointer arithmetic or local
+allocation operations; it does not introduce a new high-level PTO IR operation.
 
 ## 4.6 TensorView
 
