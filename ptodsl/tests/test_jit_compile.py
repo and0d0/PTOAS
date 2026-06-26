@@ -884,6 +884,21 @@ def alloc_buffer_local_probe():
     alloc_buffer_local_helper()
 
 
+@pto.jit(target="a5", mode="explicit")
+def alloc_buffer_vec_scope_probe():
+    _ = pto.alloc_buffer((1,), pto.f32, scope="vec")
+
+
+@pto.jit(target="a5", mode="explicit")
+def alloc_buffer_private_scope_probe():
+    _ = pto.alloc_buffer((1,), pto.f32, scope="private")
+
+
+@pto.jit(target="a5", mode="explicit")
+def alloc_buffer_non_bool_persistent_probe():
+    _ = pto.alloc_buffer((1,), pto.f32, scope="local", persistent=1)
+
+
 @pto.simt
 def rmsnorm_alloc_buffer_frag_helper(
     w_ub: pto.ptr(pto.f32, pto.MemorySpace.UB),
@@ -4026,6 +4041,21 @@ def main() -> None:
         )
         is not None,
         "alloc_buffer(scope='local') probe should keep allocation inside the SIMT helper body",
+    )
+    expect_raises(
+        ValueError,
+        lambda: alloc_buffer_vec_scope_probe.compile(),
+        "expects one of 'ub' or 'local'",
+    )
+    expect_raises(
+        ValueError,
+        lambda: alloc_buffer_private_scope_probe.compile(),
+        "expects one of 'ub' or 'local'",
+    )
+    expect_raises(
+        TypeError,
+        lambda: alloc_buffer_non_bool_persistent_probe.compile(),
+        "expects True or False",
     )
 
     rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()

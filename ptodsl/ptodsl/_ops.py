@@ -2330,6 +2330,7 @@ def alloc_buffer(shape, dtype, *, scope="ub", persistent=False):
     """
     _require_explicit_mode("pto.alloc_buffer(...)")
     normalized_scope = _normalize_alloc_buffer_scope(scope)
+    persistent = _normalize_alloc_buffer_persistent(persistent)
     element_type = _resolve(dtype)
     element_count = _static_alloc_buffer_element_count(shape)
     elem_bytes = _element_bytewidth(element_type)
@@ -2358,19 +2359,19 @@ def alloc_buffer(shape, dtype, *, scope="ub", persistent=False):
 
 def _normalize_alloc_buffer_scope(scope):
     if not isinstance(scope, str):
-        try:
-            space = _normalize_address_space(scope)
-        except Exception:
-            space = None
-        if space == _pto.AddressSpace.VEC:
-            return "ub"
         raise TypeError("pto.alloc_buffer(..., scope=...) expects 'ub' or 'local'")
     normalized = scope.strip().lower()
-    if normalized in {"ub", "vec"}:
+    if normalized == "ub":
         return "ub"
-    if normalized in {"local", "private"}:
+    if normalized == "local":
         return "local"
     raise ValueError("pto.alloc_buffer(..., scope=...) expects one of 'ub' or 'local'")
+
+
+def _normalize_alloc_buffer_persistent(persistent):
+    if not isinstance(persistent, bool):
+        raise TypeError("pto.alloc_buffer(..., persistent=...) expects True or False")
+    return persistent
 
 
 def _static_alloc_buffer_element_count(shape):

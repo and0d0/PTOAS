@@ -177,7 +177,7 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 
 ## 4.5 Explicit scratch buffers
 
-Use `pto.alloc_buffer(...)` in explicit-mode kernels to allocate scratch storage that is addressed through pointer-style operations.
+Allocate explicit scratch storage for pointer-style load, store, and data movement operations.
 
 ```text
 pto.alloc_buffer(shape, dtype, *, scope="ub", persistent=False)
@@ -193,18 +193,17 @@ fragment = pto.alloc_buffer((32,), pto.f32, scope="local", persistent=True)
 |-----------|-------------|
 | `shape` | Static positive integer shape. Pass an `int`, `tuple[int, ...]`, or `list[int]`. |
 | `dtype` | Element type of the returned buffer, such as `pto.f32` or `pto.i32`. |
-| `scope` | Scratch storage kind. Recommended values are `"ub"` and `"local"`; `"vec"` aliases `"ub"`, and `"private"` aliases `"local"`. |
-| `persistent` | Lifetime metadata for the frontend. It does not change the returned pointer type. |
+| `scope` | Scratch storage kind. Use `"ub"` or `"local"`. |
+| `persistent` | Optional Boolean, either `True` or `False`; the default is `False`. It is frontend metadata and does not change the returned pointer type. |
 
 | Scope | Meaning | Returned value |
 |-------|---------|----------------|
-| `"ub"` | Function-level Unified Buffer scratch, typically used by MTE transfers or shared SIMT scratch. | Typed `!pto.ptr<T, ub>` |
-| `"local"` | SIMT-helper local scratch for per-workitem temporary fragments. | Typed local pointer backed by `llvm.alloca` |
+| `"ub"` | Function-level Unified Buffer scratch, typically used by data movement operations or shared SIMT scratch. | Typed UB pointer |
+| `"local"` | SIMT-helper local scratch for per-workitem temporary fragments. | Typed local pointer |
 
-For `"ub"` buffers, the generated kernel records the total required UB scratch
-size in `dyn_shared_memory_buf`, measured in bytes and including any frontend
-alignment padding. `alloc_buffer` lowers directly to pointer arithmetic or local
-allocation operations; it does not introduce a new high-level PTO IR operation.
+A `"ub"` buffer is available throughout the generated kernel body, regardless
+of the `persistent` value. A `"local"` buffer is available only inside the SIMT
+helper invocation that allocates it.
 
 ## 4.6 TensorView
 
