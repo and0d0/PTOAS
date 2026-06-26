@@ -15,7 +15,7 @@ The example exercises the PTODSL surfaces needed by the RMSNorm SimtVF kernel:
 - contiguous scalar ``load`` / ``store`` vector accesses
 - ``pto.simt_allreduce_sum(...)`` for cross-workitem sum reduction
 - runtime ``range(...)`` for the token loop so the AST rewrite emits ``scf.for``
-- explicit ``pto.for_(...)`` loops inside SIMT helpers to avoid trace-time expansion
+- Python ``range(...)`` loops inside SIMT helpers to emit compact runtime loops
 
 Run this file directly to print the emitted MLIR for one specialization.
 """
@@ -79,7 +79,7 @@ def rmsnorm_simt_token_body(
 
     scalar.store(pto.const(0.0, dtype=pto.f32), sum_sq, 0)
 
-    with pto.for_(0, rounds, step=1) as r:
+    for r in range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
         x_offset = pingpong * hidden_size + lane_offset
         frag_offset = r * lanes
@@ -107,7 +107,7 @@ def rmsnorm_simt_token_body(
 
     scalar.store(rstd, rstd_ub, pingpong * 8)
 
-    with pto.for_(0, rounds, step=1) as r:
+    for r in range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
         y_offset = pingpong * hidden_size + lane_offset
         frag_offset = r * lanes
