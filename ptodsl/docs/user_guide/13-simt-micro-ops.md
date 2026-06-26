@@ -10,8 +10,8 @@ scalar values loaded from tiles.
 #### `pto.store_vfsimt_info(dim_z, dim_y, dim_x) -> None`
 
 **Description**: Emits the low-level VPTO launch descriptor operation. Most
-code should use `body[dim_x, dim_y, dim_z](...)` or `pto.simt_launch(...)`
-instead.
+code should use `body[dim_x, dim_y, dim_z](...)`, `pto.simt_launch(...)`, or
+the inline form `with pto.simt(dim_x, dim_y, dim_z):` instead.
 
 **Parameters**:
 

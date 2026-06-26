@@ -694,6 +694,17 @@ def inline_subkernel_scope_probe(*, TRACE_TOKEN: pto.const_expr = 0):
         pto.pipe_barrier(pto.Pipe.ALL)
 
 
+@pto.jit(target="a5", mode="explicit")
+def inline_simt_launch_dims_probe(
+    gm: pto.ptr(pto.i32, "gm"),
+    *,
+    TRACE_TOKEN: pto.const_expr = 0,
+):
+    with pto.simt(32, 2, 1):
+        tid = pto.get_tid_x()
+        pto.stg(tid, gm, scalar.index_cast(tid))
+
+
 @pto.simt
 def simt_tid_probe():
     pto.get_tid_x()
@@ -3979,6 +3990,31 @@ def main() -> None:
         and "pto.section.cube {" in inline_subkernel_scope_text
         and "pto.store" in inline_subkernel_scope_text,
         "outlined inline helpers should preserve the authored SIMD/Cube sections and SIMT scalar ops",
+    )
+
+    inline_simt_launch_text = inline_simt_launch_dims_probe.compile(TRACE_TOKEN=1).mlir_text()
+    expect_parse_roundtrip_and_verify(inline_simt_launch_text, "inline simt launch-dims specialization")
+    expect(
+        re.search(r"pto\.simt_launch @inline_simt_[0-9]+__ptodsl_[0-9a-f]+<<<", inline_simt_launch_text)
+        is not None,
+        "with pto.simt(dim_x, dim_y, dim_z) should emit VPTO simt_launch sugar",
+    )
+    expect(
+        "pto.store_vfsimt_info" not in inline_simt_launch_text,
+        "with pto.simt(dim_x, dim_y, dim_z) should leave launch metadata to simt_launch expansion",
+    )
+    expect(
+        re.search(
+            r"func\.func @inline_simt_[0-9]+__ptodsl_[0-9a-f]+\(%arg0: !pto\.ptr<i32, gm>\) attributes \{[^}]*pto\.simt_entry[^}]*\}",
+            inline_simt_launch_text,
+        )
+        is not None,
+        "inline SIMT launch-dims helper should capture enclosing values as helper arguments",
+    )
+    expect_raises(
+        TypeError,
+        lambda: pto.simt(32, 1),
+        "expects exactly three",
     )
 
     simt_text = simt_helper_lowering_probe.compile(TRACE_TOKEN=1).mlir_text()
