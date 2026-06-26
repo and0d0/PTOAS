@@ -156,8 +156,8 @@ python3 ptodsl/examples/flash_attention_softmax_launch.py
 
 Compile-only RMSNorm example for explicit-mode SIMT kernels. It exercises
 `pto.alloc_buffer(...)`, contiguous `scalar.load` / `scalar.store`, `pto.vec`,
-`pto.simt_allreduce_sum(...)`, and a runtime token loop that lowers to
-`scf.for`.
+`pto.simt_allreduce_sum(...)`, explicit pipe `set_flag` / `wait_flag` sync,
+and a runtime token loop that lowers to `scf.for`.
 
 ```bash
 python3 ptodsl/examples/rmsnorm_alloc_buffer_simt.py --variant x128 > /tmp/rmsnorm_x128.mlir
@@ -166,7 +166,8 @@ python3 ptodsl/examples/rmsnorm_alloc_buffer_simt.py --variant x64 > /tmp/rmsnor
 
 Expected: MLIR containing `@rmsnorm_4096_alloc_buffer_simt_context_kernel`,
 `scf.for`, `vector<4xf32>` for both `x128` and `x64`, and the
-`__tl_allreduce_sum` helper.
+`__tl_allreduce_sum` helper. The main token loop should also contain dynamic
+`pto.set_flag_dyn` / `pto.wait_flag_dyn` operations for the ping-pong events.
 
 ### Launch artifacts
 
