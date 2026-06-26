@@ -1001,6 +1001,8 @@ In addition to the decorator form, each sub-kernel unit provides a context
 manager: `with pto.cube():`, `with pto.simd():`, and `with pto.simt():`. These
 open one-off anonymous sub-kernel bodies without requiring a separate named
 Python function. Inline scopes are supported in top-level `@pto.jit` bodies.
+SIMT inline scopes may also spell explicit launch dimensions as
+`with pto.simt(dim_x, dim_y, dim_z):`.
 
 ### Syntax
 
@@ -1022,6 +1024,12 @@ with pto.simt():
     scalar.store(o_next, o_next_tile[row, col])
 ```
 
+```python
+with pto.simt(128, 1, 1):
+    tid = pto.get_tid_x()
+    scalar.store(tid, scratch_ub, scalar.index_cast(tid))
+```
+
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.inline_cube_scope","symbol":"kernel_entry_inline_cube_scope_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->
 ```python
 with pto.cube():
@@ -1041,6 +1049,9 @@ with pto.cube():
   / `pto.section.cube` bodies inside the outlined helper.
 - `with pto.simt():` preserves its scalar body inside one outlined
   `pto.simt_entry` helper, and the caller emits `pto.store_vfsimt_info`.
+- `with pto.simt(dim_x, dim_y, dim_z):` uses the same inline outlining and
+  automatic capture rules, but emits a caller-side explicit SIMT launch with
+  the authored dimensions.
 - Values defined inside the inline sub-kernel cannot escape the block directly.
   Use Tiles, typed pointers, or other mutable references to communicate results
   back to the caller.
