@@ -65,7 +65,7 @@ def rmsnorm_simt_token_body(
     reduce_scratch,
     w_frag,
     eps: pto.f32,
-    ping: pto.i32,
+    pingpong: pto.i32,
     *,
     threads: pto.constexpr = 128,
     rounds: pto.constexpr = 16,
@@ -81,7 +81,7 @@ def rmsnorm_simt_token_body(
 
     with pto.for_(0, rounds, step=1) as r:
         lane_offset = r * threads * lanes + tx * lanes
-        x_offset = ping * hidden_size + lane_offset
+        x_offset = pingpong * hidden_size + lane_offset
         frag_offset = r * lanes
 
         x_vec = scalar.load(x_ub, x_offset, contiguous=lanes)
@@ -105,11 +105,11 @@ def rmsnorm_simt_token_body(
 
     rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
 
-    scalar.store(rstd, rstd_ub, ping * 8)
+    scalar.store(rstd, rstd_ub, pingpong * 8)
 
     with pto.for_(0, rounds, step=1) as r:
         lane_offset = r * threads * lanes + tx * lanes
-        y_offset = ping * hidden_size + lane_offset
+        y_offset = pingpong * hidden_size + lane_offset
         frag_offset = r * lanes
 
         x_vec = scalar.load(x_frag, frag_offset, contiguous=lanes)
@@ -157,8 +157,10 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
         hidden_size * f32_bytes,
         nburst=(1, hidden_size * f32_bytes, hidden_size * f32_bytes),
     )
+    pto.set_flag("MTE2", "V", event_id=3)
+    pto.wait_flag("MTE2", "V", event_id=3)
 
-    with pto.simt():
+    with pto.simt(threads, 1, 1):
         init_weight_fragment_body(
             w_ub,
             w_frag,
@@ -167,19 +169,28 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
             lanes=lanes,
         )
 
+    pto.set_flag("V", "MTE2", event_id=0)
+    pto.set_flag("MTE3", "V", event_id=0)
+    pto.set_flag("V", "MTE2", event_id=1)
+    pto.set_flag("MTE3", "V", event_id=1)
+
     for local_token in range(0, tokens_per_core):
         token_id = local_token * n_cores + core_id
-        ping = local_token % 2
+        pingpong = local_token % 2
 
+        pto.wait_flag("V", "MTE2", event_id=pingpong)
         pto.mte_gm_ub(
             pto.addptr(X, token_id * hidden_size),
             x_ub,
-            ping * hidden_size * f32_bytes,
+            pingpong * hidden_size * f32_bytes,
             hidden_size * f32_bytes,
             nburst=(1, hidden_size * f32_bytes, hidden_size * f32_bytes),
         )
+        pto.set_flag("MTE2", "V", event_id=pingpong)
 
-        with pto.simt():
+        pto.wait_flag("MTE2", "V", event_id=pingpong)
+        pto.wait_flag("MTE3", "V", event_id=pingpong)
+        with pto.simt(threads, 1, 1):
             rmsnorm_simt_token_body(
                 x_ub,
                 y_ub,
@@ -187,26 +198,35 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
                 reduce_scratch,
                 w_frag,
                 eps,
-                ping,
+                pingpong,
                 threads=threads,
                 rounds=rounds,
                 lanes=lanes,
                 hidden_size=hidden_size,
             )
+        pto.set_flag("V", "MTE2", event_id=pingpong)
+        pto.set_flag("V", "MTE3", event_id=pingpong)
 
+        pto.wait_flag("V", "MTE3", event_id=pingpong)
         pto.mte_ub_gm(
-            pto.addptr(y_ub, ping * hidden_size),
+            pto.addptr(y_ub, pingpong * hidden_size),
             pto.addptr(Y, token_id * hidden_size),
             hidden_size * f32_bytes,
             nburst=(1, hidden_size * f32_bytes, hidden_size * f32_bytes),
         )
 
         pto.mte_ub_gm(
-            pto.addptr(rstd_ub, ping * 8),
+            pto.addptr(rstd_ub, pingpong * 8),
             pto.addptr(RSTD, token_id),
             f32_bytes,
             nburst=(1, f32_bytes, f32_bytes),
         )
+        pto.set_flag("MTE3", "V", event_id=pingpong)
+
+    pto.wait_flag("V", "MTE2", event_id=0)
+    pto.wait_flag("V", "MTE2", event_id=1)
+    pto.wait_flag("MTE3", "V", event_id=0)
+    pto.wait_flag("MTE3", "V", event_id=1)
 
 
 def build_x128():

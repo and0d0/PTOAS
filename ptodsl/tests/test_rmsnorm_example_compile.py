@@ -73,6 +73,22 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
     expect(text.count("scf.for") >= 4, f"{label}: SIMT inner loops should lower to compact scf.for ops")
     expect("pto.mte_gm_ub" in text, f"{label}: missing GM->UB transfer")
     expect("pto.mte_ub_gm" in text, f"{label}: missing UB->GM transfer")
+    expect(text.count("pto.simt_launch @inline_simt_") == 2,
+           f"{label}: inline SIMT scopes should lower to explicit simt_launch ops")
+    expect("pto.store_vfsimt_info" not in text,
+           f"{label}: explicit simt_launch dims should not emit caller-side store_vfsimt_info")
+    expect("pto.set_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID3>]" in text,
+           f"{label}: W load should signal the SIMT initialization helper")
+    expect("pto.wait_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID3>]" in text,
+           f"{label}: SIMT initialization helper should wait for W load")
+    expect("pto.set_flag[<PIPE_V>, <PIPE_MTE2>, <EVENT_ID0>]" in text,
+           f"{label}: missing V->MTE2 ping-pong priming flag")
+    expect("pto.set_flag[<PIPE_MTE3>, <PIPE_V>, <EVENT_ID1>]" in text,
+           f"{label}: missing MTE3->V pong priming flag")
+    expect(text.count("pto.set_flag_dyn") == 4,
+           f"{label}: token loop should lower four dynamic set_flag ops")
+    expect(text.count("pto.wait_flag_dyn") == 4,
+           f"{label}: token loop should lower four dynamic wait_flag ops")
     expect(vector_type in text, f"{label}: missing contiguous vector access type {vector_type}")
     expect(helper_name_fragment in text, f"{label}: missing allreduce helper")
     expect("func.call @__tl_allreduce_sum" in text or "call @__tl_allreduce_sum" in text,
