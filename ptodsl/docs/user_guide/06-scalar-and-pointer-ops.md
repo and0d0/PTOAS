@@ -161,19 +161,8 @@ scalar.store(x4, ptr, offset, contiguous=4)  # optional width check
 ```
 
 `scalar.store(scalar_value, ptr, offset, contiguous=N)` is rejected because
-scalar values are not implicitly broadcast for vector stores. Use `pto.vec(...)`
-to build an explicit vector value first.
-
-#### `pto.vec(dtype, lanes, *, init=None)`
-
-`pto.vec(dtype, lanes)` names a builtin vector type such as `vector<4xf32>`. When `init` is provided, it constructs a vector value. A scalar initializer is broadcast to every lane:
-
-```python
-rstd4 = pto.vec(pto.f32, 4, init=rstd)
-y4 = x4 * rstd4
-```
-
-The initial vector arithmetic surface is intentionally narrow: multiplication of compatible `VecValue` operands lowers to elementwise `arith.mulf` on builtin vector types.
+scalar values are not implicitly broadcast for vector stores. To build an
+explicit broadcast vector, use `pto.vec(...)`; see Section 8.4.
 
 ### Scalar value adaptation
 
