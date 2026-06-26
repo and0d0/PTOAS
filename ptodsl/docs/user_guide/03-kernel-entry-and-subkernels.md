@@ -736,8 +736,9 @@ two ways:
 
 1. **As decorated functions** — reusable, named sub-kernels called from
    `@pto.jit` entries and modules.
-2. **As context managers** (`with pto.cube():`, etc.) — inline blocks for
-   one-off snippets (see Section 3.8).
+2. **As context managers** (`with pto.cube():`, `with pto.simd():`,
+   `with pto.simt():`, and `with pto.simt(dim_x, dim_y, dim_z):`) — inline
+   blocks for one-off snippets (see Section 3.8).
 
 Named sub-kernel decorators use the same default AST rewrite model as
 `@pto.jit`: supported Python `if` and `for range(...)` statements lower to
@@ -997,12 +998,13 @@ Specific SIMT micro-op APIs are documented in Chapter 13.
 
 ## 3.8 Inline context manager syntax
 
-In addition to the decorator form, each sub-kernel unit provides a context
-manager: `with pto.cube():`, `with pto.simd():`, and `with pto.simt():`. These
-open one-off anonymous sub-kernel bodies without requiring a separate named
-Python function. Inline scopes are supported in top-level `@pto.jit` bodies.
-SIMT inline scopes may also spell explicit launch dimensions as
-`with pto.simt(dim_x, dim_y, dim_z):`.
+In addition to the decorator form, each sub-kernel unit provides an inline
+context manager form: `with pto.cube():`, `with pto.simd():`,
+`with pto.simt():`, and `with pto.simt(dim_x, dim_y, dim_z):`. These open
+one-off anonymous sub-kernel bodies without requiring a separate named Python
+function. Inline scopes are supported in top-level `@pto.jit` bodies. The
+dimensioned SIMT form uses the same inline body style while making the caller
+emit an explicit `pto.simt_launch`.
 
 ### Syntax
 
