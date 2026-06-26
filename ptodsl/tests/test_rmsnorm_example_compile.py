@@ -70,17 +70,19 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
     expect("func.func @rmsnorm_4096_alloc_buffer_simt_context_kernel" in text, f"{label}: missing entry")
     expect(f"dyn_shared_memory_buf = {ub_size} : i64" in text, f"{label}: unexpected UB scratch size")
     expect("scf.for" in text, f"{label}: tokens_per_core loop should lower to scf.for")
-    expect(text.count("scf.for") >= 4, f"{label}: SIMT inner loops should lower to compact scf.for ops")
+    expect(text.count("scf.for") >= 3, f"{label}: SIMT inner loops should lower to compact scf.for ops")
     expect("pto.mte_gm_ub" in text, f"{label}: missing GM->UB transfer")
     expect("pto.mte_ub_gm" in text, f"{label}: missing UB->GM transfer")
-    expect(text.count("pto.simt_launch @inline_simt_") == 2,
-           f"{label}: inline SIMT scopes should lower to explicit simt_launch ops")
+    expect(text.count("pto.simt_launch @rmsnorm_simt_token_body__simt_") == 1,
+           f"{label}: indexed SIMT call should lower to one explicit token simt_launch op")
+    expect("pto.simt_launch @inline_simt_" not in text,
+           f"{label}: token SIMT body should be emitted as the named helper, not an inline helper")
     expect("pto.store_vfsimt_info" not in text,
            f"{label}: explicit simt_launch dims should not emit caller-side store_vfsimt_info")
     expect("pto.set_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID3>]" in text,
-           f"{label}: W load should signal the SIMT initialization helper")
+           f"{label}: W load should signal completion before token processing")
     expect("pto.wait_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID3>]" in text,
-           f"{label}: SIMT initialization helper should wait for W load")
+           f"{label}: token processing should start after the W load completes")
     expect("pto.set_flag[<PIPE_V>, <PIPE_MTE2>, <EVENT_ID0>]" in text,
            f"{label}: missing V->MTE2 ping-pong priming flag")
     expect("pto.set_flag[<PIPE_MTE3>, <PIPE_V>, <EVENT_ID1>]" in text,
@@ -110,10 +112,11 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
         text.count("pto.store ") <= 8,
         f"{label}: SIMT inner loops should not be trace-time expanded into many scalar stores",
     )
-    expect(text.count("llvm.alloca") == 3, f"{label}: expected w_frag plus x_frag/sum_sq local buffers")
+    expect(text.count("llvm.alloca") == 2, f"{label}: expected x_frag and sum_sq local buffers")
+    expect("w_frag" not in text, f"{label}: W should be read directly from UB, not from a local fragment")
     expect(
         re.search(
-            r"func\.func @inline_simt_1__ptodsl_[^{]+\{(?:(?!func\.func @).)*"
+            r"func\.func @rmsnorm_simt_token_body__simt_[^{]+\{(?:(?!func\.func @).)*"
             r"llvm\.alloca(?:(?!func\.func @).)*llvm\.alloca",
             text,
             re.S,

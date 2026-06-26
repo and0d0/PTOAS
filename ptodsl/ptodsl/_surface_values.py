@@ -359,7 +359,6 @@ class AllocatedBufferValue(AddressValue):
         element_count,
         byte_size,
         byte_offset=None,
-        persistent=False,
     ):
         super().__init__(value)
         self.scope = scope
@@ -369,7 +368,6 @@ class AllocatedBufferValue(AddressValue):
         self.element_count = element_count
         self.byte_size = byte_size
         self.byte_offset = byte_offset
-        self.persistent = bool(persistent)
 
     @property
     def surface_metadata(self):
@@ -381,7 +379,6 @@ class AllocatedBufferValue(AddressValue):
             "element_count": self.element_count,
             "byte_size": self.byte_size,
             "byte_offset": self.byte_offset,
-            "persistent": self.persistent,
         }
 
 
