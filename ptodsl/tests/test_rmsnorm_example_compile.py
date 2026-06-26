@@ -70,7 +70,7 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
     expect("func.func @rmsnorm_4096_alloc_buffer_simt_context_kernel" in text, f"{label}: missing entry")
     expect(f"dyn_shared_memory_buf = {ub_size} : i64" in text, f"{label}: unexpected UB scratch size")
     expect("scf.for" in text, f"{label}: tokens_per_core loop should lower to scf.for")
-    expect(text.count("scf.for") >= 3, f"{label}: SIMT inner loops should lower to compact scf.for ops")
+    expect(text.count("scf.for") >= 4, f"{label}: SIMT inner loops should lower to compact scf.for ops")
     expect("pto.mte_gm_ub" in text, f"{label}: missing GM->UB transfer")
     expect("pto.mte_ub_gm" in text, f"{label}: missing UB->GM transfer")
     expect(text.count("pto.simt_launch @rmsnorm_simt_token_body__simt_") == 1,

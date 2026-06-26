@@ -61,8 +61,6 @@ def rmsnorm_simt_token_body(
     x_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local")
     sum_sq = pto.alloc_buffer((1,), pto.f32, scope="local")
 
-    scalar.store(pto.const(0.0, dtype=pto.f32), sum_sq, 0)
-
     for r in range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
         x_offset = pingpong * hidden_size + lane_offset
@@ -71,11 +69,13 @@ def rmsnorm_simt_token_body(
         x_vec = scalar.load(x_ub, x_offset, contiguous=lanes)
         scalar.store(x_vec, x_frag, frag_offset)
 
-        for lane in pto.static_range(0, lanes):
-            local_sum = scalar.load(sum_sq, 0)
-            x = scalar.load(x_frag, frag_offset + lane)
-            local_sum = local_sum + x * x
-            scalar.store(local_sum, sum_sq, 0)
+    scalar.store(pto.const(0.0, dtype=pto.f32), sum_sq, 0)
+
+    for i in range(0, frag_elems):
+        local_sum = scalar.load(sum_sq, 0)
+        x = scalar.load(x_frag, i)
+        local_sum = local_sum + x * x
+        scalar.store(local_sum, sum_sq, 0)
 
     local_sum = scalar.load(sum_sq, 0)
 
