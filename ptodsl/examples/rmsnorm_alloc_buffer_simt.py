@@ -155,8 +155,8 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
         pto.wait_flag("V", "MTE2", event_id=pingpong)
         pto.mte_gm_ub(
             pto.addptr(X, token_id * hidden_size),
-            x_ub,
-            pingpong * hidden_size * f32_bytes,
+            pto.addptr(x_ub, pingpong * hidden_size),
+            0,
             hidden_size * f32_bytes,
             nburst=(1, hidden_size * f32_bytes, hidden_size * f32_bytes),
         )
