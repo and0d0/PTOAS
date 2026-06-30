@@ -6,22 +6,13 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-"""
-Launch and validate the RMSNorm alloc_buffer/SIMT example on an Ascend NPU.
-
-The test compares the kernel outputs written to GM against a NumPy RMSNorm
-reference. It also fills output buffers with sentinels and checks guard regions
-after the logical outputs, so missed writes and simple over-writes are caught by
-the same host-side validation.
-"""
+"""Shared host-side setup for the RMSNorm alloc_buffer/SIMT launch examples."""
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 from pathlib import Path
 import sys
-import time
 
 import numpy as np
 
@@ -34,7 +25,8 @@ if __package__ in {None, ""}:
             break
     else:
         raise RuntimeError(
-            "Unable to locate the PTODSL Python package root from rmsnorm_alloc_buffer_simt_launch.py"
+            "Unable to locate the PTODSL Python package root from "
+            "rmsnorm_alloc_buffer_simt_launch_common.py"
         )
 
 
@@ -126,100 +118,3 @@ def assert_guard_unchanged(name: str, guard: np.ndarray) -> None:
         raise AssertionError(
             f"{name} guard overwritten at guard index {first}: got {guard[first]!r}, expected {_SENTINEL!r}"
         )
-
-
-def run_case(case: Case, torch) -> None:
-    x, w = make_inputs(case)
-    y_ref, rstd_ref = rmsnorm_reference(x, w, _EPS)
-
-    x_t = torch.from_numpy(x).to(_DEVICE)
-    w_t = torch.from_numpy(w).to(_DEVICE)
-
-    y_storage = torch.full(
-        (case.tokens * _HIDDEN_SIZE + _Y_GUARD_ELEMS,),
-        float(_SENTINEL),
-        dtype=torch.float32,
-        device=_DEVICE,
-    )
-    rstd_storage = torch.full(
-        (case.tokens + _RSTD_GUARD_ELEMS,),
-        float(_SENTINEL),
-        dtype=torch.float32,
-        device=_DEVICE,
-    )
-
-    stream = npu_stream(torch)
-
-    t0 = time.perf_counter()
-    compiled = compile_kernel(case)
-    compile_s = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    compiled[case.n_cores, stream](
-        x_t.data_ptr(),
-        y_storage.data_ptr(),
-        w_t.data_ptr(),
-        rstd_storage.data_ptr(),
-        float(_EPS),
-    )
-    torch.npu.synchronize()
-    launch_s = time.perf_counter() - t0
-
-    y_out = y_storage[: case.tokens * _HIDDEN_SIZE].cpu().numpy().reshape(case.tokens, _HIDDEN_SIZE)
-    rstd_out = rstd_storage[: case.tokens].cpu().numpy()
-    y_guard = y_storage[case.tokens * _HIDDEN_SIZE :].cpu().numpy()
-    rstd_guard = rstd_storage[case.tokens :].cpu().numpy()
-
-    np.testing.assert_allclose(rstd_out, rstd_ref, rtol=case.rtol, atol=case.rstd_atol)
-    np.testing.assert_allclose(y_out, y_ref, rtol=case.rtol, atol=case.y_atol)
-    assert_guard_unchanged("Y", y_guard)
-    assert_guard_unchanged("RSTD", rstd_guard)
-
-    y_diff = float(np.max(np.abs(y_out - y_ref))) if y_out.size else 0.0
-    rstd_diff = float(np.max(np.abs(rstd_out - rstd_ref))) if rstd_out.size else 0.0
-    print(
-        f"PASS {case.name}  "
-        f"grid={case.n_cores} tokens={case.tokens} "
-        f"compile={compile_s:.3f}s launch={launch_s:.3f}s "
-        f"max|Y|={y_diff:.3e} max|RSTD|={rstd_diff:.3e}"
-    )
-
-
-def emit_mlir(case: Case) -> str:
-    return compile_kernel(case).mlir_text()
-
-
-def main(argv=None) -> int:
-    global _DEVICE
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", default=_DEVICE, help="torch NPU device, default: npu:0")
-    parser.add_argument("--case", choices=[case.name for case in CASES] + [FULL_CASE.name, "all"], default="all")
-    parser.add_argument("--include-full", action="store_true", help="include the 64-core x 64-token full case")
-    parser.add_argument("--emit-mlir", action="store_true", help="print MLIR for the selected case and exit")
-    args = parser.parse_args(argv)
-
-    _DEVICE = args.device
-
-    selected = list(CASES)
-    if args.include_full:
-        selected.append(FULL_CASE)
-    if args.case != "all":
-        all_cases = {case.name: case for case in selected + [FULL_CASE]}
-        selected = [all_cases[args.case]]
-
-    if args.emit_mlir:
-        if len(selected) != 1:
-            parser.error("--emit-mlir expects one concrete --case")
-        print(emit_mlir(selected[0]))
-        return 0
-
-    torch = init_runtime()
-    for case in selected:
-        run_case(case, torch)
-    print("All RMSNorm cases passed.")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

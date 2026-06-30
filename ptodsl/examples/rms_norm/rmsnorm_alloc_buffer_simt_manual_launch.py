@@ -52,7 +52,8 @@ from ptodsl._runtime.native_build import (  # noqa: E402
     _run_ptoas,
 )
 
-from rmsnorm_alloc_buffer_simt_launch import (  # noqa: E402
+import rmsnorm_alloc_buffer_simt_launch_common as launch_common  # noqa: E402
+from rmsnorm_alloc_buffer_simt_launch_common import (  # noqa: E402
     _DEVICE,
     _EPS,
     _HIDDEN_SIZE,
@@ -260,8 +261,6 @@ def run_case_manual(case: Case, torch) -> None:
 
 
 def main(argv=None) -> int:
-    import rmsnorm_alloc_buffer_simt_launch as base_launch
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default=_DEVICE, help="torch NPU device, default: npu:0")
     parser.add_argument(
@@ -272,7 +271,7 @@ def main(argv=None) -> int:
     parser.add_argument("--include-full", action="store_true", help="include the 64-core x 64-token full case")
     args = parser.parse_args(argv)
 
-    base_launch._DEVICE = args.device
+    launch_common._DEVICE = args.device
     globals()["_DEVICE"] = args.device
 
     selected = list(CASES)
