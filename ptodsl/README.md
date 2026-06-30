@@ -152,7 +152,7 @@ Direct run on a real NPU:
 python3 ptodsl/examples/flash_attention_softmax_launch.py
 ```
 
-### `rmsnorm_alloc_buffer_simt.py`
+### `rms_norm/rmsnorm_alloc_buffer_simt.py`
 
 Compile-only RMSNorm example for explicit-mode SIMT kernels. It exercises
 SIMT-local `pto.alloc_buffer(...)`, hand-authored dynamic UB scratch offsets,
@@ -161,13 +161,13 @@ contiguous `scalar.load` / `scalar.store`, `pto.vec`,
 and a runtime token loop that lowers to `scf.for`.
 
 ```bash
-python3 ptodsl/examples/rmsnorm_alloc_buffer_simt.py --variant x128 > /tmp/rmsnorm_x128.mlir
-python3 ptodsl/examples/rmsnorm_alloc_buffer_simt.py --variant x64 > /tmp/rmsnorm_x64.mlir
+python3 ptodsl/examples/rms_norm/rmsnorm_alloc_buffer_simt.py --variant x128 > /tmp/rmsnorm_x128.mlir
+python3 ptodsl/examples/rms_norm/rmsnorm_alloc_buffer_simt.py --variant x64 > /tmp/rmsnorm_x64.mlir
 ```
 
 Expected: MLIR containing `@rmsnorm_4096_alloc_buffer_simt_context_kernel`,
-`scf.for`, `vector<4xf32>` for both `x128` and `x64`, and the
-`__tl_allreduce_sum` helper. The main token loop should also contain dynamic
+`scf.for`, `vector<4xf32>` for both `x128` and `x64`, and inline
+`pto.redux_add` / `pto.syncthreads` allreduce ops. The main token loop should also contain dynamic
 `pto.set_flag_dyn` / `pto.wait_flag_dyn` operations for the ping-pong events.
 
 ### Launch artifacts

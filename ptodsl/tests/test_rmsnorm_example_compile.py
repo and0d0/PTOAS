@@ -52,7 +52,7 @@ def expect_parse_roundtrip_and_verify(text: str, label: str) -> None:
 
 
 def load_rmsnorm_example():
-    example_path = REPO_ROOT / "ptodsl" / "examples" / "rmsnorm_alloc_buffer_simt.py"
+    example_path = REPO_ROOT / "ptodsl" / "examples" / "rms_norm" / "rmsnorm_alloc_buffer_simt.py"
     expect(example_path.is_file(), f"RMSNorm example is missing: {example_path}")
 
     spec = spec_from_file_location("ptodsl_rmsnorm_alloc_buffer_simt", example_path)
