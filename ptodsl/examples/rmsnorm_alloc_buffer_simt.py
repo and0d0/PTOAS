@@ -11,7 +11,8 @@ RMSNorm compile-only PTODSL example for issue 483.
 
 The example exercises the PTODSL surfaces needed by the RMSNorm SimtVF kernel:
 
-- ``pto.alloc_buffer(...)`` for UB scratch and lane-local storage
+- ``pto.alloc_buffer(...)`` for lane-local SIMT fragment storage
+- hand-authored dynamic UB scratch layout via ``pto.castptr`` / ``pto.addptr``
 - contiguous scalar ``load`` / ``store`` vector accesses
 - ``pto.simt_allreduce_sum(...)`` for cross-workitem sum reduction
 - W stays in UB after the GM->UB preload and is read directly by the token SIMT body
@@ -58,8 +59,8 @@ def rmsnorm_simt_token_body(
 ):
     tx = pto.get_tid_x()
     frag_elems: pto.const_expr = rounds * lanes
-    x_frag = pto.alloc_buffer((frag_elems,), pto.f32, scope="local")
-    sum_sq = pto.alloc_buffer((1,), pto.f32, scope="local")
+    x_frag = pto.alloc_buffer((frag_elems,), pto.f32)
+    sum_sq = pto.alloc_buffer((1,), pto.f32)
 
     for r in range(0, rounds):
         lane_offset = r * threads * lanes + tx * lanes
@@ -105,7 +106,7 @@ def rmsnorm_simt_token_body(
         scalar.store(y_vec, y_ub, y_offset)
 
 
-@pto.jit(target="a5", mode="explicit")
+@pto.jit(target="a5", mode="explicit", dyn_shared_memory_buf=82496)
 def rmsnorm_4096_alloc_buffer_simt_context_kernel(
     X: pto.ptr(pto.f32, "gm"),
     Y: pto.ptr(pto.f32, "gm"),
@@ -127,11 +128,12 @@ def rmsnorm_4096_alloc_buffer_simt_context_kernel(
 
     core_id = pto.get_block_idx()
 
-    w_ub = pto.alloc_buffer((hidden_size,), pto.f32, scope="ub")
-    x_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
-    y_ub = pto.alloc_buffer((2, hidden_size), pto.f32, scope="ub")
-    rstd_ub = pto.alloc_buffer((2, 8), pto.f32, scope="ub")
-    reduce_scratch = pto.alloc_buffer((threads,), pto.f32, scope="ub")
+    ub_base = pto.castptr(pto.const(0, dtype=pto.ui64), pto.ptr(pto.f32, "ub"))
+    w_ub = pto.addptr(ub_base, 0)
+    reduce_scratch = pto.addptr(ub_base, hidden_size)
+    x_ub = pto.addptr(ub_base, hidden_size + 128)
+    y_ub = pto.addptr(ub_base, hidden_size + 128 + 2 * hidden_size)
+    rstd_ub = pto.addptr(ub_base, hidden_size + 128 + 4 * hidden_size)
 
     pto.mte_gm_ub(
         W,

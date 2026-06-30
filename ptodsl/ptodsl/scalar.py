@@ -174,7 +174,21 @@ def _normalize_contiguous(contiguous, *, context: str, default: int = 1) -> int:
     return contiguous
 
 
-def _infer_buffer_element_type(buffer_type):
+def _allocated_buffer_target(target):
+    if isinstance(target, AllocatedBufferValue):
+        return target
+    if isinstance(target, AddressOffsetValue) and isinstance(target.base, AllocatedBufferValue):
+        return target.base
+    return None
+
+
+def _is_local_allocated_buffer(allocated_buffer) -> bool:
+    return allocated_buffer is not None
+
+
+def _infer_buffer_element_type(buffer_type, *, allocated_buffer=None):
+    if allocated_buffer is not None:
+        return allocated_buffer.element_type
     try:
         return _pto.PtrType(buffer_type).element_type
     except Exception:

@@ -35,6 +35,7 @@ class KernelModuleSpec:
     entry: bool = True
     mode: str = "auto"
     insert_sync: bool | None = None
+    dyn_shared_memory_buf: int | None = None
     module_style: ModuleStyle = ModuleStyle.NESTED
     source_file: str | None = None
     source_line: int | None = None

@@ -166,7 +166,7 @@ def main() -> None:
         label="x64",
         vector_type="vector<4xf32>",
         helper_name_fragment="__tl_allreduce_sum_f32_t64_s1_o0",
-        ub_size=82240,
+        ub_size=82496,
     )
 
     print("ptodsl_rmsnorm_example_compile: PASS")

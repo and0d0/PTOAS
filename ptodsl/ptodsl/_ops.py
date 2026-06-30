@@ -2319,50 +2319,34 @@ def _tile_transfer_partition(tv, tile, *, offsets=None, sizes=None, context: str
     return partition_view(tv, offsets=normalized_offsets, sizes=normalized_sizes)
 
 
-def alloc_buffer(shape, dtype, *, scope="ub"):
+def alloc_buffer(shape, dtype, **kwargs):
     """
-    Allocate explicit scratch storage and return an address-like surface value.
+    Allocate SIMT lane-local scratch storage and return an address-like value.
 
-    ``scope="ub"`` reserves a byte range in the function-level UB scratch area
-    and returns a typed PTO pointer. ``scope="local"`` emits an LLVM stack
-    allocation for SIMT lane-local fragment storage. Access lowering for local
-    buffers is intentionally left to the scalar/vector load-store surfaces.
+    The allocation emits an LLVM stack allocation in the surrounding SIMT
+    helper. UB scratch uses explicit ``pto.castptr`` / ``pto.addptr`` pointer
+    authoring and ``@pto.jit(dyn_shared_memory_buf=...)`` launch metadata.
     """
+    if kwargs:
+        unexpected = ", ".join(sorted(kwargs))
+        raise TypeError(
+            f"pto.alloc_buffer(...) does not accept keyword argument(s): {unexpected}. "
+            "It only allocates SIMT local buffers; author UB scratch explicitly with "
+            "pto.castptr/pto.addptr and @pto.jit(dyn_shared_memory_buf=...)."
+        )
     _require_explicit_mode("pto.alloc_buffer(...)")
-    normalized_scope = _normalize_alloc_buffer_scope(scope)
     element_type = _resolve(dtype)
     element_count = _static_alloc_buffer_element_count(shape)
     elem_bytes = _element_bytewidth(element_type)
     byte_size = element_count * elem_bytes
 
-    if normalized_scope == "ub":
-        return _alloc_ub_buffer(
-            shape,
-            dtype,
-            element_type,
-            element_count,
-            byte_size,
-        )
-    if normalized_scope == "local":
-        return _alloc_local_buffer(
-            shape,
-            dtype,
-            element_type,
-            element_count,
-            byte_size,
-        )
-    raise AssertionError(f"unhandled alloc_buffer scope {normalized_scope!r}")
-
-
-def _normalize_alloc_buffer_scope(scope):
-    if not isinstance(scope, str):
-        raise TypeError("pto.alloc_buffer(..., scope=...) expects 'ub' or 'local'")
-    normalized = scope.strip().lower()
-    if normalized == "ub":
-        return "ub"
-    if normalized == "local":
-        return "local"
-    raise ValueError("pto.alloc_buffer(..., scope=...) expects one of 'ub' or 'local'")
+    return _alloc_local_buffer(
+        shape,
+        dtype,
+        element_type,
+        element_count,
+        byte_size,
+    )
 
 
 def _static_alloc_buffer_element_count(shape):
@@ -2390,32 +2374,6 @@ def _static_alloc_buffer_element_count(shape):
     return count
 
 
-def _alloc_ub_buffer(shape, dtype, element_type, element_count, byte_size):
-    from ._tracing.active import current_session
-
-    session = current_session()
-    if session is None:
-        raise RuntimeError("pto.alloc_buffer(scope='ub') may only be used while tracing a PTODSL kernel")
-
-    byte_offset = session.allocate_ub_scratch(byte_size, alignment=32)
-    ub_base_i8 = wrap_surface_value(session.get_or_create_ub_base_i8_ptr())
-    if byte_offset:
-        ptr_i8_value = addptr(ub_base_i8, arith.ConstantOp(IndexType.get(), byte_offset).result)
-    else:
-        ptr_i8_value = ub_base_i8
-    ptr_value = castptr(ptr_i8_value, ptr(element_type, "ub"))
-    return AllocatedBufferValue(
-        unwrap_surface_value(ptr_value),
-        scope="ub",
-        shape=_normalize_alloc_buffer_shape_metadata(shape),
-        dtype=dtype,
-        element_type=element_type,
-        element_count=element_count,
-        byte_size=byte_size,
-        byte_offset=byte_offset,
-    )
-
-
 def _alloc_local_buffer(shape, dtype, element_type, element_count, byte_size):
     i32 = IntegerType.get_signless(32)
     count = _materialize_integer_literal(i32, element_count)
@@ -2430,7 +2388,6 @@ def _alloc_local_buffer(shape, dtype, element_type, element_count, byte_size):
     ).results[0]
     return AllocatedBufferValue(
         alloca,
-        scope="local",
         shape=_normalize_alloc_buffer_shape_metadata(shape),
         dtype=dtype,
         element_type=element_type,
