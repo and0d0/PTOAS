@@ -92,7 +92,7 @@ def _runtime_scalar_cpp_type(annotation) -> str:
 def launch_symbol_name(ir_function_name: str) -> str:
     return f"ptodsl_launch_{ir_function_name}"
 
-def generate_launch_cpp(*, ir_function_name: str, kernel_signature, dyn_shared_bytes: int = 0) -> str:
+def generate_launch_cpp(*, ir_function_name: str, kernel_signature) -> str:
     """Return C++ source for one extern-C launch entry point."""
     gm_params = []
     host_params = []
@@ -125,8 +125,7 @@ def generate_launch_cpp(*, ir_function_name: str, kernel_signature, dyn_shared_b
         "#endif\n\n"
         f'extern "C" __global__ AICORE void {ir_function_name}({gm_sig});\n\n'
         f"extern \"C\" void {launch_symbol}({host_sig}) {{\n"
-        f"    constexpr uint32_t dynSharedBytes = {int(dyn_shared_bytes)};\n"
-        f"    {ir_function_name}<<<grid, dynSharedBytes, stream>>>({kernel_call});\n"
+        f"    {ir_function_name}<<<grid, nullptr, stream>>>({kernel_call});\n"
         "}\n"
     )
 
