@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -28,6 +29,13 @@ from .toolchain import (
     resolve_bisheng,
     resolve_ptoas_binary,
 )
+
+
+def _extract_dyn_shared_memory_bytes(mlir_text: str) -> int:
+    match = re.search(r"dyn_shared_memory_buf\s*=\s*(\d+)\s*:\s*i64", mlir_text)
+    if match is None:
+        return 0
+    return int(match.group(1))
 
 
 def _run(cmd: list[str], *, cwd: Path | None = None) -> None:
@@ -175,6 +183,7 @@ def build_native_library(
     launch_cpp_text = generate_launch_cpp(
         ir_function_name=ir_function_name,
         kernel_signature=kernel_signature,
+        dyn_shared_bytes=_extract_dyn_shared_memory_bytes(mlir_text),
     )
     sim_mode = bool(os.environ.get("MSPROF_SIMULATOR_MODE"))
     link_config_text = "\n".join(runtime_library_flags(sim_mode=sim_mode))
