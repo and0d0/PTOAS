@@ -316,10 +316,8 @@ def _dispatch_allreduce_helper(value, *, scratch,
 
     # ── Path 3: cross_warp_reduce ────────────────────────────────────────
     if scale <= 32 and _is_pow2(threads) and _is_pow2(scale):
-        return _invoke_helper(
-            name,
-            lambda hf: _emit_cross_warp_reduce(hf, **args),
-            value, scratch,
+        return _emit_cross_warp_reduce_inline(
+            raw_value, unwrap_surface_value(scratch), **args,
         )
 
     # ── Path 4: ub_reduce fallback (threads > 32, anything else) ─────────
@@ -328,6 +326,127 @@ def _dispatch_allreduce_helper(value, *, scratch,
         lambda hf: _emit_ub_reduce(hf, **args),
         value, scratch,
     )
+
+
+def _emit_cross_warp_reduce_inline(x, scratch, *,
+                                   dtype, threads, scale, thread_offset):
+    """Emit cross-warp all-reduce directly at the current insertion point."""
+    num_warps = threads // 32
+    scalar_t = _mlir_scalar_type(dtype)
+    identity_val = _IDENTITY[dtype]
+
+    i32 = IntegerType.get_signless(32)
+    idx_t = IndexType.get()
+
+    c0_i32 = arith.ConstantOp(i32, 0).result
+    c5_i32 = arith.ConstantOp(i32, 5).result
+    c31_i32 = arith.ConstantOp(i32, 31).result
+    c32_i32 = arith.ConstantOp(i32, 32).result
+    c_scale = arith.ConstantOp(i32, scale).result
+    c_num_warps = arith.ConstantOp(i32, num_warps).result
+    c_offset = arith.ConstantOp(i32, thread_offset).result
+    c_identity = arith.ConstantOp(scalar_t, identity_val).result
+
+    tid_x = _pto.GetTidXOp().result
+    if thread_offset:
+        tx = arith.SubIOp(tid_x, c_offset).result
+        wid = arith.ShRUIOp(tx, c5_i32).result
+        lid = arith.AndIOp(tx, c31_i32).result
+    else:
+        tx = tid_x
+        wid = arith.ShRUIOp(tx, c5_i32).result
+        lid = _pto.GetLaneIdOp().result
+
+    if scale == 1:
+        warp_val = _REDUX_OP(x).result
+    else:
+        warp_val = _emit_butterfly(
+            x, threads=32, scale=scale,
+        )
+
+    is_writer = arith.CmpIOp(arith.CmpIPredicate.ult, lid, c_scale).result
+    write_if = scf.IfOp(is_writer, hasElse=False)
+    with InsertionPoint(write_if.then_block):
+        slot = arith.AddIOp(
+            arith.MulIOp(wid, c_scale).result, lid).result
+        slot_idx = arith.IndexCastOp(idx_t, slot).result
+        _emit_store(scratch, slot_idx, warp_val)
+        scf.YieldOp([])
+
+    _pto.SyncthreadsOp()
+
+    is_leader_warp = arith.CmpIOp(
+        arith.CmpIPredicate.ult, tx, c32_i32).result
+    outer_if = scf.IfOp(is_leader_warp, [scalar_t], hasElse=True)
+
+    with InsertionPoint(outer_if.then_block):
+        if scale == 1:
+            need_load = arith.CmpIOp(
+                arith.CmpIPredicate.ult, lid, c_num_warps).result
+            inner_if = scf.IfOp(need_load, [scalar_t], hasElse=True)
+            with InsertionPoint(inner_if.then_block):
+                lid_idx = arith.IndexCastOp(idx_t, lid).result
+                tmp = _emit_load(scalar_t, scratch, lid_idx)
+                scf.YieldOp([tmp])
+            with InsertionPoint(inner_if.else_block):
+                scf.YieldOp([c_identity])
+            loaded = inner_if.results[0]
+            stage4_result = _REDUX_OP(loaded).result
+        elif scale * num_warps <= 32:
+            total = scale * num_warps
+            c_total = arith.ConstantOp(i32, total).result
+            need_load = arith.CmpIOp(
+                arith.CmpIPredicate.ult, lid, c_total).result
+            inner_if = scf.IfOp(need_load, [scalar_t], hasElse=True)
+            with InsertionPoint(inner_if.then_block):
+                lid_idx = arith.IndexCastOp(idx_t, lid).result
+                tmp = _emit_load(scalar_t, scratch, lid_idx)
+                scf.YieldOp([tmp])
+            with InsertionPoint(inner_if.else_block):
+                scf.YieldOp([c_identity])
+            loaded = inner_if.results[0]
+            stage4_result = _emit_butterfly(
+                loaded,
+                threads=total, scale=scale,
+            )
+        else:
+            is_reducer = arith.CmpIOp(
+                arith.CmpIPredicate.ult, lid, c_scale).result
+            result = c_identity
+            my_slot = arith.RemUIOp(lid, c_scale).result
+            for w in range(num_warps):
+                c_w = arith.ConstantOp(i32, w).result
+                idx_val = arith.AddIOp(
+                    arith.MulIOp(c_w, c_scale).result, my_slot).result
+                slot_idx = arith.IndexCastOp(idx_t, idx_val).result
+                loaded_v = _emit_load(
+                    scalar_t, scratch, slot_idx)
+                result = _apply_sum(result, loaded_v)
+            stage4_result = arith.SelectOp(
+                is_reducer, result, c_identity).result
+
+        scf.YieldOp([stage4_result])
+
+    with InsertionPoint(outer_if.else_block):
+        scf.YieldOp([c_identity])
+
+    partial_reduced = outer_if.results[0]
+
+    is_global_leader = arith.CmpIOp(
+        arith.CmpIPredicate.ult, tx, c_scale).result
+    write_result_if = scf.IfOp(is_global_leader, hasElse=False)
+    with InsertionPoint(write_result_if.then_block):
+        tx_idx = arith.IndexCastOp(idx_t, tx).result
+        _emit_store(scratch, tx_idx, partial_reduced)
+        scf.YieldOp([])
+
+    _pto.SyncthreadsOp()
+    my_slot = arith.RemUIOp(tx, c_scale).result
+    load_idx = arith.IndexCastOp(idx_t, my_slot).result
+    result = _emit_load(scalar_t, scratch, load_idx)
+
+    _pto.SyncthreadsOp()
+    return wrap_surface_value(result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
