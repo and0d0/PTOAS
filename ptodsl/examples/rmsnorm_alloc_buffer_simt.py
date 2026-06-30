@@ -87,7 +87,7 @@ def rmsnorm_simt_token_body(
         thread_offset=0,
     )
 
-    rstd = 1.0 / scalar.sqrt(sum_sq / hidden_size + eps)
+    rstd = 1.0 / pto.sqrt(sum_sq / hidden_size + eps)
 
     scalar.store(rstd, rstd_ub, pingpong * 8)
 
