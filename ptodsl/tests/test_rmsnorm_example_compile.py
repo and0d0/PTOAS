@@ -62,7 +62,7 @@ def load_rmsnorm_example():
     return module
 
 
-def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragment: str, ub_size: int) -> None:
+def check_variant(compiled, *, label: str, vector_type: str, ub_size: int) -> None:
     compiled.verify()
     text = compiled.mlir_text()
     expect_parse_roundtrip_and_verify(text, f"RMSNorm {label} MLIR")
@@ -92,9 +92,12 @@ def check_variant(compiled, *, label: str, vector_type: str, helper_name_fragmen
     expect(text.count("pto.wait_flag_dyn") == 4,
            f"{label}: token loop should lower four dynamic wait_flag ops")
     expect(vector_type in text, f"{label}: missing contiguous vector access type {vector_type}")
-    expect(helper_name_fragment in text, f"{label}: missing allreduce helper")
-    expect("func.call @__tl_allreduce_sum" in text or "call @__tl_allreduce_sum" in text,
-           f"{label}: allreduce should remain helper-call based")
+    expect("__tl_allreduce_sum" not in text,
+           f"{label}: allreduce should be emitted inline, not as a helper call")
+    expect("pto.redux_add" in text, f"{label}: inline allreduce should use redux_add")
+    expect("pto.syncthreads" in text, f"{label}: inline allreduce should synchronize through UB scratch")
+    expect("pto.sqrt" in text, f"{label}: RMSNorm runtime sqrt should lower through the PTO SIMT sqrt op")
+    expect("math.sqrt" not in text, f"{label}: RMSNorm SIMT helper should not leave math.sqrt in the MLIR")
 
     expect(
         text.count("pto.mte_gm_ub") == 2,
@@ -158,14 +161,12 @@ def main() -> None:
         example.build_x128(),
         label="x128",
         vector_type="vector<4xf32>",
-        helper_name_fragment="__tl_allreduce_sum_f32_t128_s1_o0",
         ub_size=82496,
     )
     check_variant(
         example.build_x64(),
         label="x64",
         vector_type="vector<4xf32>",
-        helper_name_fragment="__tl_allreduce_sum_f32_t64_s1_o0",
         ub_size=82496,
     )
 

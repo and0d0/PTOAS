@@ -82,10 +82,10 @@ def rmsnorm_simt_token_body(
 
     sum_sq = pto.simt_allreduce_sum(
         local_sum,
-        reduce_scratch,
         threads=threads,
         scale=1,
         thread_offset=0,
+        scratch=reduce_scratch,
     )
 
     rstd = 1.0 / pto.sqrt(sum_sq / hidden_size + eps)
