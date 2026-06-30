@@ -155,7 +155,8 @@ python3 ptodsl/examples/flash_attention_softmax_launch.py
 ### `rmsnorm_alloc_buffer_simt.py`
 
 Compile-only RMSNorm example for explicit-mode SIMT kernels. It exercises
-`pto.alloc_buffer(...)`, contiguous `scalar.load` / `scalar.store`, `pto.vec`,
+SIMT-local `pto.alloc_buffer(...)`, hand-authored dynamic UB scratch offsets,
+contiguous `scalar.load` / `scalar.store`, `pto.vec`,
 `pto.simt_allreduce_sum(...)`, explicit pipe `set_flag` / `wait_flag` sync,
 and a runtime token loop that lowers to `scf.for`.
 

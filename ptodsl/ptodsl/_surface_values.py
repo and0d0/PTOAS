@@ -352,33 +352,27 @@ class AllocatedBufferValue(AddressValue):
         self,
         value,
         *,
-        scope,
         shape,
         dtype,
         element_type,
         element_count,
         byte_size,
-        byte_offset=None,
     ):
         super().__init__(value)
-        self.scope = scope
         self.shape = tuple(shape)
         self.dtype = dtype
         self.element_type = element_type
         self.element_count = element_count
         self.byte_size = byte_size
-        self.byte_offset = byte_offset
 
     @property
     def surface_metadata(self):
         return {
-            "scope": self.scope,
             "shape": self.shape,
             "dtype": self.dtype,
             "element_type": self.element_type,
             "element_count": self.element_count,
             "byte_size": self.byte_size,
-            "byte_offset": self.byte_offset,
         }
 
 

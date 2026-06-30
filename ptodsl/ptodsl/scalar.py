@@ -202,7 +202,7 @@ def _allocated_buffer_target(target):
 
 
 def _is_local_allocated_buffer(allocated_buffer) -> bool:
-    return allocated_buffer is not None and allocated_buffer.scope == "local"
+    return allocated_buffer is not None
 
 
 def _infer_buffer_element_type(buffer_type, *, allocated_buffer=None):

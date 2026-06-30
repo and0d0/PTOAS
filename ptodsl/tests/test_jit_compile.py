@@ -875,34 +875,14 @@ def simt_helper_lowering_probe(*, TRACE_TOKEN: pto.const_expr = 0):
     simt_tid_probe()
 
 
-@pto.jit(target="a5", mode="explicit")
-def alloc_buffer_ub_probe(
-    A_ptr: pto.ptr(pto.f32, "gm"),
-    O_ptr: pto.ptr(pto.f32, "gm"),
-):
-    scratch = pto.alloc_buffer((64,), pto.f32, scope="ub")
-    pto.mte_gm_ub(A_ptr, scratch, 0, 256, nburst=(1, 0, 0))
-    pto.mte_ub_gm(scratch, O_ptr, 256, nburst=(1, 0, 0))
-
-
 @pto.simt
 def alloc_buffer_local_helper():
-    _ = pto.alloc_buffer((32,), pto.f32, scope="local")
+    _ = pto.alloc_buffer((32,), pto.f32)
 
 
 @pto.jit(target="a5", mode="explicit")
 def alloc_buffer_local_probe():
     alloc_buffer_local_helper()
-
-
-@pto.jit(target="a5", mode="explicit")
-def alloc_buffer_vec_scope_probe():
-    _ = pto.alloc_buffer((1,), pto.f32, scope="vec")
-
-
-@pto.jit(target="a5", mode="explicit")
-def alloc_buffer_private_scope_probe():
-    _ = pto.alloc_buffer((1,), pto.f32, scope="private")
 
 
 @pto.simt
@@ -913,22 +893,23 @@ def rmsnorm_alloc_buffer_frag_helper(
     _ = pto.get_tid_x()
     _ = w_ub
     _ = x_ub
-    _ = pto.alloc_buffer((32,), pto.f32, scope="local")
-    _ = pto.alloc_buffer((1,), pto.f32, scope="local")
+    _ = pto.alloc_buffer((32,), pto.f32)
+    _ = pto.alloc_buffer((1,), pto.f32)
 
 
-@pto.jit(target="a5", mode="explicit")
+@pto.jit(target="a5", mode="explicit", dyn_shared_memory_buf=82496)
 def rmsnorm_alloc_buffer_layout_probe(
     X: pto.ptr(pto.f32, "gm"),
     W: pto.ptr(pto.f32, "gm"),
     Y: pto.ptr(pto.f32, "gm"),
     RSTD: pto.ptr(pto.f32, "gm"),
 ):
-    w_ub = pto.alloc_buffer((4096,), pto.f32, scope="ub")
-    x_ub = pto.alloc_buffer((2, 4096), pto.f32, scope="ub")
-    y_ub = pto.alloc_buffer((2, 4096), pto.f32, scope="ub")
-    rstd_ub = pto.alloc_buffer((2, 8), pto.f32, scope="ub")
-    reduce_scratch = pto.alloc_buffer((128,), pto.f32, scope="ub")
+    ub_base = pto.castptr(pto.const(0, dtype=pto.ui64), pto.ptr(pto.f32, "ub"))
+    w_ub = pto.addptr(ub_base, 0)
+    reduce_scratch = pto.addptr(ub_base, 4096)
+    x_ub = pto.addptr(ub_base, 4224)
+    y_ub = pto.addptr(ub_base, 12416)
+    rstd_ub = pto.addptr(ub_base, 20608)
 
     pto.mte_gm_ub(W, w_ub, 0, 4096 * 4, nburst=(1, 0, 0))
     pto.mte_gm_ub(X, x_ub, 0, 4096 * 4, nburst=(1, 0, 0))
@@ -1649,7 +1630,7 @@ def scalar_contiguous_vector_probe():
 
 @pto.simt
 def scalar_contiguous_local_alloc_buffer_helper():
-    data = pto.alloc_buffer((16,), pto.f32, scope="local")
+    data = pto.alloc_buffer((16,), pto.f32)
     x4 = scalar.load(data, 0, contiguous=4)
     scale4 = pto.vec(pto.f32, 4, init=1.0)
     y4 = x4 * scale4
@@ -4058,26 +4039,11 @@ def main() -> None:
     expect("pto.get_tid_y" in simt_text, "SIMT helper body should contain pto.get_tid_y")
     expect("pto.get_tid_z" in simt_text, "SIMT helper body should contain pto.get_tid_z")
 
-    alloc_buffer_ub_text = alloc_buffer_ub_probe.compile().mlir_text()
-    expect_parse_roundtrip_and_verify(alloc_buffer_ub_text, "alloc_buffer UB specialization")
-    expect(
-        "dyn_shared_memory_buf = 256 : i64" in alloc_buffer_ub_text,
-        "alloc_buffer(scope='ub') should size the function-level UB scratch area",
-    )
-    expect(
-        "pto.castptr %c0_i64" in alloc_buffer_ub_text and "!pto.ptr<i8, ub>" in alloc_buffer_ub_text,
-        "alloc_buffer(scope='ub') should materialize a shared UB byte-base pointer",
-    )
-    expect(
-        "pto.mte_gm_ub" in alloc_buffer_ub_text and "pto.mte_ub_gm" in alloc_buffer_ub_text,
-        "alloc_buffer(scope='ub') result should be accepted by explicit MTE helpers",
-    )
-
     alloc_buffer_local_text = alloc_buffer_local_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(alloc_buffer_local_text, "alloc_buffer local specialization")
     expect(
         "llvm.alloca" in alloc_buffer_local_text and "x f32" in alloc_buffer_local_text,
-        "alloc_buffer(scope='local') should lower to an LLVM stack allocation in the SIMT helper",
+        "alloc_buffer should lower to an LLVM stack allocation in the SIMT helper",
     )
     expect(
         re.search(
@@ -4085,28 +4051,18 @@ def main() -> None:
             alloc_buffer_local_text,
         )
         is not None,
-        "alloc_buffer(scope='local') probe should keep allocation inside the SIMT helper body",
-    )
-    expect_raises(
-        ValueError,
-        lambda: alloc_buffer_vec_scope_probe.compile(),
-        "expects one of 'ub' or 'local'",
-    )
-    expect_raises(
-        ValueError,
-        lambda: alloc_buffer_private_scope_probe.compile(),
-        "expects one of 'ub' or 'local'",
+        "alloc_buffer probe should keep allocation inside the SIMT helper body",
     )
     rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
-    expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm alloc_buffer layout specialization")
+    expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm hand-authored UB layout specialization")
     expect(
         "dyn_shared_memory_buf = 82496 : i64" in rmsnorm_alloc_buffer_text,
-        "RMSNorm alloc_buffer layout should reserve the same UB scratch size as the expanded RMSNorm kernel",
+        "RMSNorm hand-authored UB layout should declare the expanded RMSNorm kernel scratch size",
     )
-    for expected_offset in (16384, 49152, 81920, 81984):
+    for expected_offset in (4096, 4224, 12416, 20608):
         expect(
             f"arith.constant {expected_offset} : index" in rmsnorm_alloc_buffer_text,
-            f"RMSNorm alloc_buffer layout should materialize UB byte offset {expected_offset}",
+            f"RMSNorm hand-authored UB layout should materialize f32 offset {expected_offset}",
         )
     expect(
         rmsnorm_alloc_buffer_text.count("llvm.alloca") == 2,

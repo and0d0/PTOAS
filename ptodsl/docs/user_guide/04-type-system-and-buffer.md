@@ -177,31 +177,27 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 
 ## 4.5 Explicit scratch buffers
 
-Allocate explicit scratch storage for pointer-style load, store, and data movement operations.
+Allocate SIMT lane-local scratch storage for pointer-style load and store
+operations inside a SIMT helper.
 
 ```text
-pto.alloc_buffer(shape, dtype, *, scope="ub")
+pto.alloc_buffer(shape, dtype)
 ```
 
 <!-- ptodsl-doc-pending: {"reason":"illustrative fragment; covered by test_jit_compile alloc_buffer probes"} -->
 ```python
-ub_scratch = pto.alloc_buffer((4096,), pto.f32, scope="ub")
-fragment = pto.alloc_buffer((32,), pto.f32, scope="local")
+scratch = pto.alloc_buffer((32,), pto.f32)
 ```
 
 | Parameter | Description |
 |-----------|-------------|
 | `shape` | Static positive integer shape. Pass an `int`, `tuple[int, ...]`, or `list[int]`. |
 | `dtype` | Element type of the returned buffer, such as `pto.f32` or `pto.i32`. |
-| `scope` | Scratch storage kind. Use `"ub"` or `"local"`. |
 
-| Scope | Meaning | Returned value |
-|-------|---------|----------------|
-| `"ub"` | Function-level Unified Buffer scratch, typically used by data movement operations or shared SIMT scratch. | Typed UB pointer |
-| `"local"` | SIMT-helper local scratch for per-workitem temporary fragments. | Typed local pointer |
-
-A `"ub"` buffer is available throughout the generated kernel body. A `"local"`
-buffer is available only inside the SIMT helper invocation that allocates it.
+The returned pointer names a local allocation in the SIMT helper invocation
+that allocates it. Use this for per-workitem temporary fragments, scalar
+scratch values, or staged values that are accessed through pointer-style loads
+and stores.
 
 ## 4.6 TensorView
 

@@ -153,8 +153,6 @@ class TraceSession:
         }
         self._subkernel_stack: list[SubkernelTraceFrame] = []
         self._carry_loop_stack = []
-        self._ub_base_i8_ptr = None
-        self._ub_scratch_next_byte = 0
         self._inline_subkernel_counter = 0
         self._escaped_inline_values: dict[object, tuple[str, str]] = {}
 
@@ -206,32 +204,6 @@ class TraceSession:
     def bind_entry_block(self, entry_block) -> None:
         """Record the root entry block for the active trace."""
         self.entry_block = entry_block
-
-    @property
-    def ub_scratch_size(self) -> int:
-        return self._ub_scratch_next_byte
-
-    def get_or_create_ub_base_i8_ptr(self):
-        """Return the shared UB byte-base pointer for explicit scratch buffers."""
-        if self._ub_base_i8_ptr is not None:
-            return self._ub_base_i8_ptr
-        from .._ops import castptr
-        from .._types import int8, ptr
-
-        i64 = IntegerType.get_signless(64)
-        zero = arith.ConstantOp(i64, 0).result
-        self._ub_base_i8_ptr = castptr(zero, ptr(int8, "ub")).value
-        return self._ub_base_i8_ptr
-
-    def allocate_ub_scratch(self, byte_size: int, *, alignment: int = 32) -> int:
-        """Reserve one aligned byte range in the function-level UB scratch area."""
-        if not isinstance(byte_size, int) or byte_size <= 0:
-            raise ValueError(f"UB scratch allocation expects a positive byte size, got {byte_size!r}")
-        if not isinstance(alignment, int) or alignment <= 0:
-            raise ValueError(f"UB scratch allocation expects a positive alignment, got {alignment!r}")
-        offset = _align_up(self._ub_scratch_next_byte, alignment)
-        self._ub_scratch_next_byte = offset + byte_size
-        return offset
 
     def validate_surface_value_access(self, value) -> None:
         """Reject inline-subkernel SSA values that escaped their outlined helper body."""
@@ -878,16 +850,13 @@ class TraceSession:
             raise RuntimeError("PTODSL trace-session exited with an open subkernel lowering frame")
         if self._carry_loop_stack:
             raise RuntimeError("PTODSL trace-session exited with an open loop-carry lowering frame")
-        if self._ub_scratch_next_byte:
+        dyn_shared_memory_buf = getattr(self.module_spec, "dyn_shared_memory_buf", None)
+        if dyn_shared_memory_buf:
             i64 = IntegerType.get_signless(64)
             self.entry_function.attributes["dyn_shared_memory_buf"] = IntegerAttr.get(
                 i64,
-                _align_up(self._ub_scratch_next_byte, 32),
+                dyn_shared_memory_buf,
             )
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return ((value + alignment - 1) // alignment) * alignment
 
 
 def _coerce_simt_launch_dims(dims):
