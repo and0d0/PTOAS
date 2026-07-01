@@ -29,7 +29,8 @@ class SourceModuleArtifact:
 
     module: Module
     mlir_text: str
-    resolved_path: Path
+    resolved_path: Path | None
+    source_kind: str
     content_digest: str
 
 
@@ -68,16 +69,18 @@ class SourceModuleLoader:
     def build_module(self):
         """Return ``(module, metadata)`` for ``ModuleArtifact``."""
         artifact = self._load()
-        return artifact.module, {
+        metadata = {
             "mlir_text": artifact.mlir_text,
-            "source_path": str(artifact.resolved_path),
+            "source_kind": artifact.source_kind,
             "source_digest": artifact.content_digest,
         }
+        if artifact.resolved_path is not None:
+            metadata["source_path"] = str(artifact.resolved_path)
+        return artifact.module, metadata
 
     def _load(self) -> SourceModuleArtifact:
         if self._artifact is None:
-            resolved_path = self._resolve_source_path()
-            mlir_text = self._read_source_text(resolved_path)
+            resolved_path, mlir_text, source_kind = self._resolve_source()
             content_digest = hashlib.sha256(mlir_text.encode("utf-8")).hexdigest()
             ctx = make_context()
             with ctx, Location.unknown():
@@ -89,6 +92,7 @@ class SourceModuleLoader:
                 module=module,
                 mlir_text=mlir_text,
                 resolved_path=resolved_path,
+                source_kind=source_kind,
                 content_digest=content_digest,
             )
         return self._artifact
@@ -102,6 +106,20 @@ class SourceModuleLoader:
             return (Path(declaring_file).resolve().parent / raw_path).resolve()
         return raw_path.resolve()
 
+    def _looks_like_inline_source(self, source: str) -> bool:
+        stripped = source.lstrip()
+        if "\n" in source or "\r" in source:
+            return True
+        return stripped.startswith("module {") or stripped.startswith("builtin.module {") or (
+            "module {" in stripped and "func.func @" in stripped
+        )
+
+    def _resolve_source(self) -> tuple[Path | None, str, str]:
+        if self._looks_like_inline_source(self.source):
+            return None, self.source, "inline"
+        resolved_path = self._resolve_source_path()
+        return resolved_path, self._read_source_text(resolved_path), "path"
+
     def _read_source_text(self, resolved_path: Path) -> str:
         try:
             return resolved_path.read_text(encoding="utf-8")
@@ -110,7 +128,7 @@ class SourceModuleLoader:
         except OSError as exc:
             raise jit_source_file_error(self.source, resolved_path, str(exc)) from exc
 
-    def _select_entry(self, module: Module, resolved_path: Path):
+    def _select_entry(self, module: Module, resolved_path: Path | None):
         matches = []
         for op in _walk_ops(module.operation):
             if op.operation.name != "func.func":
@@ -122,32 +140,33 @@ class SourceModuleLoader:
 
         if not matches:
             raise jit_source_entry_error(
-                resolved_path,
+                _source_location_label(self.source, resolved_path),
                 self._module_spec.function_name,
                 "missing non-declaration func.func with this symbol name",
             )
         if len(matches) > 1:
             raise jit_source_entry_error(
-                resolved_path,
+                _source_location_label(self.source, resolved_path),
                 self._module_spec.function_name,
                 f"found {len(matches)} matching non-declaration func.func ops",
             )
         return matches[0]
 
-    def _verify_entry_abi(self, entry, resolved_path: Path) -> None:
+    def _verify_entry_abi(self, entry, resolved_path: Path | None) -> None:
+        source_label = _source_location_label(self.source, resolved_path)
         expected = tuple(str(type_obj) for type_obj in self._kernel_signature.compute_entry_arg_types())
         actual = tuple(str(type_obj) for type_obj in entry.type.inputs)
         results = tuple(str(type_obj) for type_obj in entry.type.results)
 
         if results:
             raise jit_source_abi_error(
-                resolved_path,
+                source_label,
                 self._module_spec.function_name,
                 f"source entry must return no values, got ({', '.join(results)})",
             )
         if len(actual) != len(expected):
             raise jit_source_abi_error(
-                resolved_path,
+                source_label,
                 self._module_spec.function_name,
                 "parameter count differs; "
                 f"expected ({', '.join(expected)}), got ({', '.join(actual)})",
@@ -155,7 +174,7 @@ class SourceModuleLoader:
         for index, (expected_type, actual_type) in enumerate(zip(expected, actual)):
             if expected_type != actual_type:
                 raise jit_source_abi_error(
-                    resolved_path,
+                    source_label,
                     self._module_spec.function_name,
                     f"parameter {index} differs; expected {expected_type}, got {actual_type}",
                 )
@@ -174,6 +193,13 @@ def _walk_ops(root_op):
             for op in block.operations:
                 yield op
                 yield from _walk_ops(op.operation)
+
+
+def _source_location_label(source: str, resolved_path: Path | None):
+    if resolved_path is not None:
+        return resolved_path
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    return f"<inline pto source {digest}>"
 
 
 __all__ = ["SourceModuleLoader"]

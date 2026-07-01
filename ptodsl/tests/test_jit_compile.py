@@ -3272,6 +3272,33 @@ def main() -> None:
             relative_compiled.build_metadata()["source_path"] == str(relative_source_path.resolve()),
             "relative source-backed metadata should expose the resolved source path",
         )
+
+        inline_source_text = (
+            "module {\n"
+            "  func.func @inline_source_entry(%arg0: !pto.ptr<f32, gm>, %arg1: i32) {\n"
+            "    return\n"
+            "  }\n"
+            "}\n"
+        )
+
+        @pto.jit(name="inline_source_entry", target="a5", source=inline_source_text)
+        def inline_source_backed_probe(ptr: pto.ptr(pto.f32, "gm"), rows: pto.i32):
+            raise RuntimeError("source-backed JIT should not trace the Python body")
+
+        inline_compiled = inline_source_backed_probe.compile()
+        expect(
+            inline_compiled.mlir_text() == inline_source_text,
+            "inline source-backed JIT mlir_text() should preserve the authored source text",
+        )
+        inline_metadata = inline_compiled.build_metadata()
+        expect(
+            inline_metadata["source_kind"] == "inline",
+            "inline source-backed JIT metadata should mark the source kind as inline",
+        )
+        expect(
+            "source_path" not in inline_metadata,
+            "inline source-backed JIT metadata should not synthesize a filesystem path",
+        )
     pointer_artifacts_default = artifact_paths(
         pointer_default._py_name,
         pointer_default.ir_function_name,

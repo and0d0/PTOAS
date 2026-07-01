@@ -226,10 +226,10 @@ Calling `.compile()` on an `entry=False` module raises an error.
 
 ### Loading an existing PTO file
 
-Use `source=` when the kernel implementation already exists as a hand-written
-PTO file, but you still want PTODSL's Python compile and launch workflow. The
-decorated Python function declares the host-side ABI; the PTO file provides the
-kernel body.
+Use `source=` when the kernel implementation already exists as hand-written PTO
+IR, but you still want PTODSL's Python compile and launch workflow. The
+decorated Python function declares the host-side ABI; `source=` provides the
+kernel body either as a PTO file path or as PTO text directly.
 
 <!-- ptodsl-doc-test: {"mode":"launch_fragment","fixture":"launch.source_backed_tadd","symbol":"tadd","files":{"kernels/tadd_entry.pto":"module {\n  func.func @tadd_entry(%arg0: !pto.ptr<f32, gm>, %arg1: !pto.ptr<f32, gm>, %arg2: !pto.ptr<f32, gm>, %arg3: i32) {\n    return\n  }\n}\n"}} -->
 ```python
@@ -257,9 +257,9 @@ The Python function body is not traced in this form. Keep it empty, or leave a
 short comment for readers. Positional parameters still matter: PTODSL uses them
 to build the launch wrapper and marshal Python, NumPy, or torch-npu arguments.
 
-The PTO file must contain one non-declaration `func.func` whose symbol matches
+The PTO source must contain one non-declaration `func.func` whose symbol matches
 the JIT entry name. By default, the entry name is the Python function name. Use
-`name=` when the PTO symbol has a different name, or when the file contains more
+`name=` when the PTO symbol has a different name, or when the source contains more
 than one kernel:
 
 ```mlir
@@ -284,9 +284,9 @@ PTODSL checks the selected PTO function before compiling:
 - If the file or entry cannot be found, the diagnostic names the requested entry
   and source path.
 
-`source` is a filesystem path. Relative paths are resolved from the Python file
-that declares the decorated function, so tests can keep the Python wrapper next
-to the PTO file:
+When `source` is a filesystem path, relative paths are resolved from the Python
+file that declares the decorated function, so tests can keep the Python wrapper
+next to the PTO file:
 
 ```text
 case.py
@@ -296,6 +296,21 @@ kernels/tadd_entry.pto
 ```python
 # case.py
 @pto.jit(name="tadd_entry", source="kernels/tadd_entry.pto")
+def tadd(A_ptr: pto.ptr(pto.f32, "gm"), O_ptr: pto.ptr(pto.f32, "gm")):
+    pass
+```
+
+For short tests, `source` can also embed the PTO text directly:
+
+```python
+tadd_source = """module {
+  func.func @tadd_entry(%a: !pto.ptr<f32, gm>, %o: !pto.ptr<f32, gm>) {
+    return
+  }
+}
+"""
+
+@pto.jit(name="tadd_entry", source=tadd_source)
 def tadd(A_ptr: pto.ptr(pto.f32, "gm"), O_ptr: pto.ptr(pto.f32, "gm")):
     pass
 ```

@@ -78,18 +78,34 @@ is_ptodsl_case_dir() {
   [[ -f "$1/kernel.py" ]]
 }
 
-validate_case_dir() {
-  local case_name="$1"
-  local case_dir="$2"
+is_ptodsl_case_file() {
+  local case_path="$1"
+  local base_name
+  base_name="$(basename "${case_path}")"
+  [[ -f "${case_path}" ]] &&
+    [[ "${case_path}" == *.py ]] &&
+    [[ "${base_name}" != "golden.py" ]] &&
+    [[ "${base_name}" != "compare.py" ]] &&
+    [[ "${base_name}" != "kernel.py" ]] &&
+    [[ "${base_name}" != _* ]]
+}
 
-  [[ -f "${case_dir}/kernel.pto" ]] ||
-    die "case ${case_name} must provide kernel.pto"
-  if is_ptodsl_case_dir "${case_dir}"; then
+is_ptodsl_case_path() {
+  is_ptodsl_case_dir "$1" || is_ptodsl_case_file "$1"
+}
+
+validate_case_path() {
+  local case_name="$1"
+  local case_path="$2"
+
+  if is_ptodsl_case_path "${case_path}"; then
     return 0
   fi
+  [[ -d "${case_path}" ]] || die "case ${case_name} is neither a directory nor a PTODSL case file"
   for f in launch.cpp main.cpp golden.py compare.py; do
-    [[ -f "${case_dir}/${f}" ]] || die "case ${case_name} is missing ${f}"
+    [[ -f "${case_path}/${f}" ]] || die "case ${case_name} is missing ${f}"
   done
+  [[ -f "${case_path}/kernel.pto" ]] || die "case ${case_name} must provide kernel.pto"
 }
 
 discover_cases() {
@@ -100,15 +116,15 @@ discover_cases() {
           "${CASE_NAME}" == "${onboard_only_prefix}"* ]]; then
       die "case ${CASE_NAME} is onboard-only and cannot run with DEVICE=SIM"
     fi
-    local requested_dir="${CASES_ROOT}/${CASE_NAME}"
-    [[ -d "${requested_dir}" ]] || die "unknown case: ${CASE_NAME}"
-    validate_case_dir "${CASE_NAME}" "${requested_dir}"
+    local requested_path="${CASES_ROOT}/${CASE_NAME}"
+    [[ -e "${requested_path}" ]] || die "unknown case: ${CASE_NAME}"
+    validate_case_path "${CASE_NAME}" "${requested_path}"
     printf "%s\n" "${CASE_NAME}"
     return 0
   fi
 
   find "${CASES_ROOT}" -mindepth 1 -type d | sort | while read -r dir; do
-    [[ -f "${dir}/kernel.pto" ]] || continue
+    [[ -f "${dir}/kernel.pto" || -f "${dir}/kernel.py" ]] || continue
     local rel="${dir#${CASES_ROOT}/}"
     if ! is_ptodsl_case_dir "${dir}"; then
       local ok=1
@@ -120,6 +136,19 @@ discover_cases() {
       done
       [[ "${ok}" -eq 1 ]] || continue
     fi
+    if [[ "${DEVICE:-SIM}" == "SIM" && "${COMPILE_ONLY:-0}" != "1" &&
+          "${rel}" == "${onboard_only_prefix}"* ]]; then
+      continue
+    fi
+    if [[ -n "${CASE_PREFIX}" && "${rel}" != "${CASE_PREFIX}"* ]]; then
+      continue
+    fi
+    printf "%s\n" "${rel}"
+  done
+
+  find "${CASES_ROOT}" -type f -name '*.py' | sort | while read -r path; do
+    is_ptodsl_case_file "${path}" || continue
+    local rel="${path#${CASES_ROOT}/}"
     if [[ "${DEVICE:-SIM}" == "SIM" && "${COMPILE_ONLY:-0}" != "1" &&
           "${rel}" == "${onboard_only_prefix}"* ]]; then
       continue

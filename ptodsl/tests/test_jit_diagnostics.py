@@ -983,6 +983,26 @@ def main() -> None:
             "@pto.jit(source=...) kernel 'compile_constexpr' does not accept .compile(...) constexpr binding(s) BLOCK",
             "does not template or specialize source text",
         )
+
+        inline_count_mismatch_source = (
+            "module {\n"
+            "  func.func @inline_count_mismatch(%arg0: !pto.ptr<f32, gm>) {\n"
+            "    return\n"
+            "  }\n"
+            "}\n"
+        )
+
+        @pto.jit(target="a5", source=inline_count_mismatch_source)
+        def inline_count_mismatch(ptr: pto.ptr(pto.f32, "gm"), rows: pto.i32):
+            raise RuntimeError("source-backed JIT should not trace the Python body")
+
+        expect_raises(
+            inline_count_mismatch.compile,
+            TypeError,
+            "ABI mismatch for entry 'inline_count_mismatch'",
+            "parameter count differs",
+            "<inline pto source",
+        )
     kernel_module_return_value_probe = define_kernel_module_return_value_probe()
     expect_raises(
         kernel_module_return_value_probe.compile,
