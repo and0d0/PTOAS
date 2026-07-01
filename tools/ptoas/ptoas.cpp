@@ -17,6 +17,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -1738,9 +1739,6 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
 
 static void prepareVPTOForEmission(PassManager &pm) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
-  // Issue #485 workaround: unroll small constant-trip-count scf.for loops
-  // inside pto.simt_entry functions, then constant-fold the induction-variable
-  // dependent scf.if branches so subsequent canonicalize/cse eliminate them.
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOUnrollSIMTForPass());
   kernelModulePM.addPass(createSCCPPass());
@@ -1890,6 +1888,14 @@ int mlir::pto::compilePTOASModule(
   }
   if (enableBufidSync && arch != "a5") {
     llvm::errs() << "Error: --enable-bufid_sync requires --pto-arch=a5.\n";
+    return 1;
+  }
+
+  module->getOperation()->setAttr("pto.target_arch",
+                                  mlir::StringAttr::get(module->getContext(), arch));
+
+  if (failed(mlir::verify(module.get()))) {
+    llvm::errs() << "Error: input module verification failed.\n";
     return 1;
   }
 
@@ -2126,9 +2132,6 @@ int mlir::pto::compilePTOASModule(
   pm.addPass(createCSEPass());
   if (failed(applyConfiguredPassManagerCLOptions(pm, "main PTOAS pipeline")))
     return 1;
-
-  module->getOperation()->setAttr("pto.target_arch",
-                                  mlir::StringAttr::get(module->getContext(), arch));
 
   if (effectiveBackend == PTOBackend::VPTO) {
     if (failed(pm.run(*module))) {
