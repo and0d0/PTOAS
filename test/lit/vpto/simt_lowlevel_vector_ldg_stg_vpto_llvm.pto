@@ -1,0 +1,76 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
+
+// Test lowering of pto.ldg / pto.stg with vector types:
+//   vector<2xf16>  → 32-bit → s32/b32 intrinsics + bitcast
+//   vector<2xbf16> → 32-bit → s32/b32 intrinsics + bitcast
+//   vector<2xf32>  → 64-bit → s64/b64 intrinsics + bitcast
+//   static offset (constant index) and dynamic offset (runtime index)
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @vector_ldg_stg_kernel(
+    %gm_v2f16: !pto.ptr<vector<2xf16>, gm>,
+    %gm_v2bf16: !pto.ptr<vector<2xbf16>, gm>,
+    %gm_v2f32: !pto.ptr<vector<2xf32>, gm>,
+    %dyn_offset: i32
+  ) attributes {pto.aicore} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %dyn_idx = arith.index_castui %dyn_offset : i32 to index
+
+    // ── vector<2xf16> static offset ──
+    %v2f16_load = pto.ldg %gm_v2f16[%c0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xf16>, gm> -> vector<2xf16>
+    pto.stg %v2f16_load, %gm_v2f16[%c1] l1cache(uncache) l2cache(nmfv) : !pto.ptr<vector<2xf16>, gm>, vector<2xf16>
+
+    // ── vector<2xbf16> static offset ──
+    %v2bf16_load = pto.ldg %gm_v2bf16[%c0] l1cache(uncache) l2cache(nmpref) : !pto.ptr<vector<2xbf16>, gm> -> vector<2xbf16>
+    pto.stg %v2bf16_load, %gm_v2bf16[%c0] l1cache(cache) l2cache(nmlv) : !pto.ptr<vector<2xbf16>, gm>, vector<2xbf16>
+
+    // ── vector<2xf32> static offset ──
+    %v2f32_load = pto.ldg %gm_v2f32[%c1] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xf32>, gm> -> vector<2xf32>
+    pto.stg %v2f32_load, %gm_v2f32[%c0] l1cache(uncache) l2cache(wtsred) : !pto.ptr<vector<2xf32>, gm>, vector<2xf32>
+
+    // ── vector<2xf32> dynamic offset ──
+    %v2f32_dyn = pto.ldg %gm_v2f32[%dyn_idx] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xf32>, gm> -> vector<2xf32>
+    pto.stg %v2f32_dyn, %gm_v2f32[%dyn_idx] l1cache(uncache) l2cache(nmlv) : !pto.ptr<vector<2xf32>, gm>, vector<2xf32>
+
+    // ── default cache policy (no explicit l1cache/l2cache) ──
+    %v_default = pto.ldg %gm_v2f16[%c0] : !pto.ptr<vector<2xf16>, gm> -> vector<2xf16>
+    pto.stg %v_default, %gm_v2f16[%c0] : !pto.ptr<vector<2xf16>, gm>, vector<2xf16>
+
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @vector_ldg_stg_kernel_mix_aiv
+
+// ── vector<2xf16> → 32-bit intrinsics ──
+// CHECK-DAG: llvm.call @llvm.hivm.ldg.cache.s32({{%.*}}, {{%.*}}) : (!llvm.ptr<1>, i32) -> i32
+// CHECK-DAG: llvm.call @llvm.hivm.stg.uncache.b32({{%.*}}, {{%.*}}, {{%.*}}) : (!llvm.ptr<1>, i32, i32) -> ()
+
+// ── vector<2xbf16> → 32-bit intrinsics ──
+// CHECK-DAG: llvm.call @llvm.hivm.ldg.uncache.s32({{%.*}}, {{%.*}}) : (!llvm.ptr<1>, i32) -> i32
+// CHECK-DAG: llvm.call @llvm.hivm.stg.cache.b32({{%.*}}, {{%.*}}, {{%.*}}) : (!llvm.ptr<1>, i32, i32) -> ()
+
+// ── vector<2xf32> → 64-bit intrinsics ──
+// CHECK-DAG: llvm.call @llvm.hivm.ldg.cache.s64({{%.*}}, {{%.*}}) : (!llvm.ptr<1>, i32) -> i64
+// CHECK-DAG: llvm.call @llvm.hivm.stg.uncache.b64({{%.*}}, {{%.*}}, {{%.*}}) : (!llvm.ptr<1>, i64, i32) -> ()
+
+// ── bitcast: i32/i64 → vector (load result conversion) ──
+// CHECK-DAG: llvm.bitcast {{%.*}} : i32 to vector<2xf16>
+// CHECK-DAG: llvm.bitcast {{%.*}} : i32 to vector<2xbf16>
+// CHECK-DAG: llvm.bitcast {{%.*}} : i64 to vector<2xf32>
+
+// ── dynamic offset: runtime i32 zero-extended to i64 for GEP ──
+// CHECK-DAG: llvm.zext {{%.*}} : i32 to i64
+// CHECK-DAG: llvm.getelementptr {{%.*}}[{{%.*}}] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, vector<2xf32>
+
+// ── L2 cache constants ──
+// CHECK-DAG: llvm.mlir.constant(0 : i32)
