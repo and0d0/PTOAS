@@ -18,6 +18,26 @@ module attributes {pto.target_arch = "a2a3", pto.kernel_kind = #pto.kernel_kind<
     return
   }
 
+  func.func @live_dst_same_addr_keeps_tmov() {
+    %c0_i64 = arith.constant 0 : i64
+    %one = arith.constant 1.000000e+00 : f32
+    %src = pto.alloc_tile addr = %c0_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst = pto.alloc_tile addr = %c0_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+
+    pto.tadds ins(%src, %one
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32)
+      outs(%src : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    pto.tmov ins(%src
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    pto.tadds ins(%dst, %one
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32)
+      outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+
   func.func @non_identity_tmov_different_addr() {
     %c0_i64 = arith.constant 0 : i64
     %c64_i64 = arith.constant 64 : i64
@@ -83,6 +103,9 @@ module attributes {pto.target_arch = "a2a3", pto.kernel_kind = #pto.kernel_kind<
 // CPP-NOT: pipe_barrier(PIPE_V)
 // CPP-NOT: TMOV(
 // CPP: return;
+
+// CPP-LABEL: AICORE void live_dst_same_addr_keeps_tmov
+// CPP: TMOV(
 
 // CPP-LABEL: AICORE void non_identity_tmov_different_addr
 // CPP: TMOV(

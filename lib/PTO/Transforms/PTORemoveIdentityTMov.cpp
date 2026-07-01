@@ -149,6 +149,21 @@ static bool sameAddressToken(const AddressToken &lhs, const AddressToken &rhs) {
   return false;
 }
 
+static bool hasOnlyCurrentOpUses(Value value, Operation *currentOp) {
+  return llvm::all_of(value.getUses(), [currentOp](OpOperand &use) {
+    return use.getOwner() == currentOp;
+  });
+}
+
+static bool hasNoResultUses(Operation *op) {
+  return llvm::all_of(op->getResults(),
+                      [](OpResult result) { return result.use_empty(); });
+}
+
+static bool isDeadDstTMov(TMovOp op) {
+  return hasOnlyCurrentOpUses(op.getDst(), op) && hasNoResultUses(op);
+}
+
 static const BaseMemInfo *
 getSingleMemInfo(const Buffer2MemInfoMap &buffer2MemInfoMap, Value value) {
   auto it = buffer2MemInfoMap.find(value);
@@ -290,7 +305,7 @@ static bool isIdentityTMovByExplicitAddress(TMovOp op) {
   std::optional<AddressToken> dst = getExplicitAddressToken(op.getDst());
   if (!src || !dst)
     return false;
-  return sameAddressToken(*src, *dst);
+  return sameAddressToken(*src, *dst) && isDeadDstTMov(op);
 }
 
 static bool
@@ -311,7 +326,8 @@ isIdentityTMovByMemInfo(TMovOp op, const Buffer2MemInfoMap &buffer2MemInfoMap) {
 
   auto srcRootAddr = tryGetConcreteRootAddress(srcInfo);
   auto dstRootAddr = tryGetConcreteRootAddress(dstInfo);
-  return srcRootAddr && dstRootAddr && *srcRootAddr == *dstRootAddr;
+  return srcRootAddr && dstRootAddr && *srcRootAddr == *dstRootAddr &&
+         isDeadDstTMov(op);
 }
 
 struct PTORemoveIdentityTMovPass
