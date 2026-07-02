@@ -33,9 +33,13 @@ Offset / alignment contract
    This guarantees the stride is applied in f32 units, not vector units.
 
 3. The effective address for ``vector<2xf32>`` must satisfy 8-byte
-   alignment.  The caller is responsible for ensuring the stride is a
-   multiple of 2 f32 elements.  The op itself does not carry an alignment
-   operand (first version; enforced by upstream ``T.assume``).
+   alignment.  The caller is responsible for ensuring:
+
+   - ``base address % 8 == 0`` (the GM buffer starts on an 8-byte boundary)
+   - ``scalar_stride % 2 == 0`` (each access falls on a vector boundary)
+
+   The op itself does not carry an alignment operand (first version;
+   enforced by upstream ``T.assume``).
 
 4. Dynamic ``i64`` scalar offsets must be explicitly cast to ``index`` via
    ``scalar.index_cast(value)`` before passing to ``pto.addptr``.
@@ -74,7 +78,8 @@ def int64_stride_vectorize_load_kernel(
 
     if tid < nelem:
         value = pto.ldg(vector_addr, 0, l1cache="cache", l2cache="nmfv")
-        pto.stg(value, dst, 0, l1cache="uncache", l2cache="wtsred")
+        dst_idx = scalar.index_cast(tid)
+        pto.stg(value, dst, dst_idx, l1cache="uncache", l2cache="wtsred")
 
 
 @pto.jit(target="a5")
