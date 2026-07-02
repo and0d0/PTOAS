@@ -876,7 +876,24 @@ static bool isReservedCppIdentifier(llvm::StringRef name) {
       "union",           "unsigned",       "using",          "virtual",
       "void",            "volatile",       "wchar_t",        "while",
       "xor",             "xor_eq"};
-  return kReserved.count(name.str()) != 0;
+  if (kReserved.count(name.str()) != 0)
+    return true;
+
+  // Name-hint rewriting runs after C++ emission and only sees one function
+  // segment at a time. Some tokens are still unsafe even if they do not
+  // appear textually in that segment because the generated translation unit or
+  // included headers make them visible as builtin/runtime type spellings.
+  // Without reserving them here, a textual hint such as `loc("size_t")`
+  // could produce `int32_t size_t = ...;`, and any later `size_t` type use in
+  // the same function would stop parsing as a declaration.
+  return llvm::StringSwitch<bool>(name)
+      .Case("AICORE", true)
+      .Cases("size_t", "ssize_t", "ptrdiff_t", "max_align_t", true)
+      .Cases("intptr_t", "uintptr_t", "nullptr_t", true)
+      .Cases("int8_t", "uint8_t", "int16_t", "uint16_t", true)
+      .Cases("int32_t", "uint32_t", "int64_t", "uint64_t", true)
+      .Cases("half", "bfloat16_t", true)
+      .Default(false);
 }
 
 static std::string makeUniqueCppIdentifier(llvm::StringRef baseName,
