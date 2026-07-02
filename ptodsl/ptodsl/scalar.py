@@ -24,7 +24,14 @@ from ._runtime_scalar_ops import (
     emit_runtime_max,
     emit_runtime_min,
 )
-from ._surface_values import VecValue, resolve_address_access, unwrap_surface_value, wrap_surface_value
+from ._surface_values import (
+    AddressOffsetValue,
+    AllocatedBufferValue,
+    VecValue,
+    resolve_address_access,
+    unwrap_surface_value,
+    wrap_surface_value,
+)
 from ._types import _resolve
 
 from mlir.dialects import arith
@@ -124,10 +131,14 @@ def abs(value):
 def load(ptr_or_ref, offset=None, *, contiguous=None):
     """Load one scalar element or a contiguous builtin vector from a PTODSL address view."""
     width = _normalize_contiguous(contiguous, context="scalar.load(...)")
+    allocated_buffer = _allocated_buffer_target(ptr_or_ref)
     buffer_value, index_value = resolve_address_access(ptr_or_ref, offset)
-    result_type = _infer_buffer_element_type(buffer_value.type)
+    result_type = _infer_buffer_element_type(buffer_value.type, allocated_buffer=allocated_buffer)
     if width > 1:
         return VecValue(_emit_contiguous_load(buffer_value, index_value, result_type, width))
+    if allocated_buffer is not None:
+        ptr_value = _emit_llvm_byte_pointer(buffer_value, index_value, result_type)
+        return wrap_surface_value(llvm.LoadOp(result_type, ptr_value).res)
     return wrap_surface_value(Operation.create(
         "pto.load",
         results=[result_type],
@@ -137,8 +148,9 @@ def load(ptr_or_ref, offset=None, *, contiguous=None):
 
 def store(value, ptr_or_ref, offset=None, *, contiguous=None):
     """Store one scalar element or a builtin vector to a PTODSL address view."""
+    allocated_buffer = _allocated_buffer_target(ptr_or_ref)
     buffer_value, index_value = resolve_address_access(ptr_or_ref, offset)
-    elem_type = _infer_buffer_element_type(buffer_value.type)
+    elem_type = _infer_buffer_element_type(buffer_value.type, allocated_buffer=allocated_buffer)
     raw_value = unwrap_surface_value(value)
     if hasattr(raw_value, "type") and VectorType.isinstance(raw_value.type):
         vec_value = value if isinstance(value, VecValue) else VecValue(raw_value)
@@ -158,9 +170,14 @@ def store(value, ptr_or_ref, offset=None, *, contiguous=None):
     width = _normalize_contiguous(contiguous, context="scalar.store(...)")
     if width > 1:
         raise TypeError("scalar.store(scalar, ..., contiguous=N) is not supported; pass a vector value")
+    coerced_value = coerce_scalar_to_type(value, elem_type, context="scalar.store(...)")
+    if allocated_buffer is not None:
+        ptr_value = _emit_llvm_byte_pointer(buffer_value, index_value, elem_type)
+        llvm.StoreOp(coerced_value, ptr_value)
+        return
     Operation.create(
         "pto.store",
-        operands=[buffer_value, index_value, coerce_scalar_to_type(value, elem_type, context="scalar.store(...)")],
+        operands=[buffer_value, index_value, coerced_value],
     )
 
 
@@ -208,8 +225,18 @@ def _emit_contiguous_store(vector_value, buffer_value, index_value):
 
 
 def _emit_llvm_byte_pointer(buffer_value, index_value, elem_type):
-    pto_ptr_type = _as_pto_ptr_type(buffer_value.type)
     byte_offset = _emit_byte_offset(index_value, elem_type)
+    llvm_ptr_type = _as_llvm_ptr_type(buffer_value.type)
+    if llvm_ptr_type is not None:
+        return llvm.GEPOp(
+            llvm_ptr_type,
+            buffer_value,
+            [byte_offset],
+            [-2147483648],
+            IntegerType.get_signless(8),
+        ).res
+
+    pto_ptr_type = _as_pto_ptr_type(buffer_value.type)
     i64 = IntegerType.get_signless(64)
     addr_as_i64 = _pto.CastPtrOp(i64, buffer_value).result
     llvm_ptr_type = llvm.PointerType.get(_pto_ptr_llvm_address_space(pto_ptr_type))
@@ -221,6 +248,13 @@ def _emit_llvm_byte_pointer(buffer_value, index_value, elem_type):
         [-2147483648],
         IntegerType.get_signless(8),
     ).res
+
+
+def _as_llvm_ptr_type(type_obj):
+    try:
+        return llvm.PointerType(type_obj)
+    except Exception:
+        return None
 
 
 def _emit_byte_offset(index_value, elem_type):

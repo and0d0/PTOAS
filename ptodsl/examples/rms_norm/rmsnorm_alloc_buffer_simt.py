@@ -52,10 +52,10 @@ def rmsnorm_simt_token_body(
     eps: pto.f32,
     pingpong: pto.i32,
     *,
-    threads: pto.constexpr = 128,
-    rounds: pto.constexpr = 16,
-    lanes: pto.constexpr = 2,
-    hidden_size: pto.constexpr = 4096,
+    threads: pto.const_expr = 128,
+    rounds: pto.const_expr = 16,
+    lanes: pto.const_expr = 2,
+    hidden_size: pto.const_expr = 4096,
 ):
     tx = pto.get_tid_x()
     frag_elems: pto.const_expr = rounds * lanes
