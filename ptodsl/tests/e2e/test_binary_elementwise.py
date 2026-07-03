@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from .common import BINARY_OPS, INT_OPS, make_binary_kernel, launch_and_check, launch_and_check_int
+from .common import BINARY_OPS, INT_OPS, SHIFT_OPS, make_binary_kernel, make_shift_kernel, launch_and_check, launch_and_check_int, launch_and_check_shift
 
 
 # ---------------------------------------------------------------------------
@@ -183,4 +183,41 @@ def test_binary_int16(case, torch, target_arch, backend):
         torch=torch,
     )
     print(f"  PASS {op_name} int16 {rows}x{cols} ({desc}) "
+          f"compile={compile_s:.3f}s launch={launch_s:.3f}s")
+
+
+# ---------------------------------------------------------------------------
+# i16 scalar shift tests (tshls/tshrs)
+# ---------------------------------------------------------------------------
+
+SHIFT_VALS = [1, 3, 7]
+
+SHIFT_PARAMS = [
+    pytest.param(
+        (op_name, ref_fn, rows, cols, sv, desc),
+        id=f"{op_name}-int16-{rows}x{cols}-s{sv}-{desc.replace(' ', '-')}",
+    )
+    for op_name, (_, ref_fn) in SHIFT_OPS.items()
+    for rows, cols, desc in INT_SHAPES
+    for sv in SHIFT_VALS
+]
+
+
+@pytest.mark.require_npu
+@pytest.mark.parametrize("case", SHIFT_PARAMS)
+def test_shift_int16(case, torch, target_arch, backend):
+    op_name, ref_fn, rows, cols, shift_val, desc = case
+
+    kernel = make_shift_kernel(
+        op_name, rows, cols, shift_val=shift_val,
+        target=target_arch, backend=backend,
+    )
+    compile_s, launch_s = launch_and_check_shift(
+        kernel_handle=kernel,
+        ref_fn=ref_fn,
+        shape=(rows, cols),
+        shift_val=shift_val,
+        torch=torch,
+    )
+    print(f"  PASS {op_name} int16 {rows}x{cols} <<{shift_val} ({desc}) "
           f"compile={compile_s:.3f}s launch={launch_s:.3f}s")

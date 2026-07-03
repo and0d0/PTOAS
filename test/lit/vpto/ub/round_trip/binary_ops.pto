@@ -57,20 +57,22 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
   }
 
   // CHECK-LABEL: func.func @rt_vshl
-  func.func @rt_vshl(%dst: !pto.ptr<i16, ub>, %src0: !pto.ptr<i16, ub>, %src1: !pto.ptr<i16, ub>) attributes {pto.aicore} {
+  func.func @rt_vshl(%dst: !pto.ptr<i16, ub>, %src: !pto.ptr<i16, ub>) attributes {pto.aicore} {
     %c1 = arith.constant 1 : i64
     %c0 = arith.constant 0 : i64
-    // CHECK: pto.ub.vshl %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
-    pto.ub.vshl %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    %shift = arith.constant 3 : i64
+    // CHECK: pto.ub.vshl %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
+    pto.ub.vshl %dst, %src, %shift, %c1, %c1, %c1, %c1, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
     return
   }
 
   // CHECK-LABEL: func.func @rt_vshr
-  func.func @rt_vshr(%dst: !pto.ptr<i16, ub>, %src0: !pto.ptr<i16, ub>, %src1: !pto.ptr<i16, ub>) attributes {pto.aicore} {
+  func.func @rt_vshr(%dst: !pto.ptr<i16, ub>, %src: !pto.ptr<i16, ub>) attributes {pto.aicore} {
     %c1 = arith.constant 1 : i64
     %c0 = arith.constant 0 : i64
-    // CHECK: pto.ub.vshr %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
-    pto.ub.vshr %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    %shift = arith.constant 2 : i64
+    // CHECK: pto.ub.vshr %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
+    pto.ub.vshr %dst, %src, %shift, %c1, %c1, %c1, %c1, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
     return
   }
 }

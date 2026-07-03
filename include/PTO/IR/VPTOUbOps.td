@@ -66,8 +66,50 @@ def PTO_UBVminOp : PTO_UBufBinaryOp<"ub.vmin">;
 def PTO_UBVandOp : PTO_UBufBinaryOp<"ub.vand">;
 def PTO_UBVorOp  : PTO_UBufBinaryOp<"ub.vor">;
 def PTO_UBVxorOp : PTO_UBufBinaryOp<"ub.vxor">;
-def PTO_UBVshlOp : PTO_UBufBinaryOp<"ub.vshl">;
-def PTO_UBVshrOp : PTO_UBufBinaryOp<"ub.vshr">;
+
+//===----------------------------------------------------------------------===//
+// PTO_UBufShiftOp — unary shift with scalar distance
+//===----------------------------------------------------------------------===//
+
+class PTO_UBufShiftOp<string mnemonic, list<Trait> traits = []>
+    : PTO_Op<mnemonic,
+      !listconcat(traits, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>])> {
+  let summary = "Raw ubuf shift operation mapping to llvm.hivm.VSHL/VSHR.";
+  let description = [{
+    Lowers to `llvm.hivm.VSHL.u16` / `llvm.hivm.VSHR.u16` for the a2a3
+    (dav-c220-vec) backend. Operates directly on ubuf pointers.
+
+    Unlike binary ops, shift takes a single source pointer and a scalar
+    `shiftDist` (i64) — the hardware applies a uniform shift to all elements.
+  }];
+
+  let arguments = (ins
+    PTO_BufferType:$dst,
+    PTO_BufferType:$src,
+    I64:$shiftDist,
+    I64:$repeat,
+    I64:$dstBlockStride,
+    I64:$srcBlockStride,
+    I64:$dstRepeatStride,
+    I64:$srcRepeatStride
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $dst `,` $src `,` $shiftDist `,`
+    $repeat `,` $dstBlockStride `,` $srcBlockStride `,`
+    $dstRepeatStride `,` $srcRepeatStride
+    attr-dict `:` type($dst) `,` type($src) `,` type($shiftDist) `,`
+    type($repeat) `,` type($dstBlockStride) `,` type($srcBlockStride) `,`
+    type($dstRepeatStride) `,` type($srcRepeatStride)
+  }];
+}
+
+def PTO_UBVshlOp : PTO_UBufShiftOp<"ub.vshl">;
+def PTO_UBVshrOp : PTO_UBufShiftOp<"ub.vshr">;
 
 def PTO_UBSetMaskOp : PTO_Op<"ub.set_mask", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>

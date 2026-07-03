@@ -33,6 +33,11 @@ INT_OPS = {
     "bit_or":  (pto.tile.bit_or,  lambda x, y: x | y),
 }
 
+SHIFT_OPS = {
+    "bit_shls": (pto.tile.bit_shls, lambda x, n: np.left_shift(x, n)),
+    "bit_shrs": (pto.tile.bit_shrs, lambda x, n: np.right_shift(x, n)),
+}
+
 
 def _npu_stream(torch):
     return torch.npu.current_stream()._as_parameter_  # noqa: SLF001
@@ -70,6 +75,35 @@ def launch_and_check_int(
 
     t0 = time.perf_counter()
     compiled[1, stream](x.data_ptr(), y.data_ptr(), z.data_ptr())
+    torch.npu.synchronize()
+    launch_s = time.perf_counter() - t0
+
+    actual = z.cpu().numpy()
+    np.testing.assert_array_equal(actual, ref)
+    return compile_s, launch_s
+
+
+def launch_and_check_shift(
+    *,
+    kernel_handle,
+    ref_fn: Callable,
+    shape: tuple[int, int],
+    shift_val: int,
+    torch,
+    seed: int = 42,
+):
+    """Compile, launch, and numerical-check one i16 scalar-shift kernel."""
+    x = make_input_int(shape, torch, seed=seed)
+    z = torch.empty(shape, dtype=torch.int16, device="npu:0")
+    ref = ref_fn(x.cpu().numpy(), shift_val).astype(np.int16)
+    stream = _npu_stream(torch)
+
+    t0 = time.perf_counter()
+    compiled = kernel_handle.compile()
+    compile_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    compiled[1, stream](x.data_ptr(), z.data_ptr())
     torch.npu.synchronize()
     launch_s = time.perf_counter() - t0
 
@@ -126,6 +160,56 @@ def make_binary_kernel(
         pto.tile.load(a_part, a_tile)
         pto.tile.load(b_part, b_tile)
         tile_op_fn(a_tile, b_tile, c_tile)
+        pto.tile.store(c_tile, c_part)
+
+    kernel_body.__name__ = fn_name
+    return pto.jit(
+        name=fn_name,
+        kernel_kind=kernel_kind,
+        target=target,
+        backend=backend,
+    )(kernel_body)
+
+
+def make_shift_kernel(
+    op_name: str,
+    rows: int,
+    cols: int,
+    shift_val: int = 3,
+    target: str = "a3",
+    backend: str = "vpto",
+    kernel_kind: str = "vector",
+):
+    """Return a ``@pto.jit`` KernelHandle for a scalar shift op (tshls/tshrs)."""
+    tile_op_fn = SHIFT_OPS[op_name][0]
+    pto_dtype = pto.int16
+    fn_name = f"shift_{op_name}_int16_{rows}x{cols}_s{shift_val}"
+
+    def kernel_body(
+        A_ptr: pto.ptr(pto_dtype, "gm"),
+        C_ptr: pto.ptr(pto_dtype, "gm"),
+    ) -> None:
+        c0 = pto.const(0)
+        c1 = pto.const(1)
+        c_rows = pto.const(rows)
+        c_cols = pto.const(cols)
+        c_elems = pto.const(rows * cols)
+
+        shape = [c1, c1, c1, c_rows, c_cols]
+        strides = [c_elems, c_elems, c_elems, c_cols, c1]
+        off = [c0, c0, c0, c0, c0]
+
+        a_view = pto.make_tensor_view(A_ptr, shape=shape, strides=strides)
+        c_view = pto.make_tensor_view(C_ptr, shape=shape, strides=strides)
+
+        a_part = pto.partition_view(a_view, offsets=off, sizes=shape)
+        c_part = pto.partition_view(c_view, offsets=off, sizes=shape)
+
+        a_tile = pto.alloc_tile(shape=[rows, cols], dtype=pto_dtype)
+        c_tile = pto.alloc_tile(shape=[rows, cols], dtype=pto_dtype)
+
+        pto.tile.load(a_part, a_tile)
+        tile_op_fn(a_tile, shift_val, c_tile)
         pto.tile.store(c_tile, c_part)
 
     kernel_body.__name__ = fn_name

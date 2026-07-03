@@ -432,42 +432,40 @@ struct LowerPTOToUBufOpsPass
       }
     }
 
-    // ---- tshl → pto.ub.vshl ----
+    // ---- tshls → pto.ub.vshl (scalar shift) ----
     {
-      SmallVector<pto::TShlOp> ops;
-      func.walk([&](pto::TShlOp op) { ops.push_back(op); });
+      SmallVector<pto::TShlSOp> ops;
+      func.walk([&](pto::TShlSOp op) { ops.push_back(op); });
       for (auto op : ops) {
-        if (!canLower(op, tileShapes))
-          continue;
         auto info = extractTileShapeInfo(op, tileShapes);
         if (!info)
           continue;
-        auto [dstPtr, src0Ptr, src1Ptr, ptrType] = lowerBinaryOpCommon(
-            builder, ctx, op, op.getDst(), op.getSrc0(), op.getSrc1(), tileShapes);
+        auto [dstPtr, srcPtr, ptrType] =
+            lowerShiftOpCommon(builder, ctx, op, op.getDst(), op.getSrc(),
+                               tileShapes);
         if (!dstPtr)
           continue;
-        dispatch<pto::UBVshlOp>(op.getLoc(), builder, dstPtr, src0Ptr, src1Ptr,
-                                ptrType, *info);
+        dispatchShift<pto::UBVshlOp>(op.getLoc(), builder, dstPtr, srcPtr,
+                                     op.getScalar(), ptrType, *info);
         op.erase();
       }
     }
 
-    // ---- tshr → pto.ub.vshr ----
+    // ---- tshrs → pto.ub.vshr (scalar shift) ----
     {
-      SmallVector<pto::TShrOp> ops;
-      func.walk([&](pto::TShrOp op) { ops.push_back(op); });
+      SmallVector<pto::TShrSOp> ops;
+      func.walk([&](pto::TShrSOp op) { ops.push_back(op); });
       for (auto op : ops) {
-        if (!canLower(op, tileShapes))
-          continue;
         auto info = extractTileShapeInfo(op, tileShapes);
         if (!info)
           continue;
-        auto [dstPtr, src0Ptr, src1Ptr, ptrType] = lowerBinaryOpCommon(
-            builder, ctx, op, op.getDst(), op.getSrc0(), op.getSrc1(), tileShapes);
+        auto [dstPtr, srcPtr, ptrType] =
+            lowerShiftOpCommon(builder, ctx, op, op.getDst(), op.getSrc(),
+                               tileShapes);
         if (!dstPtr)
           continue;
-        dispatch<pto::UBVshrOp>(op.getLoc(), builder, dstPtr, src0Ptr, src1Ptr,
-                                ptrType, *info);
+        dispatchShift<pto::UBVshrOp>(op.getLoc(), builder, dstPtr, srcPtr,
+                                     op.getScalar(), ptrType, *info);
         op.erase();
       }
     }
@@ -567,6 +565,76 @@ private:
     Value src0Ptr = emitAddr(src0Val);
     Value src1Ptr = emitAddr(src1Val);
     return {dstPtr, src0Ptr, src1Ptr, ptrType};
+  }
+
+  std::tuple<Value, Value, pto::PtrType>
+  lowerShiftOpCommon(OpBuilder &builder, MLIRContext *ctx, Operation *op,
+                     Value dstVal, Value srcVal,
+                     const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
+    Location loc = op->getLoc();
+    builder.setInsertionPoint(op);
+    Type elemTy = getStoredElemType(dstVal.getType());
+    auto ptrType = getUBPtrType(ctx, elemTy);
+
+    auto emitAddr = [&](Value tile) -> Value {
+      if (isa<pto::PtrType>(tile.getType()))
+        return tile;
+      auto addrOp = builder.create<pto::TileBufAddrOp>(loc, ptrType, tile);
+      return addrOp.getDst();
+    };
+
+    Value dstPtr = emitAddr(dstVal);
+    Value srcPtr = emitAddr(srcVal);
+    return {dstPtr, srcPtr, ptrType};
+  }
+
+  template <typename UBop>
+  void dispatchShift(Location loc, OpBuilder &b, Value dst, Value src,
+                     Value scalar, pto::PtrType ptrTy,
+                     const TileShapeInfo &info) {
+    int64_t epr = info.elementsPerRepeat;
+    int64_t totalV = info.vRows * info.vCols;
+    int64_t headRepeats = totalV / epr;
+    int64_t tailElements = totalV % epr;
+
+    auto emitShift = [&](Value d, Value s) {
+      Value shiftDist = b.create<arith::ExtSIOp>(
+          loc, b.getI64Type(), scalar);
+      b.create<UBop>(loc, d, s, shiftDist,
+                     i64c1(loc, b), i64c1(loc, b), i64c1(loc, b),
+                     i64c8(loc, b), i64c8(loc, b));
+    };
+
+    if (headRepeats > 1 || tailElements > 0) {
+      auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                          idxc(headRepeats, loc, b), idxc1(loc, b));
+      b.setInsertionPointToStart(forOp.getBody());
+      Value iv = forOp.getInductionVar();
+      Value off = b.create<arith::MulIOp>(loc, iv, idxc(epr, loc, b)).getResult();
+      Value rd = addPtr(loc, b, dst, ptrTy, off);
+      Value r0 = addPtr(loc, b, src, ptrTy, off);
+      b.create<pto::UBSetMaskCountOp>(loc);
+      b.create<pto::UBSetMaskOp>(loc, i64c(epr, loc, b), i64c0(loc, b));
+      emitShift(rd, r0);
+      b.create<pto::UBSetMaskNormOp>(loc);
+      b.setInsertionPointAfter(forOp);
+      if (tailElements > 0) {
+        Value offT = idxc(headRepeats * epr, loc, b);
+        Value td = addPtr(loc, b, dst, ptrTy, offT);
+        Value ts0 = addPtr(loc, b, src, ptrTy, offT);
+        b.create<pto::UBSetMaskCountOp>(loc);
+        b.create<pto::UBSetMaskOp>(loc, i64c(tailElements, loc, b), i64c0(loc, b));
+        emitShift(td, ts0);
+        b.create<pto::UBSetMaskNormOp>(loc);
+      }
+      return;
+    }
+
+    b.create<pto::UBSetMaskCountOp>(loc);
+    b.create<pto::UBSetMaskOp>(loc, i64c(totalV, loc, b), i64c0(loc, b));
+    emitShift(dst, src);
+    b.create<pto::UBSetMaskNormOp>(loc);
+    fullMask(loc, b);
   }
 
   template <typename UBop>
