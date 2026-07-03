@@ -117,6 +117,8 @@ TileType = _pto_mod.TileType
 TileBufType = _pto_mod.TileBufType
 AddressSpace = _pto_mod.AddressSpace
 AddressSpaceAttr = _pto_mod.AddressSpaceAttr
+FenceScope = _pto_mod.FenceScope
+FenceScopeAttr = _pto_mod.FenceScopeAttr
 TileBufConfigAttr = _pto_mod.TileBufConfigAttr
 BLayout = _pto_mod.BLayout
 BLayoutAttr = _pto_mod.BLayoutAttr
@@ -273,6 +275,8 @@ __all__ = [
     "TileBufType",
     "AddressSpace",
     "AddressSpaceAttr",
+    "FenceScope",
+    "FenceScopeAttr",
     "BLayout",
     "BLayoutAttr",
     "SLayout",
