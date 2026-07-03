@@ -61,6 +61,96 @@ def PTO_UBVaddOp : PTO_UBufBinaryOp<"ub.vadd">;
 def PTO_UBVsubOp : PTO_UBufBinaryOp<"ub.vsub">;
 def PTO_UBVmulOp : PTO_UBufBinaryOp<"ub.vmul">;
 def PTO_UBVdivOp : PTO_UBufBinaryOp<"ub.vdiv">;
+def PTO_UBVmaxOp : PTO_UBufBinaryOp<"ub.vmax">;
+def PTO_UBVminOp : PTO_UBufBinaryOp<"ub.vmin">;
+def PTO_UBVandOp : PTO_UBufBinaryOp<"ub.vand">;
+def PTO_UBVorOp  : PTO_UBufBinaryOp<"ub.vor">;
+
+//===----------------------------------------------------------------------===//
+// PTO_UBufUnaryOp — unary elementwise (VNOT)
+//===----------------------------------------------------------------------===//
+
+class PTO_UBufUnaryOp<string mnemonic, list<Trait> traits = []>
+    : PTO_Op<mnemonic,
+      !listconcat(traits, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>])> {
+  let summary = "Raw ubuf unary operation mapping to llvm.hivm intrinsics.";
+  let description = [{
+    Lowers to `llvm.hivm` unary intrinsics (e.g. VNOT) for the a2a3
+    (dav-c220-vec) backend. Operates directly on ubuf pointers.
+
+    Config word uses unary layout: repeat[63:56], dstBlkStride[15:0],
+    srcBlkStride[31:16], dstRepStride[39:32], srcRepStride[51:40].
+  }];
+
+  let arguments = (ins
+    PTO_BufferType:$dst,
+    PTO_BufferType:$src,
+    I64:$repeat,
+    I64:$dstBlockStride,
+    I64:$srcBlockStride,
+    I64:$dstRepeatStride,
+    I64:$srcRepeatStride
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $dst `,` $src `,`
+    $repeat `,` $dstBlockStride `,` $srcBlockStride `,`
+    $dstRepeatStride `,` $srcRepeatStride
+    attr-dict `:` type($dst) `,` type($src) `,`
+    type($repeat) `,` type($dstBlockStride) `,` type($srcBlockStride) `,`
+    type($dstRepeatStride) `,` type($srcRepeatStride)
+  }];
+}
+
+def PTO_UBVnotOp : PTO_UBufUnaryOp<"ub.vnot">;
+
+//===----------------------------------------------------------------------===//
+// PTO_UBufShiftOp — unary shift with scalar distance
+//===----------------------------------------------------------------------===//
+
+class PTO_UBufShiftOp<string mnemonic, list<Trait> traits = []>
+    : PTO_Op<mnemonic,
+      !listconcat(traits, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>])> {
+  let summary = "Raw ubuf shift operation mapping to llvm.hivm.VSHL/VSHR.";
+  let description = [{
+    Lowers to `llvm.hivm.VSHL.u16` / `llvm.hivm.VSHR.u16` for the a2a3
+    (dav-c220-vec) backend. Operates directly on ubuf pointers.
+
+    Unlike binary ops, shift takes a single source pointer and a scalar
+    `shiftDist` (i64) — the hardware applies a uniform shift to all elements.
+  }];
+
+  let arguments = (ins
+    PTO_BufferType:$dst,
+    PTO_BufferType:$src,
+    I64:$shiftDist,
+    I64:$repeat,
+    I64:$dstBlockStride,
+    I64:$srcBlockStride,
+    I64:$dstRepeatStride,
+    I64:$srcRepeatStride
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $dst `,` $src `,` $shiftDist `,`
+    $repeat `,` $dstBlockStride `,` $srcBlockStride `,`
+    $dstRepeatStride `,` $srcRepeatStride
+    attr-dict `:` type($dst) `,` type($src) `,` type($shiftDist) `,`
+    type($repeat) `,` type($dstBlockStride) `,` type($srcBlockStride) `,`
+    type($dstRepeatStride) `,` type($srcRepeatStride)
+  }];
+}
+
+def PTO_UBVshlOp : PTO_UBufShiftOp<"ub.vshl">;
+def PTO_UBVshrOp : PTO_UBufShiftOp<"ub.vshr">;
 
 def PTO_UBSetMaskOp : PTO_Op<"ub.set_mask", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>

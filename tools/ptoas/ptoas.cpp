@@ -1873,10 +1873,14 @@ int mlir::pto::compilePTOASModule(
   pm.addNestedPass<mlir::func::FuncOp>(pto::createLoweringSyncToPipePass());
   if (!disableInferLayout)
     pm.addNestedPass<mlir::func::FuncOp>(pto::createInferPTOLayoutPass());
-  // A5-only: normalize movs, lower to memref, plan memory.
-  // A3 uses the LowerPTOToUBufOps path instead (pointer-based, no memref).
-  if (ptoTargetArch != "a3") {
-    pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOA5NormalizeTMovPass());
+  // Local tile planning path.  A5/non-A3 already use this path.  A3 VPTO also
+  // enters it so UB tile addresses come from PTOPlanMemory instead of the
+  // fallback allocator in LowerPTOToUBufOps.
+  const bool enableLocalTilePlanning =
+      ptoTargetArch != "a3" || effectiveBackend == PTOBackend::VPTO;
+  if (enableLocalTilePlanning) {
+    if (ptoTargetArch != "a3")
+      pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOA5NormalizeTMovPass());
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createPTOValidateIntToPtrUsesPass());
 
@@ -1890,12 +1894,12 @@ int mlir::pto::compilePTOASModule(
     // so it takes no option here.
     pto::FusionPlanOptions fusionPlanOpts;
     fusionPlanOpts.enableShapeInference = enableShapeInference;
-    if (enableA5EmitCFusionPath) {
+    if (ptoTargetArch != "a3" && enableA5EmitCFusionPath) {
       pm.addNestedPass<mlir::func::FuncOp>(
           pto::createFusionPlanPass(fusionPlanOpts));
       pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
       pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOMarkLastUsePass());
-    } else if (enableA5VPTOFusionPath) {
+    } else if (ptoTargetArch != "a3" && enableA5VPTOFusionPath) {
       pm.addNestedPass<mlir::func::FuncOp>(
           pto::createFusionPlanPass(fusionPlanOpts));
       pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
