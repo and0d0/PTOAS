@@ -8,7 +8,7 @@
 
 // Round-trip (parse -> print) tests for all 7 binary UB elementwise ops.
 // Verifies op mnemonic, operand order, and type annotation survive parsing.
-// RUN: ( ptoas --pto-arch=a3 --pto-backend=vpto %s -o /dev/null --mlir-print-ir-after=vpto-split-cv-module 2>&1 || true ) | FileCheck %s
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o /dev/null --mlir-print-ir-after=vpto-split-cv-module 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // CHECK-LABEL: func.func @rt_vmax
@@ -44,15 +44,6 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     %c0 = arith.constant 0 : i64
     // CHECK: pto.ub.vor %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
     pto.ub.vor %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
-    return
-  }
-
-  // CHECK-LABEL: func.func @rt_vxor
-  func.func @rt_vxor(%dst: !pto.ptr<i16, ub>, %src0: !pto.ptr<i16, ub>, %src1: !pto.ptr<i16, ub>) attributes {pto.aicore} {
-    %c1 = arith.constant 1 : i64
-    %c0 = arith.constant 0 : i64
-    // CHECK: pto.ub.vxor %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
-    pto.ub.vxor %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
     return
   }
 

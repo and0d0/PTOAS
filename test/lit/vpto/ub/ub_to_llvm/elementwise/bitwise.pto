@@ -6,10 +6,10 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// pto.ub.vand/vor/vxor -> llvm.hivm.VAND/VOR/VXOR.s16.
+// pto.ub.vand/vor -> llvm.hivm.VAND/VOR.s16.
 // pto.ub.vshl -> llvm.hivm.VSHL.u16 (4-arg: dst, src, shiftDist, config).
 // pto.ub.vshr -> llvm.hivm.VSHR.u16 (5-arg: dst, src, shiftDist, config, round=0).
-// RUN: ( ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // CHECK-LABEL: llvm.func @ub_vand_s16_mix_aiv(
@@ -35,19 +35,6 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     // CHECK: llvm.call @llvm.hivm.VOR.s16(%[[DST]], %[[SRC0]], %[[SRC1]], %[[CFG:.*]]) : (!llvm.ptr<6>, !llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
     // CHECK-NOT: pto.ub.
     pto.ub.vor %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
-    return
-  }
-
-  // CHECK-LABEL: llvm.func @ub_vxor_s16_mix_aiv(
-  // CHECK-SAME: %[[DST:[^:]+]]: !llvm.ptr<6>, %[[SRC0:[^:]+]]: !llvm.ptr<6>, %[[SRC1:[^:]+]]: !llvm.ptr<6>
-  func.func @ub_vxor_s16(%dst: !pto.ptr<i16, ub>, %src0: !pto.ptr<i16, ub>, %src1: !pto.ptr<i16, ub>) attributes {pto.aicore} {
-    %c1 = arith.constant 1 : i64
-    %c0 = arith.constant 0 : i64
-    // CHECK: llvm.mlir.constant(72057594037927936 : i64) : i64
-    // CHECK: llvm.mlir.constant(255 : i64) : i64
-    // CHECK: llvm.call @llvm.hivm.VXOR.s16(%[[DST]], %[[SRC0]], %[[SRC1]], %[[CFG:.*]]) : (!llvm.ptr<6>, !llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
-    // CHECK-NOT: pto.ub.
-    pto.ub.vxor %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
     return
   }
 

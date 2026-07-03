@@ -65,7 +65,48 @@ def PTO_UBVmaxOp : PTO_UBufBinaryOp<"ub.vmax">;
 def PTO_UBVminOp : PTO_UBufBinaryOp<"ub.vmin">;
 def PTO_UBVandOp : PTO_UBufBinaryOp<"ub.vand">;
 def PTO_UBVorOp  : PTO_UBufBinaryOp<"ub.vor">;
-def PTO_UBVxorOp : PTO_UBufBinaryOp<"ub.vxor">;
+
+//===----------------------------------------------------------------------===//
+// PTO_UBufUnaryOp — unary elementwise (VNOT)
+//===----------------------------------------------------------------------===//
+
+class PTO_UBufUnaryOp<string mnemonic, list<Trait> traits = []>
+    : PTO_Op<mnemonic,
+      !listconcat(traits, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>])> {
+  let summary = "Raw ubuf unary operation mapping to llvm.hivm intrinsics.";
+  let description = [{
+    Lowers to `llvm.hivm` unary intrinsics (e.g. VNOT) for the a2a3
+    (dav-c220-vec) backend. Operates directly on ubuf pointers.
+
+    Config word uses unary layout: repeat[63:56], dstBlkStride[15:0],
+    srcBlkStride[31:16], dstRepStride[39:32], srcRepStride[51:40].
+  }];
+
+  let arguments = (ins
+    PTO_BufferType:$dst,
+    PTO_BufferType:$src,
+    I64:$repeat,
+    I64:$dstBlockStride,
+    I64:$srcBlockStride,
+    I64:$dstRepeatStride,
+    I64:$srcRepeatStride
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $dst `,` $src `,`
+    $repeat `,` $dstBlockStride `,` $srcBlockStride `,`
+    $dstRepeatStride `,` $srcRepeatStride
+    attr-dict `:` type($dst) `,` type($src) `,`
+    type($repeat) `,` type($dstBlockStride) `,` type($srcBlockStride) `,`
+    type($dstRepeatStride) `,` type($srcRepeatStride)
+  }];
+}
+
+def PTO_UBVnotOp : PTO_UBufUnaryOp<"ub.vnot">;
 
 //===----------------------------------------------------------------------===//
 // PTO_UBufShiftOp — unary shift with scalar distance

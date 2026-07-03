@@ -4639,8 +4639,6 @@ public:
       calleeName = "llvm.hivm.VAND." + elemFrag;
     else if constexpr (std::is_same_v<UBOp, pto::UBVorOp>)
       calleeName = "llvm.hivm.VOR." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVxorOp>)
-      calleeName = "llvm.hivm.VXOR." + elemFrag;
     else
       return rewriter.notifyMatchFailure(op, "unsupported ubuf binary op");
 
@@ -4792,6 +4790,84 @@ public:
                                                roundZero});
       state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
     }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
+template <typename UnaryOp>
+class LowerUBufUnaryOpPattern final : public OpConversionPattern<UnaryOp> {
+public:
+  explicit LowerUBufUnaryOpPattern(TypeConverter &typeConverter,
+                                   MLIRContext *context, LoweringState &state)
+      : OpConversionPattern<UnaryOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(UnaryOp op, typename UnaryOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrType = mlir::cast<pto::PtrType>(op.getSrc().getType());
+    Type elemType = ptrType.getElementType();
+    std::string elemFrag = getElementTypeFragment(elemType);
+    if (elemFrag.empty())
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for ubuf unary op");
+
+    if (elemFrag == "s16")
+      elemFrag = "u16";
+
+    std::string calleeName;
+    if constexpr (std::is_same_v<UnaryOp, pto::UBVnotOp>)
+      calleeName = "llvm.hivm.VNOT." + elemFrag;
+    else
+      return rewriter.notifyMatchFailure(op, "unsupported ubuf unary op");
+
+    Value dst = adaptor.getDst();
+    Value src = adaptor.getSrc();
+    if (!dst || !src ||
+        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
+        !isa<LLVM::LLVMPointerType>(src.getType()))
+      return rewriter.notifyMatchFailure(
+          op, "unexpected converted ubuf unary operand types");
+
+    Location loc = op.getLoc();
+    auto i64Ty = rewriter.getI64Type();
+    auto getI64 = [&](Value v) -> Value {
+      return castIntegerLikeTo(op, v, i64Ty);
+    };
+    auto maskByte = [&](Value v) -> Value {
+      return rewriter.create<arith::AndIOp>(
+          loc, v, rewriter.create<arith::ConstantOp>(
+                     loc, rewriter.getI64IntegerAttr(0xff)));
+    };
+    auto shl = [&](Value v, uint64_t amount) -> Value {
+      return rewriter.create<arith::ShLIOp>(
+          loc, v, rewriter.create<arith::ConstantOp>(
+                       loc, rewriter.getI64IntegerAttr(amount)));
+    };
+    // Unary config layout (same as VABS/VSHR): repeat[63:56]
+    Value config = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64IntegerAttr(0));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getRepeat())), 56));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, maskByte(getI64(adaptor.getDstBlockStride())));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getSrcBlockStride())), 16));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getSrcRepeatStride())), 40));
+
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{dst.getType(), src.getType(), i64Ty},
+        TypeRange{});
+    rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
+                                  ValueRange{dst, src, config});
+    state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
 
     rewriter.eraseOp(op);
     return success();
@@ -10477,7 +10553,7 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
         typeConverter, patterns.getContext(), state);
     patterns.add<LowerUBufBinaryOpPattern<pto::UBVorOp>>(
         typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVxorOp>>(
+    patterns.add<LowerUBufUnaryOpPattern<pto::UBVnotOp>>(
         typeConverter, patterns.getContext(), state);
     patterns.add<LowerUBufShiftOpPattern<pto::UBVshlOp>>(
         typeConverter, patterns.getContext(), state);
@@ -10615,7 +10691,7 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
     target.addIllegalOp<pto::UBVminOp>();
     target.addIllegalOp<pto::UBVandOp>();
     target.addIllegalOp<pto::UBVorOp>();
-    target.addIllegalOp<pto::UBVxorOp>();
+    target.addIllegalOp<pto::UBVnotOp>();
     target.addIllegalOp<pto::UBVshlOp>();
     target.addIllegalOp<pto::UBVshrOp>();
     target.addIllegalOp<pto::UBSetMaskOp>();

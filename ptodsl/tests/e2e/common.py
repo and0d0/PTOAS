@@ -31,6 +31,7 @@ BINARY_OPS = {
 INT_OPS = {
     "bit_and": (pto.tile.bit_and, lambda x, y: x & y),
     "bit_or":  (pto.tile.bit_or,  lambda x, y: x | y),
+    "bit_xor": (pto.tile.bit_xor, lambda x, y: x ^ y),
 }
 
 SHIFT_OPS = {
@@ -159,7 +160,11 @@ def make_binary_kernel(
 
         pto.tile.load(a_part, a_tile)
         pto.tile.load(b_part, b_tile)
-        tile_op_fn(a_tile, b_tile, c_tile)
+        if op_name == "bit_xor":
+            tmp_tile = pto.alloc_tile(shape=[rows, cols], dtype=pto_dtype)
+            tile_op_fn(a_tile, b_tile, tmp_tile, c_tile)
+        else:
+            tile_op_fn(a_tile, b_tile, c_tile)
         pto.tile.store(c_tile, c_part)
 
     kernel_body.__name__ = fn_name

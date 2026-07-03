@@ -8009,24 +8009,21 @@ LogicalResult UBVorOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// UBVxorOp
+// UBVnotOp
 //===----------------------------------------------------------------------===//
 
-void UBVxorOp::getEffects(
+void UBVnotOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(), &getSrc0Mutable());
-  effects.emplace_back(MemoryEffects::Read::get(), &getSrc1Mutable());
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable());
   effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable());
 }
 
-LogicalResult UBVxorOp::verify() {
-  if (!isBufferLike(getDst().getType()) || !isBufferLike(getSrc0().getType()) ||
-      !isBufferLike(getSrc1().getType()))
+LogicalResult UBVnotOp::verify() {
+  if (!isBufferLike(getDst().getType()) || !isBufferLike(getSrc().getType()))
     return emitOpError("requires pointer-like operands");
   if (classifyMemoryRole(getDst().getType()) != MemoryRole::UB ||
-      classifyMemoryRole(getSrc0().getType()) != MemoryRole::UB ||
-      classifyMemoryRole(getSrc1().getType()) != MemoryRole::UB)
+      classifyMemoryRole(getSrc().getType()) != MemoryRole::UB)
     return emitOpError("requires UB-backed operands");
   return success();
 }
