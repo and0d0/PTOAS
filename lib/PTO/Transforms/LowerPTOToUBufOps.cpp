@@ -233,6 +233,16 @@ struct LowerPTOToUBufOpsPass
     {
       SmallVector<pto::AllocTileOp> allocOps;
       func.walk([&](pto::AllocTileOp op) { allocOps.push_back(op); });
+      bool hasPlannedAddr = llvm::any_of(
+          allocOps, [](pto::AllocTileOp op) { return static_cast<bool>(op.getAddr()); });
+      bool allPlanned = llvm::all_of(
+          allocOps, [](pto::AllocTileOp op) { return static_cast<bool>(op.getAddr()); });
+      if (hasPlannedAddr && !allPlanned) {
+        func.emitError("A3 UB lowering requires either all alloc_tile ops to "
+                       "carry planned addresses or none of them to do so");
+        signalPassFailure();
+        return;
+      }
       uint64_t offset = 0;
       for (auto op : allocOps) {
         auto tbTy = cast<pto::TileBufType>(op.getResult().getType());
@@ -257,7 +267,7 @@ struct LowerPTOToUBufOpsPass
         uint64_t paddedBytes =
             (totalBytes + kLocalMemAlignmentBytes - 1) /
             kLocalMemAlignmentBytes * kLocalMemAlignmentBytes;
-        if (offset + paddedBytes > kA3VecLocalMemBytes) {
+        if (!hasPlannedAddr && offset + paddedBytes > kA3VecLocalMemBytes) {
           op.emitError("A3 UB manual allocation exceeds local memory capacity: ")
               << (offset + paddedBytes) << " bytes requested, capacity is "
               << kA3VecLocalMemBytes << " bytes";
@@ -265,17 +275,22 @@ struct LowerPTOToUBufOpsPass
           return;
         }
         builder.setInsertionPoint(op);
-        auto addrConst = builder.create<arith::ConstantOp>(
-            op.getLoc(), builder.getI64IntegerAttr(offset));
+        Value addr = op.getAddr();
+        if (!addr) {
+          auto addrConst = builder.create<arith::ConstantOp>(
+              op.getLoc(), builder.getI64IntegerAttr(offset));
+          addr = addrConst.getResult();
+        }
         auto ptrTy = pto::PtrType::get(
             ctx, tbTy.getElementType(),
             pto::AddressSpaceAttr::get(ctx, pto::AddressSpace::VEC));
         auto pc = builder.create<pto::CastPtrOp>(
-            op.getLoc(), ptrTy, addrConst.getResult());
+            op.getLoc(), ptrTy, addr);
         tileShapes[pc.getResult()] = SmallVector<int64_t, 2>(shape);
         op.getResult().replaceAllUsesWith(pc.getResult());
         op.erase();
-        offset += paddedBytes;
+        if (!hasPlannedAddr)
+          offset += paddedBytes;
       }
     }
 
@@ -551,7 +566,8 @@ struct LowerPTOToUBufOpsPass
     // ---- cleanup dead PTO ops ----
     SmallVector<Operation *> toErase;
     func.walk([&](Operation *op) {
-      if (isa<pto::PartitionViewOp, pto::MakeTensorViewOp>(op))
+      if (isa<pto::PartitionViewOp, pto::MakeTensorViewOp,
+              memref::SubViewOp, memref::ReinterpretCastOp, memref::CastOp>(op))
         toErase.push_back(op);
     });
     for (auto *op : llvm::reverse(toErase)) {
@@ -834,18 +850,92 @@ private:
 
   static FailureOr<DmaViewInfo> extractDmaViewInfo(pto::TLoadOp op) {
     auto pvOp = op.getSrc().getDefiningOp<pto::PartitionViewOp>();
-    if (!pvOp)
+    if (pvOp) {
+      auto mtvOp = pvOp.getSource().getDefiningOp<pto::MakeTensorViewOp>();
+      if (!mtvOp)
+        return failure();
+      DmaViewInfo info;
+      info.gmPtr = mtvOp.getPtr();
+      info.sizes.assign(pvOp.getSizes().begin(), pvOp.getSizes().end());
+      info.strides.assign(mtvOp.getStrides().begin(),
+                          mtvOp.getStrides().end());
+      info.offsets.assign(pvOp.getOffsets().begin(), pvOp.getOffsets().end());
+      return info;
+    }
+    return extractDmaMemRefViewInfo(op.getLoc(), op.getSrc(), op.getContext());
+  }
+
+  static FailureOr<DmaViewInfo> extractDmaViewInfo(pto::TStoreOp op) {
+    auto pvOp = op.getDst().getDefiningOp<pto::PartitionViewOp>();
+    if (pvOp) {
+      auto mtvOp = pvOp.getSource().getDefiningOp<pto::MakeTensorViewOp>();
+      if (!mtvOp)
+        return failure();
+      DmaViewInfo info;
+      info.gmPtr = mtvOp.getPtr();
+      info.sizes.assign(pvOp.getSizes().begin(), pvOp.getSizes().end());
+      info.strides.assign(mtvOp.getStrides().begin(), mtvOp.getStrides().end());
+      info.offsets.assign(pvOp.getOffsets().begin(), pvOp.getOffsets().end());
+      return info;
+    }
+    return extractDmaMemRefViewInfo(op.getLoc(), op.getDst(), op.getContext());
+  }
+
+  static FailureOr<DmaViewInfo> extractDmaMemRefViewInfo(Location loc, Value view,
+                                                         MLIRContext *ctx) {
+    auto memTy = dyn_cast<MemRefType>(view.getType());
+    if (!memTy)
       return failure();
-    auto mtvOp = pvOp.getSource().getDefiningOp<pto::MakeTensorViewOp>();
-    if (!mtvOp)
+    auto msAttr = dyn_cast_or_null<pto::AddressSpaceAttr>(memTy.getMemorySpace());
+    if (!msAttr || msAttr.getAddressSpace() != pto::AddressSpace::GM)
       return failure();
+    ArrayRef<int64_t> shape = memTy.getShape();
+    if (shape.size() < 2)
+      return failure();
+
+    OpBuilder b(ctx);
+    b.setInsertionPointAfterValue(view);
     DmaViewInfo info;
-    info.gmPtr = mtvOp.getPtr();
-    info.sizes.assign(pvOp.getSizes().begin(), pvOp.getSizes().end());
-    info.strides.assign(mtvOp.getStrides().begin(),
-                        mtvOp.getStrides().end());
-    info.offsets.assign(pvOp.getOffsets().begin(), pvOp.getOffsets().end());
+    auto ptrTy = pto::PtrType::get(ctx, memTy.getElementType(), msAttr);
+    Value root = traceRootMemRef(view);
+    info.gmPtr = b.create<pto::CastPtrOp>(loc, ptrTy, root).getResult();
+
+    SmallVector<int64_t> rowMajorStrides(shape.size(), 1);
+    for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
+      if (shape[i + 1] == ShapedType::kDynamic)
+        return failure();
+      rowMajorStrides[i] = rowMajorStrides[i + 1] * shape[i + 1];
+    }
+
+    for (auto [idx, dim] : llvm::enumerate(shape)) {
+      Value size = dim == ShapedType::kDynamic
+                       ? b.create<memref::DimOp>(loc, view, idx).getResult()
+                       : b.create<arith::ConstantIndexOp>(loc, dim).getResult();
+      info.sizes.push_back(size);
+      info.strides.push_back(
+          b.create<arith::ConstantIndexOp>(loc, rowMajorStrides[idx]).getResult());
+      info.offsets.push_back(b.create<arith::ConstantIndexOp>(loc, 0).getResult());
+    }
     return info;
+  }
+
+  static Value traceRootMemRef(Value value) {
+    while (Operation *def = value.getDefiningOp()) {
+      if (auto subview = dyn_cast<memref::SubViewOp>(def)) {
+        value = subview.getSource();
+        continue;
+      }
+      if (auto reinterpret = dyn_cast<memref::ReinterpretCastOp>(def)) {
+        value = reinterpret.getSource();
+        continue;
+      }
+      if (auto cast = dyn_cast<memref::CastOp>(def)) {
+        value = cast.getSource();
+        continue;
+      }
+      break;
+    }
+    return value;
   }
 
   Value computeGMByteOffset(Location loc, OpBuilder &b,
@@ -1016,20 +1106,12 @@ private:
     auto it = tileShapes.find(op.getSrc());
     if (it == tileShapes.end()) return failure();
 
-    auto pvOp = op.getDst().getDefiningOp<pto::PartitionViewOp>();
-    if (!pvOp) return failure();
-    auto mtvOp = pvOp.getSource().getDefiningOp<pto::MakeTensorViewOp>();
-    if (!mtvOp) return failure();
+    auto viewInfo = extractDmaViewInfo(op);
+    if (failed(viewInfo)) return failure();
 
-    DmaViewInfo viewInfo;
-    viewInfo.gmPtr = mtvOp.getPtr();
-    viewInfo.sizes.assign(pvOp.getSizes().begin(), pvOp.getSizes().end());
-    viewInfo.strides.assign(mtvOp.getStrides().begin(), mtvOp.getStrides().end());
-    viewInfo.offsets.assign(pvOp.getOffsets().begin(), pvOp.getOffsets().end());
-
-    Value byteOff = computeGMByteOffset(loc, b, viewInfo, elemSize);
-    Value gmPtr = offsetGMPtrByBytes(loc, b, viewInfo.gmPtr, byteOff);
-    return emitMteUbGm(loc, b, op.getSrc(), gmPtr, viewInfo, elemTy,
+    Value byteOff = computeGMByteOffset(loc, b, *viewInfo, elemSize);
+    Value gmPtr = offsetGMPtrByBytes(loc, b, viewInfo->gmPtr, byteOff);
+    return emitMteUbGm(loc, b, op.getSrc(), gmPtr, *viewInfo, elemTy,
                        llvm::ArrayRef(it->second));
   }
 
