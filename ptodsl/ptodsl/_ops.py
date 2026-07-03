@@ -2325,14 +2325,14 @@ def alloc_buffer(shape, dtype, **kwargs):
 
     The allocation emits an LLVM stack allocation in the surrounding SIMT
     helper. UB scratch uses explicit ``pto.castptr`` / ``pto.addptr`` pointer
-    authoring and ``@pto.jit(dyn_shared_memory_buf=...)`` launch metadata.
+    authoring and an appropriate host launch wrapper.
     """
     if kwargs:
         unexpected = ", ".join(sorted(kwargs))
         raise TypeError(
             f"pto.alloc_buffer(...) does not accept keyword argument(s): {unexpected}. "
             "It only allocates SIMT local buffers; author UB scratch explicitly with "
-            "pto.castptr/pto.addptr and @pto.jit(dyn_shared_memory_buf=...)."
+            "pto.castptr/pto.addptr and pass the dynamic UB byte count at launch."
         )
     _require_explicit_mode("pto.alloc_buffer(...)")
     element_type = _resolve(dtype)

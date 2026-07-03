@@ -76,16 +76,6 @@ def _normalize_backend(backend: str, *, fn=None) -> str:
     return backend
 
 
-def _normalize_dyn_shared_memory_buf(value):
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError("@pto.jit dyn_shared_memory_buf must be a non-negative integer byte count")
-    if value < 0:
-        raise ValueError("@pto.jit dyn_shared_memory_buf must be non-negative")
-    return value
-
-
 def _module_attr_map(module):
     attrs = module.operation.attributes
     return {name: str(attrs[name]) for name in _MODULE_ATTRS if name in attrs}
@@ -177,7 +167,6 @@ def jit(
     entry: bool = True,
     mode: str = "auto",
     insert_sync: bool | None = None,
-    dyn_shared_memory_buf: int | None = None,
     ast_rewrite: bool | None = None,
     frontend_options: Mapping | None = None,
 ):
@@ -198,9 +187,6 @@ def jit(
     insert_sync: ``True``/``False`` to explicitly control PTOAS sync insertion
                  for launch builds. ``None`` keeps the mode-based default
                  behavior.
-    dyn_shared_memory_buf:
-                 Dynamic UB scratch byte count to attach to the entry function
-                 and pass to native launch code.
     ast_rewrite:
                  ``True`` enables AST rewriting of Python ``if`` /
                  ``for range(...)`` into device-side PTODSL control flow.
@@ -222,7 +208,6 @@ def jit(
         ast_rewrite=ast_rewrite,
         frontend_options=frontend_options,
     )
-    normalized_dyn_shared_memory_buf = _normalize_dyn_shared_memory_buf(dyn_shared_memory_buf)
 
     def decorator(fn):
         fn_name = name or fn.__name__
@@ -244,7 +229,6 @@ def jit(
                 entry=entry,
                 mode=normalized_mode,
                 insert_sync=insert_sync,
-                dyn_shared_memory_buf=normalized_dyn_shared_memory_buf,
                 module_style=ModuleStyle.BACKEND_PARTITIONED,
                 source_file=source_file,
                 source_line=getattr(fn.__code__, "co_firstlineno", None),

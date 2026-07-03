@@ -62,13 +62,12 @@ def load_rmsnorm_example():
     return module
 
 
-def check_variant(compiled, *, label: str, vector_type: str, ub_size: int) -> None:
+def check_variant(compiled, *, label: str, vector_type: str) -> None:
     compiled.verify()
     text = compiled.mlir_text()
     expect_parse_roundtrip_and_verify(text, f"RMSNorm {label} MLIR")
 
     expect("func.func @rmsnorm_4096_alloc_buffer_simt_context_kernel" in text, f"{label}: missing entry")
-    expect(f"dyn_shared_memory_buf = {ub_size} : i64" in text, f"{label}: unexpected UB scratch size")
     expect("scf.for" in text, f"{label}: tokens_per_core loop should lower to scf.for")
     expect("pto.mte_gm_ub" in text, f"{label}: missing GM->UB transfer")
     expect("pto.mte_ub_gm" in text, f"{label}: missing UB->GM transfer")
@@ -141,13 +140,11 @@ def main() -> None:
         example.build_x128(),
         label="x128",
         vector_type="vector<4xf32>",
-        ub_size=82496,
     )
     check_variant(
         example.build_x64(),
         label="x64",
         vector_type="vector<4xf32>",
-        ub_size=82496,
     )
 
     print("ptodsl_rmsnorm_example_compile: PASS")

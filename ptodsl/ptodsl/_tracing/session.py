@@ -850,13 +850,6 @@ class TraceSession:
             raise RuntimeError("PTODSL trace-session exited with an open subkernel lowering frame")
         if self._carry_loop_stack:
             raise RuntimeError("PTODSL trace-session exited with an open loop-carry lowering frame")
-        dyn_shared_memory_buf = getattr(self.module_spec, "dyn_shared_memory_buf", None)
-        if dyn_shared_memory_buf:
-            i64 = IntegerType.get_signless(64)
-            self.entry_function.attributes["dyn_shared_memory_buf"] = IntegerAttr.get(
-                i64,
-                dyn_shared_memory_buf,
-            )
 
 
 def _coerce_simt_launch_dims(dims):

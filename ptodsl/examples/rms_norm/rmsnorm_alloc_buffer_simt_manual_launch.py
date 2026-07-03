@@ -16,8 +16,8 @@ script builds a custom ``launch.cpp`` containing:
 
     kernel<<<grid, 82496, stream>>>(...)
 
-Use it to validate the kernel in environments where the generated PTODSL
-runtime wrapper does not yet consume ``dyn_shared_memory_buf``.
+Use it to validate the kernel while the generated PTODSL runtime wrapper does
+not yet expose a dynamic UB launch-size parameter.
 """
 
 from __future__ import annotations
@@ -122,13 +122,6 @@ def build_manual_library(compiled, *, dyn_shared_bytes: int = _DYN_SHARED_BYTES)
     module_spec = compiled._module_spec
     ir_function_name = module_spec.function_name
     launch_symbol = f"ptodsl_manual_launch_{ir_function_name}"
-
-    declared_dyn_shared = getattr(module_spec, "dyn_shared_memory_buf", None)
-    if declared_dyn_shared != dyn_shared_bytes:
-        raise RuntimeError(
-            f"expected @pto.jit dyn_shared_memory_buf={dyn_shared_bytes}, "
-            f"got {declared_dyn_shared!r}"
-        )
 
     launch_cpp_text = _manual_launch_cpp(
         ir_function_name=ir_function_name,

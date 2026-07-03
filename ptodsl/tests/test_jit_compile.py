@@ -897,7 +897,7 @@ def rmsnorm_alloc_buffer_frag_helper(
     _ = pto.alloc_buffer((1,), pto.f32)
 
 
-@pto.jit(target="a5", mode="explicit", dyn_shared_memory_buf=82496)
+@pto.jit(target="a5", mode="explicit")
 def rmsnorm_alloc_buffer_layout_probe(
     X: pto.ptr(pto.f32, "gm"),
     W: pto.ptr(pto.f32, "gm"),
@@ -4055,10 +4055,6 @@ def main() -> None:
     )
     rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm hand-authored UB layout specialization")
-    expect(
-        "dyn_shared_memory_buf = 82496 : i64" in rmsnorm_alloc_buffer_text,
-        "RMSNorm hand-authored UB layout should declare the expanded RMSNorm kernel scratch size",
-    )
     for expected_offset in (4096, 4224, 12416, 20608):
         expect(
             f"arith.constant {expected_offset} : index" in rmsnorm_alloc_buffer_text,
