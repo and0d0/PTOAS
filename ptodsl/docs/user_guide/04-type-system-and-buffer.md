@@ -177,8 +177,8 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 
 ## 4.5 Explicit scratch buffers
 
-Allocate SIMT lane-local scratch storage for pointer-style load and store
-operations inside a SIMT helper.
+`pto.alloc_buffer(shape, dtype)` allocates a lane-local temporary buffer
+inside SIMT code.
 
 ```text
 pto.alloc_buffer(shape, dtype)
@@ -194,10 +194,8 @@ scratch = pto.alloc_buffer((32,), pto.f32)
 | `shape` | Static positive integer shape. Pass an `int`, `tuple[int, ...]`, or `list[int]`. |
 | `dtype` | Element type of the returned buffer, such as `pto.f32` or `pto.i32`. |
 
-The returned pointer names a local allocation in the SIMT helper invocation
-that allocates it. Use this for per-workitem temporary fragments, scalar
-scratch values, or staged values that are accessed through pointer-style loads
-and stores.
+The returned value wraps the buffer address together with its allocation
+metadata: shape, dtype, element type, element count, and byte size.
 
 ## 4.6 TensorView
 

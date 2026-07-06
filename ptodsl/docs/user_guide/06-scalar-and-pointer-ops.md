@@ -105,9 +105,8 @@ scalar.store(value, ptr, offset)
 
 ### Contiguous vector access
 
-Use `contiguous=N` when a single work-item should read or write `N` adjacent
-elements as one vector value. `N` must be a positive Python integer greater than
-`1`.
+Pass `contiguous=N` to read or write `N` adjacent elements as a single
+vector value. `N` must be a positive integer greater than `1`.
 
 #### `scalar.load(ptr: PtrType, offset: Index, *, contiguous: int) -> VecValue`
 
@@ -132,9 +131,6 @@ elements as one vector value. `N` must be a positive Python integer greater than
 ```python
 x4 = scalar.load(ptr, offset, contiguous=4)
 ```
-
-For a `pto.ptr(pto.f32, "ub")`, this produces a DSL vector value with type
-`pto.vec(pto.f32, 4)`.
 
 ---
 

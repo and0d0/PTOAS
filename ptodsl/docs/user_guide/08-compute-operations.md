@@ -1869,14 +1869,12 @@ MX variants require MX-enabled dtypes (f8) and pre-loaded scale payloads. For mo
 
 ## 8.4 Builtin vector values
 
-Builtin vector values are small fixed-lane vectors used by contiguous scalar
-accesses and element-wise vector expressions. They are distinct from the
-`VRegType` values used inside `@pto.simd` kernels.
+`pto.vec(dtype, lanes, *, init=None)` names a builtin vector type or
+constructs a vector value. When `init` is a scalar, it is broadcast to
+all `lanes` lanes. When `init` is `None`, the call returns a vector type
+descriptor.
 
 #### `pto.vec(dtype, lanes, *, init=None)`
-
-**Description**: Names a builtin vector type. When `init` is provided,
-constructs a vector value. A scalar initializer is broadcast to every lane.
 
 **Parameters**:
 
@@ -1901,6 +1899,3 @@ rstd4 = pto.vec(pto.f32, 4, init=rstd)
 y4 = x4 * rstd4
 scalar.store(y4, ptr, offset)
 ```
-
-Use this form when a scalar value must participate in element-wise arithmetic
-with a vector value returned by `scalar.load(..., contiguous=N)`.
