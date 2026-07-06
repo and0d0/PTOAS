@@ -154,11 +154,22 @@ python3 ptodsl/examples/flash_attention_softmax_launch.py
 
 ### `rms_norm/rmsnorm_alloc_buffer_simt.py`
 
-Compile-only RMSNorm example for explicit-mode SIMT kernels. It exercises
-SIMT-local `pto.alloc_buffer(...)`, hand-authored dynamic UB scratch offsets,
-contiguous `scalar.load` / `scalar.store`, `pto.vec`,
-`pto.simt_allreduce_sum(...)`, explicit pipe `set_flag` / `wait_flag` sync,
-and a runtime token loop that lowers to `scf.for`.
+Compile-only RMSNorm example for explicit-mode SIMT kernels. It models the
+RMSNorm SIMT-VF token body with a named `@pto.simt` helper launched from the
+main kernel through `helper[threads, 1, 1](...)`.
+
+The example exercises the PTODSL surfaces needed by this style of kernel:
+
+- SIMT-local `pto.alloc_buffer(...)` for per-thread fragment storage
+- hand-authored dynamic UB scratch layout with `pto.castptr` / `pto.addptr`
+- contiguous vector loads through `scalar.load(..., contiguous=N)` and vector
+  stores through `scalar.store(vector, ...)`
+- `pto.vec(..., init=scalar)` for scalar-to-vector broadcast
+- `pto.simt_allreduce_sum(...)` lowered inline through `pto.redux_add` and
+  `pto.syncthreads`
+- explicit pipe `set_flag` / `wait_flag` synchronization, including dynamic
+  ping-pong event ids inside the token loop
+- a runtime token loop that lowers to `scf.for`
 
 ```bash
 python3 ptodsl/examples/rms_norm/rmsnorm_alloc_buffer_simt.py --variant x128 > /tmp/rmsnorm_x128.mlir
@@ -166,9 +177,11 @@ python3 ptodsl/examples/rms_norm/rmsnorm_alloc_buffer_simt.py --variant x64 > /t
 ```
 
 Expected: MLIR containing `@rmsnorm_4096_alloc_buffer_simt_context_kernel`,
-`scf.for`, `vector<4xf32>` for both `x128` and `x64`, and inline
-`pto.redux_add` / `pto.syncthreads` allreduce ops. The main token loop should also contain dynamic
-`pto.set_flag_dyn` / `pto.wait_flag_dyn` operations for the ping-pong events.
+the named SIMT helper `@rmsnorm_simt_token_body__simt_...`, explicit
+`pto.simt_launch`, `scf.for`, `vector<4xf32>`, `llvm.alloca` for local
+fragments, inline `pto.redux_add` / `pto.syncthreads` allreduce operations, and
+dynamic `pto.set_flag_dyn` / `pto.wait_flag_dyn` operations for the ping-pong
+events.
 
 ### Launch artifacts
 
