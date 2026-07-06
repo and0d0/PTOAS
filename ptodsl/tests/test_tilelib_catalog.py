@@ -853,6 +853,32 @@ class TileLibCatalogTest(unittest.TestCase):
                 self.assertIn("pto.mem_bar", mlir)
                 self.assertIn(expected_pad, mlir)
 
+    def test_trowprod_uses_dtype_specific_reduction_depth(self):
+        for dtype_name, expected_stages in (("f32", 6), ("f16", 7)):
+            with self.subTest(dtype=dtype_name):
+                specs = {
+                    "src": TileSpec(
+                        shape=(8, 128),
+                        dtype=ScalarType(dtype_name),
+                        memory_space="vec",
+                    ),
+                    "tmp": TileSpec(
+                        shape=(8, 128),
+                        dtype=ScalarType(dtype_name),
+                        memory_space="vec",
+                    ),
+                    "dst": TileSpec(
+                        shape=(8, 8),
+                        dtype=ScalarType(dtype_name),
+                        memory_space="vec",
+                        valid_shape=(8, 1),
+                    ),
+                }
+                selected = select("pto.trowprod", "a5", specs)
+                mlir = selected.specialize(**specs).mlir_text()
+                self.assertEqual(selected.name, "template_trowprod")
+                self.assertEqual(mlir.count("pto.vintlv"), expected_stages)
+
 
 if __name__ == "__main__":
     unittest.main()
