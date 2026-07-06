@@ -137,8 +137,8 @@ x4 = scalar.load(ptr, offset, contiguous=4)
 #### `scalar.store(value: VecValue, ptr: PtrType, offset: Index, *, contiguous: int | None = None) -> None`
 
 **Description**: Stores a vector value to adjacent elements of a typed pointer.
-The store width is taken from the vector lane count. If `contiguous` is
-provided, it must match that lane count.
+The store width is taken from the vector size. If `contiguous` is
+provided, it must match that size.
 
 **Parameters**:
 

@@ -10,17 +10,17 @@
 from ._bootstrap import make_context  # ensure MLIR is on sys.path  # noqa: F401
 from ._scalar_coercion import coerce_scalar_to_type
 from ._surface_values import VecValue, unwrap_surface_value
-from ._types import _resolve, _validate_vec_lanes, vec_type
+from ._types import _resolve, _validate_vec_size, vec_type
 
 from mlir.dialects import arith
 from mlir.dialects import llvm
 from mlir.ir import IntegerType, VectorType
 
 
-def vec(dtype, lanes: int, *, init=None):
+def vec(dtype, size: int, *, init=None):
     """Create a builtin vector type descriptor or broadcast vector value."""
-    lanes = _validate_vec_lanes(lanes, context="pto.vec(...)")
-    descriptor = vec_type(dtype, lanes)
+    size = _validate_vec_size(size, context="pto.vec(...)")
+    descriptor = vec_type(dtype, size)
     if init is None:
         return descriptor
     return _broadcast_vec_value(descriptor, init)
@@ -40,9 +40,9 @@ def _broadcast_vec_value(descriptor, init):
     scalar_value = coerce_scalar_to_type(init, element_type, context="pto.vec(..., init=...)")
     current = llvm.UndefOp(vector_type).res
     i32 = IntegerType.get_signless(32)
-    for lane in range(descriptor.lanes):
-        lane_index = arith.ConstantOp(i32, lane).result
-        current = llvm.InsertElementOp(current, scalar_value, lane_index).res
+    for index in range(descriptor.size):
+        element_index = arith.ConstantOp(i32, index).result
+        current = llvm.InsertElementOp(current, scalar_value, element_index).res
     return VecValue(current)
 
 

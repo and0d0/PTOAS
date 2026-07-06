@@ -1668,7 +1668,7 @@ def scalar_contiguous_vector_probe():
     data_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32, valid_shape=[1, 16])
     data_ptr = data_tile.as_ptr()
     x4 = scalar.load(data_ptr, 0, contiguous=4)
-    scale4 = pto.vec(pto.f32, 4, init=1.0)
+    scale4 = pto.vec(pto.f32, size=4, init=1.0)
     y4 = x4 * scale4
     scalar.store(y4, data_ptr, 4)
 
@@ -5062,7 +5062,7 @@ def main() -> None:
     expect_raises(
         ValueError,
         lambda: scalar_contiguous_width_mismatch_probe.compile(),
-        "does not match vector lane count",
+        "does not match vector size",
     )
     expect_raises(
         TypeError,

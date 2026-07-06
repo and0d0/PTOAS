@@ -1869,26 +1869,26 @@ MX variants require MX-enabled dtypes (f8) and pre-loaded scale payloads. For mo
 
 ## 8.4 Builtin vector values
 
-`pto.vec(dtype, lanes, *, init=None)` names a builtin vector type or
+`pto.vec(dtype, size, *, init=None)` names a builtin vector type or
 constructs a vector value. When `init` is a scalar, it is broadcast to
-all `lanes` lanes. When `init` is `None`, the call returns a vector type
+all `size` elements. When `init` is `None`, the call returns a vector type
 descriptor.
 
-#### `pto.vec(dtype, lanes, *, init=None)`
+#### `pto.vec(dtype, size, *, init=None)`
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `dtype` | PTO dtype | Element type, such as `pto.f32` |
-| `lanes` | Positive Python `int` | Number of lanes |
-| `init` | Scalar value, vector value, or `None` | Optional initializer; scalar values are broadcast to all lanes |
+| `size` | Positive Python `int` | Number of elements in the builtin vector value |
+| `init` | Scalar value, vector value, or `None` | Optional initializer; scalar values are broadcast to all elements |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `result` | Vector type or `pto.vec(dtype, lanes)` value | Without `init`, returns a vector type descriptor; with `init`, returns a vector value |
+| `result` | Vector type or `pto.vec(dtype, size)` value | Without `init`, returns a vector type descriptor; with `init`, returns a vector value |
 
 **Example**:
 
