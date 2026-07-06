@@ -538,8 +538,17 @@ struct LowerPTOToUBufOpsPass
                                tileShapes);
         if (!dstPtr)
           continue;
-        Value minusOne = builder.create<arith::ConstantOp>(
-            op.getLoc(), builder.getI64IntegerAttr(-1));
+        Type elemTy = ptrType.getElementType();
+        Value minusOneScalar;
+        if (elemTy.isF32() || elemTy.isF16()) {
+          minusOneScalar = builder.create<arith::ConstantOp>(
+              op.getLoc(), builder.getFloatAttr(elemTy, -1.0));
+        } else {
+          minusOneScalar = builder.create<arith::ConstantOp>(
+              op.getLoc(), builder.getIntegerAttr(elemTy, -1));
+        }
+        Value minusOne =
+            convertScalarToI64(builder, op.getLoc(), minusOneScalar);
         dispatchShift<pto::UBVmulSOp>(op.getLoc(), builder, dstPtr, srcPtr,
                                       minusOne, ptrType, *info);
         op.erase();

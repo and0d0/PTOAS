@@ -38,6 +38,7 @@
 | PTO Op | Decomposition | Intrinsic(s) | dtypes | Status |
 |---|---|---|---|---|
 | `tneg` | `dst = src * (-1)` | `VMULS` | f32, f16 | Done |
+| `trecip` | blocked | no native `VRECIP`; needs verified UB duplicate/fill of constant-one tile plus `VDIV`, or a scalar-over-tile divide intrinsic | f32, f16 | Blocked |
 
 ### Scalar-Tile Binary Ops
 
@@ -111,6 +112,11 @@ This preserves the exact bit pattern, unlike `SIToFPOp` which would convert
 the integer value (3 → 3.0, losing fractional parts).
 
 For integer types (s16/s32), the i64 is passed directly to the intrinsic.
+
+`tneg` must also use this bitcast-preserving path. Passing raw integer `i64 -1`
+to `VMULS.f32/f16` truncates to all-one float bit patterns, which become NaN.
+The lowering therefore materializes typed `-1.0` (`f32`/`f16`) and bitcasts it to
+the UB scalar `i64` representation.
 
 ## Count Mode Limitation (C220)
 
