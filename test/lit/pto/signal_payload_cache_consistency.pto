@@ -64,6 +64,88 @@ module {
     return
   }
 
+  func.func @ttest_true_branch_acquire(
+      %payload_ptr: !pto.ptr<i32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    %ready = pto.comm.ttest(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {cmp = #pto<wait_cmp ge>} -> i1
+
+    scf.if %ready {
+      pto.cmo.cacheinvalid all #pto.address_space<gm>
+      %val = pto.load_scalar %payload_ptr[%c0] : !pto.ptr<i32> -> i32
+      pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    }
+    return
+  }
+
+  func.func @ttest_false_branch_conservative_acquire(
+      %payload_ptr: !pto.ptr<i32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    %ready = pto.comm.ttest(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {cmp = #pto<wait_cmp ge>} -> i1
+
+    scf.if %ready {
+    } else {
+      pto.cmo.cacheinvalid all #pto.address_space<gm>
+      %val = pto.load_scalar %payload_ptr[%c0] : !pto.ptr<i32> -> i32
+      pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    }
+    return
+  }
+
+  func.func @ttest_polling_loop_acquire(
+      %payload_ptr: !pto.ptr<i32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %true = arith.constant true
+    %v_i32 = arith.constant 1 : i32
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+
+    %done = scf.while (%keep_polling = %true) : (i1) -> i1 {
+      %ready = pto.comm.ttest(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+          {cmp = #pto<wait_cmp ge>} -> i1
+      %not_ready = arith.xori %ready, %true : i1
+      scf.condition(%not_ready) %not_ready : i1
+    } do {
+    ^bb0(%keep_polling_body: i1):
+      scf.yield %keep_polling_body : i1
+    }
+
+    pto.cmo.cacheinvalid all #pto.address_space<gm>
+    %val = pto.load_scalar %payload_ptr[%c0] : !pto.ptr<i32> -> i32
+    scf.if %done {
+      pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    }
+    return
+  }
+
   func.func @store_scalar_tnotify_release(
       %payload_ptr: !pto.ptr<i32>,
       %signal_ptr: !pto.ptr<i32>)
@@ -73,6 +155,41 @@ module {
     %v_i32 = arith.constant 7 : i32
 
     pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    pto.cmo.cacheinvalid all #pto.address_space<gm>
+    pto.fence.barrier_all #pto.fence_scope<gm>
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op set>}
+    return
+  }
+
+  func.func @mixed_scalar_mte_release_tnotify(
+      %payload_ptr: !pto.ptr<i32>,
+      %dst_ptr: !pto.ptr<f32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %v_i32 = arith.constant 7 : i32
+
+    %tile = pto.alloc_tile :
+      !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %dst = pto.partition_view %dst_view,
+      offsets = [%c0, %c0], sizes = [%c1, %c32]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x32xf32>
+
+    pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    pto.tstore ins(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+               outs(%dst : !pto.partition_tensor_view<1x32xf32>)
     pto.cmo.cacheinvalid all #pto.address_space<gm>
     pto.fence.barrier_all #pto.fence_scope<gm>
 
@@ -100,8 +217,33 @@ module {
 // CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 // CHECK:      {{.*}} = {{.*}}[{{.*}}];
 
+// CHECK-LABEL: AICORE void ttest_true_branch_acquire(
+// CHECK:      pto::comm::TTEST(
+// CHECK:      if (
+// CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
+// CHECK:      {{.*}} = {{.*}}[{{.*}}];
+
+// CHECK-LABEL: AICORE void ttest_false_branch_conservative_acquire(
+// CHECK:      pto::comm::TTEST(
+// CHECK:      else
+// CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
+// CHECK:      {{.*}} = {{.*}}[{{.*}}];
+
+// CHECK-LABEL: AICORE void ttest_polling_loop_acquire(
+// CHECK:      pto::comm::TTEST(
+// CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
+// CHECK:      {{.*}} = {{.*}}[{{.*}}];
+
 // CHECK-LABEL: AICORE void store_scalar_tnotify_release(
 // CHECK:      {{.*}}[{{.*}}] = {{.*}};
 // CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
+// CHECK-NEXT: dsb(DSB_DDR);
+// CHECK:      pto::comm::TNOTIFY(
+
+// CHECK-LABEL: AICORE void mixed_scalar_mte_release_tnotify(
+// CHECK:      {{.*}}[{{.*}}] = {{.*}};
+// CHECK:      TSTORE(
+// CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
+// CHECK-NEXT: pipe_barrier(PIPE_MTE3);
 // CHECK-NEXT: dsb(DSB_DDR);
 // CHECK:      pto::comm::TNOTIFY(
