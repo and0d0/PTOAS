@@ -18,6 +18,18 @@ script builds a custom ``launch.cpp`` containing:
 
 Use it to validate the kernel while the generated PTODSL runtime wrapper does
 not yet expose a dynamic UB launch-size parameter.
+
+The build-and-launch pipeline:
+
+1. Compile the PTODSL kernel to MLIR.
+2. Generate a hand-written ``launch.cpp`` that declares the kernel and
+   provides a C wrapper with a hardcoded ``dynSharedBytes``, then
+   launches via ``kernel<<<grid, dynSharedBytes, stream>>>(...)``.
+3. Lower MLIR to object code via ``ptoas``, then compile and link the
+   C++ wrapper with the kernel object into a shared library.
+4. Load the library with ``ctypes.CDLL``, call the wrapper with grid,
+   stream, and pointer arguments.
+5. Compare the output against a NumPy reference for validation.
 """
 
 from __future__ import annotations
