@@ -1882,7 +1882,7 @@ descriptor.
 |-----------|------|-------------|
 | `dtype` | PTO dtype | Element type, such as `pto.f32` |
 | `size` | Positive Python `int` | Number of elements in the builtin vector value |
-| `init` | Scalar value, vector value, or `None` | Optional initializer; scalar values are broadcast to all elements |
+| `init` | Scalar value, builtin vector value, or `None` | Optional initializer; broadcastable scalar inputs: Python scalar literal, SSA scalar value, dynamic runtime scalar value |
 
 **Returns**:
 
