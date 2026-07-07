@@ -1867,35 +1867,18 @@ MX variants require MX-enabled dtypes (f8) and pre-loaded scale payloads. For mo
 
 ---
 
-## 8.4 Builtin vector values
+## 8.4 Builtin vector arithmetic
 
-`pto.vec(dtype, size, *, init=None)` names a builtin vector type or
-constructs a vector value. When `init` is a scalar, it is broadcast to
-all `size` elements. When `init` is `None`, the call returns a vector type
-descriptor.
-
-#### `pto.vec(dtype, size, *, init=None)`
-
-**Parameters**:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `dtype` | PTO dtype | Element type, such as `pto.f32` |
-| `size` | Positive Python `int` | Number of elements in the builtin vector value |
-| `init` | Scalar value, builtin vector value, or `None` | Optional initializer; broadcastable scalar inputs: Python scalar literal, SSA scalar value, dynamic runtime scalar value |
-
-**Returns**:
-
-| Return Value | Type | Description |
-|--------------|------|-------------|
-| `result` | Vector type or `pto.vec(dtype, size)` value | Without `init`, returns a vector type descriptor; with `init`, returns a vector value |
+Builtin vector values are described in Section 4.9. They support elementwise
+arithmetic in SIMT scalar code after contiguous scalar loads or explicit
+`pto.Vec(...)` construction.
 
 **Example**:
 
 <!-- ptodsl-doc-pending: {"reason":"illustrative fragment; covered by test_jit_compile scalar contiguous vector probes"} -->
 ```python
 x4 = scalar.load(ptr, offset, contiguous=4)
-rstd4 = pto.vec(pto.f32, 4, init=rstd)
+rstd4 = pto.Vec(pto.f32, 4, init=rstd)
 y4 = x4 * rstd4
 scalar.store(y4, ptr, offset)
 ```

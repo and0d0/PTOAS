@@ -17,9 +17,9 @@ from mlir.dialects import llvm
 from mlir.ir import IntegerType, VectorType
 
 
-def vec(dtype, size: int, *, init=None):
+def Vec(dtype, size: int, *, init=None):
     """Create a builtin vector type descriptor or broadcast vector value."""
-    size = _validate_vec_size(size, context="pto.vec(...)")
+    size = _validate_vec_size(size, context="pto.Vec(...)")
     descriptor = vec_type(dtype, size)
     if init is None:
         return descriptor
@@ -34,10 +34,10 @@ def _broadcast_vec_value(descriptor, init):
     if hasattr(raw_init, "type") and VectorType.isinstance(raw_init.type):
         vec_value = VecValue(raw_init)
         if vec_value.type != vector_type:
-            raise TypeError(f"pto.vec(..., init=vector) expected {vector_type}, got {vec_value.type}")
+            raise TypeError(f"pto.Vec(..., init=vector) expected {vector_type}, got {vec_value.type}")
         return vec_value
 
-    scalar_value = coerce_scalar_to_type(init, element_type, context="pto.vec(..., init=...)")
+    scalar_value = coerce_scalar_to_type(init, element_type, context="pto.Vec(..., init=...)")
     current = llvm.UndefOp(vector_type).res
     i32 = IntegerType.get_signless(32)
     for index in range(descriptor.size):
@@ -46,4 +46,4 @@ def _broadcast_vec_value(descriptor, init):
     return VecValue(current)
 
 
-__all__ = ["vec"]
+__all__ = ["Vec"]

@@ -194,7 +194,7 @@ The example exercises the PTODSL surfaces needed by this style of kernel:
 - hand-authored dynamic UB scratch layout with `pto.castptr` / `pto.addptr`
 - contiguous vector loads through `scalar.load(..., contiguous=N)` and vector
   stores through `scalar.store(vector, ...)`
-- `pto.vec(..., init=scalar)` for scalar-to-vector broadcast
+- `pto.Vec(..., init=scalar)` for scalar-to-vector broadcast
 - `pto.simt_allreduce_sum(...)` lowered inline through `pto.redux_add` and
   `pto.syncthreads`
 - explicit pipe `set_flag` / `wait_flag` synchronization, including dynamic

@@ -156,10 +156,10 @@ class _MaskDescriptor(_DType):
 class _VecDescriptor(_DType):
     def __init__(self, elem, size: int):
         self._elem = elem
-        self._size = _validate_vec_size(size, context="pto.vec(...)")
+        self._size = _validate_vec_size(size, context="pto.Vec(...)")
 
     def resolve(self) -> Type:
-        elem = _ensure_non_storage_only_dtype(self._elem, context="pto.vec(...)")
+        elem = _ensure_non_storage_only_dtype(self._elem, context="pto.Vec(...)")
         return VectorType.get([self._size], elem)
 
     @property
@@ -171,7 +171,7 @@ class _VecDescriptor(_DType):
         return self._elem
 
     def __repr__(self):
-        return f"<pto.vec {self._size}x{self._elem}>"
+        return f"<pto.Vec {self._size}x{self._elem}>"
 
 
 def _validate_vec_size(size: int, *, context: str) -> int:
