@@ -2824,13 +2824,17 @@ def CmoCacheInvalidOp : PTO_Op<"cmo.cacheinvalid"> {
     The whole-cache form lowers to PTO-ISA's two-argument
     `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)`.
 
-    The single-cache-line form lowers to
-    `dcci(addr, cache_line_t::SINGLE_CACHE_LINE)`, where `addr` is a GM
-    pointer whose cache line should be maintained.
+    The single-cache-line form carries the GM payload address selected by the
+    producer DSL/user.  When it is required for a cacheable scalar path, it
+    lowers to `dcci(addr, cache_line_t::SINGLE_CACHE_LINE)`.  When it only marks
+    a non-cacheable payload for signal release analysis, MemoryConsistency may
+    consume it as marker-only IR and erase it before EmitC lowering.
 
     MemoryConsistency interprets both forms as explicit CMO boundaries on
-    producer release and consumer acquire paths. Precise coverage of the
-    selected line is the producer DSL/user's responsibility in this phase.
+    producer release and consumer acquire paths. It also uses the addressed form
+    to match a TNotify payload against pending MTE2, MTE3, FIX, or scalar GM
+    accesses before deciding which pipe drains are required. Precise coverage of
+    the selected line is the producer DSL/user's responsibility in this phase.
   }];
 
   let arguments = (ins

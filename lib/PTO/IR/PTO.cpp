@@ -8046,13 +8046,15 @@ static bool isGmOrDefaultAddressSpace(pto::AddressSpace space) {
   return space == pto::AddressSpace::GM || space == pto::AddressSpace::Zero;
 }
 
-static bool isGmOrDefaultPointerLikeType(Type type) {
+static bool isGmOrDefaultCmoAddressType(Type type) {
   if (auto ptrTy = dyn_cast<mlir::pto::PtrType>(type))
     return isGmOrDefaultAddressSpace(ptrTy.getMemorySpace().getAddressSpace());
   if (auto memTy = dyn_cast<MemRefType>(type)) {
     auto spaceAttr = dyn_cast_or_null<pto::AddressSpaceAttr>(memTy.getMemorySpace());
     return !spaceAttr || isGmOrDefaultAddressSpace(spaceAttr.getAddressSpace());
   }
+  if (isa<mlir::pto::TensorViewType, mlir::pto::PartitionTensorViewType>(type))
+    return true;
   return false;
 }
 
@@ -8103,8 +8105,8 @@ LogicalResult CmoCacheInvalidOp::verify() {
     return emitOpError("only supports GM cache maintenance");
 
   if (Value addr = getAddr()) {
-    if (!isGmOrDefaultPointerLikeType(addr.getType()))
-      return emitOpError("single_cache_line address expects a GM pointer or GM memref");
+    if (!isGmOrDefaultCmoAddressType(addr.getType()))
+      return emitOpError("single_cache_line address expects a GM pointer, GM memref, or GM tensor view");
   }
 
   return success();

@@ -10,6 +10,7 @@
 #include "PTO/Transforms/InsertSync/SyncMacroModel.h"
 #include "PTO/Transforms/MemoryConsistencyAttrs.h"
 #include "PTO/Transforms/Passes.h"
+#include "Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
@@ -33,12 +34,65 @@ static bool isGmAddressSpace(pto::AddressSpace space) {
   return space == pto::AddressSpace::GM || space == pto::AddressSpace::Zero;
 }
 
+static Value getPayloadAliasRoot(Value value) {
+  for (unsigned depth = 0; value && depth < 64; ++depth) {
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      return value;
+
+    Value next;
+    if (auto part = dyn_cast<pto::PartitionViewOp>(def)) {
+      next = part.getSource();
+    } else if (auto make = dyn_cast<pto::MakeTensorViewOp>(def)) {
+      next = make.getPtr();
+    } else if (auto addPtr = dyn_cast<pto::AddPtrOp>(def)) {
+      next = addPtr.getPtr();
+    } else if (auto castPtr = dyn_cast<pto::CastPtrOp>(def)) {
+      next = castPtr.getInput();
+    } else if (auto unrealized = dyn_cast<UnrealizedConversionCastOp>(def)) {
+      auto result = dyn_cast<OpResult>(value);
+      if (result && result.getResultNumber() < unrealized.getNumOperands())
+        next = unrealized.getOperand(result.getResultNumber());
+    } else if (auto alias = pto::getOperationAliasInfo(def)) {
+      if (alias->first == value)
+        next = alias->second;
+    }
+
+    if (!next || next == value)
+      return value;
+    value = next;
+  }
+  return value;
+}
+
+static bool payloadMayAlias(Value lhs, Value rhs) {
+  if (!lhs || !rhs)
+    return true;
+  Value lhsRoot = getPayloadAliasRoot(lhs);
+  Value rhsRoot = getPayloadAliasRoot(rhs);
+  return lhsRoot == rhsRoot;
+}
+
+struct PendingReleaseAccess {
+  pto::PIPE pipe = pto::PIPE::PIPE_UNASSIGNED;
+  Value payload;
+  bool drainPending = false;
+  bool needsDsbDdr = false;
+  bool needsGmCacheCmo = false;
+};
+
 struct TNotifyReleaseState {
   bool drainMte2 = false;
   bool drainMte3 = false;
   bool drainFix = false;
   bool needsDsbDdr = false;
   bool needsGmCacheCmo = false;
+  bool hasAddressedCmo = false;
+  bool addressedDrainMte2 = false;
+  bool addressedDrainMte3 = false;
+  bool addressedDrainFix = false;
+  bool addressedNeedsDsbDdr = false;
+  SmallVector<PendingReleaseAccess, 8> pendingAccesses;
 
   void merge(const TNotifyReleaseState &other) {
     drainMte2 |= other.drainMte2;
@@ -46,6 +100,13 @@ struct TNotifyReleaseState {
     drainFix |= other.drainFix;
     needsDsbDdr |= other.needsDsbDdr;
     needsGmCacheCmo |= other.needsGmCacheCmo;
+    hasAddressedCmo |= other.hasAddressedCmo;
+    addressedDrainMte2 |= other.addressedDrainMte2;
+    addressedDrainMte3 |= other.addressedDrainMte3;
+    addressedDrainFix |= other.addressedDrainFix;
+    addressedNeedsDsbDdr |= other.addressedNeedsDsbDdr;
+    pendingAccesses.append(other.pendingAccesses.begin(),
+                           other.pendingAccesses.end());
   }
 
   void clear() {
@@ -54,41 +115,114 @@ struct TNotifyReleaseState {
     drainFix = false;
     needsDsbDdr = false;
     needsGmCacheCmo = false;
+    hasAddressedCmo = false;
+    addressedDrainMte2 = false;
+    addressedDrainMte3 = false;
+    addressedDrainFix = false;
+    addressedNeedsDsbDdr = false;
+    pendingAccesses.clear();
   }
 
-  void applyBarrier(pto::PIPE pipe) {
+  void addAccess(pto::PIPE pipe, Value payload, bool needsDsb,
+                 bool needsCmo) {
+    PendingReleaseAccess access;
+    access.pipe = pipe;
+    access.payload = payload;
+    access.drainPending = pipe == pto::PIPE::PIPE_MTE2 ||
+                          pipe == pto::PIPE::PIPE_MTE3 ||
+                          pipe == pto::PIPE::PIPE_FIX;
+    access.needsDsbDdr = needsDsb;
+    access.needsGmCacheCmo = needsCmo;
+    pendingAccesses.push_back(access);
+
     switch (pipe) {
     case pto::PIPE::PIPE_MTE2:
-      drainMte2 = false;
+      drainMte2 = true;
       break;
     case pto::PIPE::PIPE_MTE3:
-      drainMte3 = false;
+      drainMte3 = true;
       break;
     case pto::PIPE::PIPE_FIX:
-      drainFix = false;
-      break;
-    case pto::PIPE::PIPE_ALL:
-      drainMte2 = false;
-      drainMte3 = false;
-      drainFix = false;
+      drainFix = true;
       break;
     default:
       break;
     }
+    needsDsbDdr |= needsDsb;
+    needsGmCacheCmo |= needsCmo;
+  }
+
+  void markPipeDrained(pto::PIPE pipe) {
+    auto pipeMatches = [&](pto::PIPE accessPipe) {
+      return pipe == pto::PIPE::PIPE_ALL || accessPipe == pipe;
+    };
+    for (PendingReleaseAccess &access : pendingAccesses)
+      if (pipeMatches(access.pipe))
+        access.drainPending = false;
+
+    if (pipe == pto::PIPE::PIPE_MTE2 || pipe == pto::PIPE::PIPE_ALL) {
+      drainMte2 = false;
+      addressedDrainMte2 = false;
+    }
+    if (pipe == pto::PIPE::PIPE_MTE3 || pipe == pto::PIPE::PIPE_ALL) {
+      drainMte3 = false;
+      addressedDrainMte3 = false;
+    }
+    if (pipe == pto::PIPE::PIPE_FIX || pipe == pto::PIPE::PIPE_ALL) {
+      drainFix = false;
+      addressedDrainFix = false;
+    }
+  }
+
+  void applyBarrier(pto::PIPE pipe) {
+    markPipeDrained(pipe);
   }
 
   void applyFenceBarrierAll(pto::FenceScope scope) {
     if (scope != pto::FenceScope::GM && scope != pto::FenceScope::All)
       return;
-    if (drainMte3 || drainFix || needsGmCacheCmo)
-      return;
-    needsDsbDdr = false;
+    if (hasAddressedCmo) {
+      if (!addressedDrainMte3 && !addressedDrainFix)
+        addressedNeedsDsbDdr = false;
+    }
+    if (!drainMte3 && !drainFix && !needsGmCacheCmo)
+      needsDsbDdr = false;
   }
 
-  void applyCmoCacheInvalid(pto::AddressSpace space) {
+  void applyCmoCacheInvalid(pto::CmoCacheInvalidOp cmo) {
+    pto::AddressSpace space = cmo.getSpace().getAddressSpace();
     if (!isGmAddressSpace(space))
       return;
-    needsGmCacheCmo = false;
+    Value addr = cmo.getAddr();
+    if (!addr) {
+      needsGmCacheCmo = false;
+      cmo->removeAttr(kCmoCacheInvalidSkipLoweringAttrName);
+      return;
+    }
+
+    hasAddressedCmo = true;
+    bool needsRealCmo = false;
+    for (const PendingReleaseAccess &access : pendingAccesses) {
+      if (!payloadMayAlias(access.payload, addr))
+        continue;
+      if (access.drainPending) {
+        if (access.pipe == pto::PIPE::PIPE_MTE2)
+          addressedDrainMte2 = true;
+        if (access.pipe == pto::PIPE::PIPE_MTE3)
+          addressedDrainMte3 = true;
+        if (access.pipe == pto::PIPE::PIPE_FIX)
+          addressedDrainFix = true;
+      }
+      addressedNeedsDsbDdr |= access.needsDsbDdr;
+      needsRealCmo |= access.needsGmCacheCmo;
+    }
+
+    if (needsRealCmo) {
+      cmo->removeAttr(kCmoCacheInvalidSkipLoweringAttrName);
+    } else {
+      cmo->setAttr(kCmoCacheInvalidSkipLoweringAttrName,
+                   UnitAttr::get(cmo.getContext()));
+    }
   }
 };
 
@@ -106,9 +240,12 @@ struct SignalAcquireState {
     dirtyGmCache = false;
   }
 
-  void applyCmoCacheInvalid(pto::AddressSpace space) {
+  void applyCmoCacheInvalid(pto::AddressSpace space,
+                            pto::CmoCacheInvalidOp cmo = nullptr) {
     if (!isGmAddressSpace(space))
       return;
+    if (cmo && pendingInvalidateGmCache)
+      cmo->removeAttr(kCmoCacheInvalidSkipLoweringAttrName);
     dirtyGmCache = false;
     pendingInvalidateGmCache = false;
   }
@@ -128,30 +265,31 @@ static bool isGmScalarMemory(Type type) {
   return false;
 }
 
-static TNotifyReleaseState getMte2PayloadReadReleaseState() {
+static TNotifyReleaseState getMte2PayloadReadReleaseState(Value payload) {
   TNotifyReleaseState state;
-  state.drainMte2 = true;
+  state.addAccess(pto::PIPE::PIPE_MTE2, payload, /*needsDsb=*/false,
+                  /*needsCmo=*/false);
   return state;
 }
 
-static TNotifyReleaseState getMte3GmWriteReleaseState() {
+static TNotifyReleaseState getMte3GmWriteReleaseState(Value payload) {
   TNotifyReleaseState state;
-  state.drainMte3 = true;
-  state.needsDsbDdr = true;
+  state.addAccess(pto::PIPE::PIPE_MTE3, payload, /*needsDsb=*/true,
+                  /*needsCmo=*/false);
   return state;
 }
 
-static TNotifyReleaseState getFixGmWriteReleaseState() {
+static TNotifyReleaseState getFixGmWriteReleaseState(Value payload) {
   TNotifyReleaseState state;
-  state.drainFix = true;
-  state.needsDsbDdr = true;
+  state.addAccess(pto::PIPE::PIPE_FIX, payload, /*needsDsb=*/true,
+                  /*needsCmo=*/false);
   return state;
 }
 
-static TNotifyReleaseState getCacheableGmStoreReleaseState() {
+static TNotifyReleaseState getCacheableGmStoreReleaseState(Value payload) {
   TNotifyReleaseState state;
-  state.needsGmCacheCmo = true;
-  state.needsDsbDdr = true;
+  state.addAccess(pto::PIPE::PIPE_UNASSIGNED, payload, /*needsDsb=*/true,
+                  /*needsCmo=*/true);
   return state;
 }
 
@@ -165,8 +303,12 @@ static TNotifyReleaseState getReleaseStateForMacroModel(Operation *op) {
     // Macro MTE3 phases write GM payloads internally. A following TNotify must
     // publish its signal only after those stores are drained and DDR-visible.
     if (phase.pipe == PipelineType::PIPE_MTE3) {
-      state.drainMte3 = true;
-      state.needsDsbDdr = true;
+      if (phase.defValues.empty()) {
+        state.merge(getMte3GmWriteReleaseState(Value{}));
+      } else {
+        for (Value value : phase.defValues)
+          state.merge(getMte3GmWriteReleaseState(value));
+      }
     }
   }
   return state;
@@ -178,22 +320,25 @@ static TNotifyReleaseState getDirectTNotifyReleaseState(Operation *op) {
 
   if (auto store = dyn_cast<pto::StoreScalarOp>(op)) {
     if (isGmScalarMemory(store.getPtr().getType()))
-      return getCacheableGmStoreReleaseState();
+      return getCacheableGmStoreReleaseState(store.getPtr());
   }
 
-  if (isa<pto::TLoadOp, pto::TPrefetchOp>(op))
-    return getMte2PayloadReadReleaseState();
+  if (auto tload = dyn_cast<pto::TLoadOp>(op))
+    return getMte2PayloadReadReleaseState(tload.getSrc());
+
+  if (auto prefetch = dyn_cast<pto::TPrefetchOp>(op))
+    return getMte2PayloadReadReleaseState(prefetch.getSrc());
 
   if (auto tstore = dyn_cast<pto::TStoreOp>(op)) {
     if (tstore.getPipe() == pto::PIPE::PIPE_MTE3)
-      return getMte3GmWriteReleaseState();
+      return getMte3GmWriteReleaseState(tstore.getDst());
     if (tstore.getPipe() == pto::PIPE::PIPE_FIX)
-      return getFixGmWriteReleaseState();
+      return getFixGmWriteReleaseState(tstore.getDst());
     return {};
   }
 
   if (isa<pto::TStoreFPOp>(op))
-    return getFixGmWriteReleaseState();
+    return getFixGmWriteReleaseState(cast<pto::TStoreFPOp>(op).getDst());
 
   TNotifyReleaseState macroState = getReleaseStateForMacroModel(op);
   if (macroState.drainMte3 || macroState.drainFix ||
@@ -230,8 +375,8 @@ static void applyFenceBarrierAllForSummary(pto::FenceBarrierAllOp fence,
   // barrier_all.  Loop summaries must model that transfer without mutating IR,
   // otherwise already-released loop-carried writes are reported again at the
   // next iteration's TNotify.
-  state.drainMte3 = false;
-  state.drainFix = false;
+  state.markPipeDrained(pto::PIPE::PIPE_MTE3);
+  state.markPipeDrained(pto::PIPE::PIPE_FIX);
   state.applyFenceBarrierAll(fence.getScope().getScope());
 }
 
@@ -264,7 +409,7 @@ getTNotifyReleaseExitState(Operation *op,
   if (auto barrier = dyn_cast<pto::BarrierOp>(op))
     pendingState.applyBarrier(barrier.getPipe().getPipe());
   if (auto cmo = dyn_cast<pto::CmoCacheInvalidOp>(op))
-    pendingState.applyCmoCacheInvalid(cmo.getSpace().getAddressSpace());
+    pendingState.applyCmoCacheInvalid(cmo);
   if (auto fence = dyn_cast<pto::FenceBarrierAllOp>(op))
     applyFenceBarrierAllForSummary(fence, pendingState);
   return pendingState;
@@ -378,13 +523,25 @@ static void setTNotifyReleaseAttrs(pto::TNotifyOp op,
 static void setTNotifyPipeDrainAttrs(pto::TNotifyOp op,
                                      const TNotifyReleaseState &state) {
   TNotifyReleaseState emitState;
-  emitState.drainMte2 = state.drainMte2;
+  emitState.drainMte2 =
+      state.hasAddressedCmo ? state.addressedDrainMte2 : state.drainMte2;
   setTNotifyReleaseAttrs(op, emitState);
 }
 
 static void diagnoseTNotifyRelease(pto::TNotifyOp op,
                                    const TNotifyReleaseState &state,
                                    bool &hasFailure) {
+  if (state.hasAddressedCmo) {
+    if (state.addressedNeedsDsbDdr) {
+      op.emitOpError()
+          << "requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>` "
+             "after the matching `pto.cmo.cacheinvalid %addr "
+             "single_cache_line` and before publishing the signal";
+      hasFailure = true;
+    }
+    return;
+  }
+
   if (state.needsGmCacheCmo) {
     op.emitOpError()
         << "requires explicit "
@@ -414,13 +571,17 @@ static void insertDrainsBeforeBarrierAll(pto::FenceBarrierAllOp fence,
     builder.create<pto::BarrierOp>(
         fence.getLoc(), pto::PipeAttr::get(fence.getContext(), pipe));
   };
-  if (state.drainMte3) {
+  const bool drainMte3 =
+      state.hasAddressedCmo ? state.addressedDrainMte3 : state.drainMte3;
+  const bool drainFix =
+      state.hasAddressedCmo ? state.addressedDrainFix : state.drainFix;
+  if (drainMte3) {
     insertBarrier(pto::PIPE::PIPE_MTE3);
-    state.drainMte3 = false;
+    state.markPipeDrained(pto::PIPE::PIPE_MTE3);
   }
-  if (state.drainFix) {
+  if (drainFix) {
     insertBarrier(pto::PIPE::PIPE_FIX);
-    state.drainFix = false;
+    state.markPipeDrained(pto::PIPE::PIPE_FIX);
   }
 }
 
@@ -487,7 +648,7 @@ annotateTNotifyReleaseForBlock(Block &block,
     if (auto barrier = dyn_cast<pto::BarrierOp>(op))
       pendingState.applyBarrier(barrier.getPipe().getPipe());
     if (auto cmo = dyn_cast<pto::CmoCacheInvalidOp>(op))
-      pendingState.applyCmoCacheInvalid(cmo.getSpace().getAddressSpace());
+      pendingState.applyCmoCacheInvalid(cmo);
     if (auto fence = dyn_cast<pto::FenceBarrierAllOp>(op)) {
       insertDrainsBeforeBarrierAll(fence, pendingState);
       pendingState.applyFenceBarrierAll(fence.getScope().getScope());
@@ -612,7 +773,7 @@ annotateSignalAcquireForBlock(Block &block, SignalAcquireState entryState,
       state.pendingInvalidateGmCache = true;
 
     if (auto cmo = dyn_cast<pto::CmoCacheInvalidOp>(op))
-      state.applyCmoCacheInvalid(cmo.getSpace().getAddressSpace());
+      state.applyCmoCacheInvalid(cmo.getSpace().getAddressSpace(), cmo);
 
     SignalAcquireState combinedRegionExitState;
     for (Region &region : op.getRegions()) {
@@ -653,11 +814,18 @@ static bool annotateSignalAcquire(ModuleOp module) {
   return hasFailure;
 }
 
+static void clearMemoryConsistencyInternalAttrs(ModuleOp module) {
+  module.walk([](pto::CmoCacheInvalidOp cmo) {
+    cmo->removeAttr(kCmoCacheInvalidSkipLoweringAttrName);
+  });
+}
+
 struct PTOMemoryConsistencyPass
     : public mlir::pto::impl::PTOMemoryConsistencyBase<
           PTOMemoryConsistencyPass> {
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    clearMemoryConsistencyInternalAttrs(module);
     bool callFailed = diagnoseNonInlinedMemoryConsistencyCalls(module);
     bool releaseFailed = annotateTNotifyRelease(module);
     bool acquireFailed = annotateSignalAcquire(module);

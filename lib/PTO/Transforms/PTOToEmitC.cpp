@@ -6531,6 +6531,10 @@ struct PTOCmoCacheInvalidToEmitC
 
   LogicalResult matchAndRewrite(pto::CmoCacheInvalidOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (op->hasAttr(kCmoCacheInvalidSkipLoweringAttrName)) {
+      rewriter.eraseOp(op);
+      return success();
+    }
     if (!isGmCmoSpace(op.getSpace().getAddressSpace()))
       return rewriter.notifyMatchFailure(op, "unsupported CMO invalidate space");
     if (op.getAddr()) {

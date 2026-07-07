@@ -20,6 +20,8 @@ inline constexpr llvm::StringLiteral kTNotifyDrainMte3AttrName =
     "__pto.emitc.tnotify_drain_mte3";
 inline constexpr llvm::StringLiteral kAcquireInvalidateGmCacheAttrName =
     "__pto.emitc.acquire_invalidate_gm_cache";
+inline constexpr llvm::StringLiteral kCmoCacheInvalidSkipLoweringAttrName =
+    "__pto.emitc.cmo_cacheinvalid_skip_lowering";
 
 } // namespace pto
 } // namespace mlir
