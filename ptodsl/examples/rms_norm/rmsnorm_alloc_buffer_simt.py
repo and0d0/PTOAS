@@ -23,20 +23,6 @@ Run this file directly to print the emitted MLIR for one specialization.
 """
 
 import argparse
-from pathlib import Path
-import sys
-
-
-if __package__ in {None, ""}:
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        if (candidate / "ptodsl" / "__init__.py").exists():
-            sys.path.insert(0, str(candidate))
-            break
-    else:
-        raise RuntimeError(
-            "Unable to locate the PTODSL Python package root from rmsnorm_alloc_buffer_simt.py"
-        )
 
 
 from ptodsl import pto, scalar
@@ -101,7 +87,7 @@ def rmsnorm_simt_token_body(
 
         x_vec = scalar.load(x_frag, frag_offset, contiguous=lanes)
         w_vec = scalar.load(w_ub, lane_base, contiguous=lanes)
-        rstd_vec = pto.vec(pto.f32, lanes, init=rstd)
+        rstd_vec = pto.Vec(pto.f32, lanes, init=rstd)
         y_vec = x_vec * rstd_vec * w_vec
         scalar.store(y_vec, y_ub, y_offset)
 
