@@ -930,6 +930,11 @@ def alloc_buffer_local_probe():
     alloc_buffer_local_helper()
 
 
+@pto.jit(target="a5", mode="explicit")
+def alloc_buffer_outside_simt_probe():
+    _ = pto.alloc_buffer((32,), pto.f32)
+
+
 @pto.simt
 def rmsnorm_alloc_buffer_frag_helper(
     w_ub: pto.ptr(pto.f32, pto.MemorySpace.UB),
@@ -4353,6 +4358,11 @@ def main() -> None:
         )
         is not None,
         "alloc_buffer probe should keep allocation inside the SIMT helper body",
+    )
+    expect_raises(
+        RuntimeError,
+        alloc_buffer_outside_simt_probe.compile,
+        "pto.alloc_buffer(...) may only be used inside a @pto.simt helper or inline pto.simt() scope",
     )
     rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm hand-authored UB layout specialization")
