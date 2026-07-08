@@ -1062,9 +1062,9 @@ pto.store_vfsimt_info %dim_z, %dim_y, %dim_x : i32, i32, i32
 func.call @body(%ub_out) : (!pto.ptr<i32, ub>) -> ()
 pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
 pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-pto.mte_ub_gm %ub_out, %gm_out, %len
+pto.mte_ub_gm %ub_out, %gm_out, %l2_cache_ctl, %len
   nburst(%n, %src_stride, %dst_stride)
-  : !pto.ptr<i32, ub>, !pto.ptr<i32, gm>, i64, i64, i64, i64
+  : !pto.ptr<i32, ub>, !pto.ptr<i32, gm>, i64, i64, i64, i64, i64
 ```
 
 For pipeline synchronization semantics, see
@@ -1094,9 +1094,9 @@ module attributes {pto.target_arch = "a5",
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_out, %out, %c128_i64
+    pto.mte_ub_gm %ub_out, %out, %c0_i64, %c128_i64
       nburst(%c32_i64, %c128_i64, %c128_i64)
-      : !pto.ptr<i32, ub>, !pto.ptr<i32, gm>, i64, i64, i64, i64
+      : !pto.ptr<i32, ub>, !pto.ptr<i32, gm>, i64, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
     return
   }

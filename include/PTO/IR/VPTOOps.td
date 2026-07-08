@@ -2624,7 +2624,7 @@ def PTO_CopyUbufToGmOp : PTO_Op<"copy_ubuf_to_gm", [
     I64:$sid,
     I64:$n_burst,
     I64:$len_burst,
-    I64:$reserved,
+    I64:$l2_cache_ctl,
     I64:$burst_dst_stride,
     I64:$burst_src_stride
   );
@@ -2635,9 +2635,9 @@ def PTO_CopyUbufToGmOp : PTO_Op<"copy_ubuf_to_gm", [
 
   let assemblyFormat = [{
     $source `,` $destination `,` $sid `,` $n_burst `,` $len_burst `,`
-    $reserved `,` $burst_dst_stride `,` $burst_src_stride
+    $l2_cache_ctl `,` $burst_dst_stride `,` $burst_src_stride
     attr-dict `:` type($source) `,` type($destination) `,` type($sid) `,` type($n_burst) `,`
-    type($len_burst) `,` type($reserved) `,`
+    type($len_burst) `,` type($l2_cache_ctl) `,`
     type($burst_dst_stride) `,` type($burst_src_stride)
   }];
 }
@@ -2649,6 +2649,7 @@ def PTO_MteUbGmOp : PTO_Op<"mte_ub_gm", [
   let arguments = (ins
     PTO_BufferLikeType:$source,
     PTO_BufferLikeType:$destination,
+    I64:$l2_cache_ctl,
     I64:$len_burst,
     I64:$n_burst,
     I64:$nburst_src_stride,
@@ -2667,6 +2668,7 @@ def PTO_MteUbGmOp : PTO_Op<"mte_ub_gm", [
     OpBuilder<(ins
       "::mlir::Value":$source,
       "::mlir::Value":$destination,
+      "::mlir::Value":$l2CacheCtl,
       "::mlir::Value":$lenBurst,
       "::mlir::pto::DmaLoopConfig":$nburst,
       "::llvm::ArrayRef<::mlir::pto::DmaLoopConfig>":$loops
@@ -2674,6 +2676,7 @@ def PTO_MteUbGmOp : PTO_Op<"mte_ub_gm", [
     OpBuilder<(ins
       "::mlir::Value":$source,
       "::mlir::Value":$destination,
+      "::mlir::Value":$l2CacheCtl,
       "::mlir::Value":$lenBurst,
       "::mlir::pto::DmaLoopConfig":$nburst,
       "::std::optional<::mlir::pto::DmaLoopConfig>":$loop1,

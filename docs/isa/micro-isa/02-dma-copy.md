@@ -72,10 +72,10 @@ pto.mte_gm_ub %gm_in, %ub_out, %cache, %len_burst
 
 - **syntax:**
 ```mlir
-pto.mte_ub_gm %ub_src, %gm_dst, %len_burst
+pto.mte_ub_gm %ub_src, %gm_dst, %l2_cache_ctl, %len_burst
   nburst(%n_burst, %src_stride, %dst_stride)
   [loop(%loop_count, %loop_src_stride, %loop_dst_stride)]*
-  : !pto.ptr<T, ub>, !pto.ptr<T, gm>, i64, i64, i64, i64,
+  : !pto.ptr<T, ub>, !pto.ptr<T, gm>, i64, i64, i64, i64, i64,
     [loop i64, i64, i64,]*
 ```
 - **semantics:** Grouped UB→GM DMA transfer. `nburst(...)` defines the innermost repeated burst transfer, and optional `loop(...)` groups add outer repetition levels.
@@ -86,6 +86,7 @@ pto.mte_ub_gm %ub_src, %gm_dst, %len_burst
 |-----------|-------|-------------|
 | `%ub_src` | ptr | UB source pointer (`!pto.ptr<T, ub>`, 32B-aligned) |
 | `%gm_dst` | ptr | GM destination pointer (`!pto.ptr<T, gm>`) |
+| `%l2_cache_ctl` | 4 bits | GM store-side L2 cache control; use `0` for the default allocation policy |
 | `%len_burst` | 16 bits | Contiguous bytes transferred per burst row |
 | `nburst(%n_burst, %src_stride, %dst_stride)` | 16 bits / 21 bits / 40 bits | Required innermost burst group: count, UB source stride, GM destination stride |
 | `loop(%loop_count, %loop_src_stride, %loop_dst_stride)` | 21 bits / 21 bits / 40 bits | Optional outer repetition group: count, UB source stride, GM destination stride |
@@ -102,11 +103,11 @@ pto.mte_ub_gm %ub_src, %gm_dst, %len_burst
 **Example:**
 
 ```mlir
-pto.mte_ub_gm %ub_in, %gm_out, %len_burst
+pto.mte_ub_gm %ub_in, %gm_out, %l2_cache_ctl, %len_burst
   nburst(%rows, %ub_row_stride, %gm_row_stride)
   loop(%tiles, %ub_tile_stride, %gm_tile_stride)
   loop(%batches, %ub_batch_stride, %gm_batch_stride)
-  : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64,
+  : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64,
     loop i64, i64, i64, loop i64, i64, i64
 ```
 
@@ -334,7 +335,7 @@ remains.
 For a form
 
 ```mlir
-pto.mte_ub_gm %ub_src, %dst, %len_burst
+pto.mte_ub_gm %ub_src, %dst, %l2_cache_ctl, %len_burst
   nburst(%n_burst, %src_stride, %dst_stride)
   loop(%c0, %s0, %d0)
   loop(%c1, %s1, %d1)
@@ -506,9 +507,9 @@ GM (dest, 32 × 32 f32):
 ```
 
 ```mlir
-pto.mte_ub_gm %ub_out, %arg1, %c128_i64
+pto.mte_ub_gm %ub_out, %arg1, %c0_i64, %c128_i64
   nburst(%c32_i64, %c128_i64, %c128_i64)
-  : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+  : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
 ```
 
 ---
@@ -544,9 +545,9 @@ GM (dest, into 1024 × 512 matrix):
 ```
 
 ```mlir
-pto.mte_ub_gm %ub_ptr, %gm_ptr, %c256_i64
+pto.mte_ub_gm %ub_ptr, %gm_ptr, %c0_i64, %c256_i64
   nburst(%c64_i64, %c256_i64, %c1024_i64)
-  : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
+  : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
 ```
 
 ---
