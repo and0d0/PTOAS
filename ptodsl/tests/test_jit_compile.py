@@ -860,6 +860,15 @@ def simt_memory_atomic_probe(
 
 
 @pto.simt
+def simt_fp8x2_ldg_stg_probe(
+    gm: pto.ptr(pto.vec_type(pto.f8e4m3, 2), "gm"),
+):
+    idx = scalar.index_cast(pto.get_tid_x())
+    value = pto.ldg(gm, idx)
+    pto.stg(value, gm, idx)
+
+
+@pto.simt
 def simt_specialized_i32_ptr_probe(ptr: pto.ptr(pto.i32, "gm")):
     value = scalar.load(ptr)
     _ = value
@@ -992,11 +1001,13 @@ def simt_resource_attr_launch_probe(*, TRACE_TOKEN: pto.const_expr = 0):
 @pto.jit(target="a5")
 def simt_full_surface_probe(
     gm: pto.ptr(pto.i32, "gm"),
+    gm_fp8x2: pto.ptr(pto.vec_type(pto.f8e4m3, 2), "gm"),
     *,
     TRACE_TOKEN: pto.const_expr = 0,
 ):
     pto.simt_launch(simt_collective_math_probe, dims=(32, 1, 1))
     pto.simt_launch(simt_memory_atomic_probe, gm, dims=(32, 1, 1))
+    pto.simt_launch(simt_fp8x2_ldg_stg_probe, gm_fp8x2, dims=(32, 1, 1))
     pto.simt_launch(simt_keep_stage, dims=(32, 1, 1))
     pto.simt_launch(simt_resume_stage, gm, dims=(32, 1, 1))
 
@@ -4555,6 +4566,19 @@ def main() -> None:
         "pto.resume",
     ):
         expect(op_name in simt_full_text, f"full SIMT surface should contain {op_name}")
+    expect(
+        "!pto.ptr<vector<2xf8E4M3FN>, gm>" in simt_full_text,
+        "SIMT fp8x2 GM pointer annotations should preserve vector<2xf8E4M3FN>",
+    )
+    expect(
+        "pto.ldg" in simt_full_text and "vector<2xf8E4M3FN>" in simt_full_text,
+        "SIMT fp8x2 ldg should infer a vector<2xf8E4M3FN> payload",
+    )
+    expect(
+        "pto.stg" in simt_full_text
+        and "!pto.ptr<vector<2xf8E4M3FN>, gm>, vector<2xf8E4M3FN>" in simt_full_text,
+        "SIMT fp8x2 stg should accept an exact vector payload without scalar coercion",
+    )
 
     expect_raises(
         TypeError,

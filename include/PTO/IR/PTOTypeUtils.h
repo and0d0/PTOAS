@@ -44,6 +44,7 @@ bool isPTOF8E8M0Type(Type t);
 bool isPTOHiFloat8x2Type(Type t);
 bool isPTOFloat4PackedType(Type t);
 bool isPTOLowPrecisionType(Type t);
+bool isPTOPackedFloat8x2Type(Type t);
 
 unsigned getPTOStorageElemBitWidth(Type t);
 unsigned getPTOStorageElemByteSize(Type t);

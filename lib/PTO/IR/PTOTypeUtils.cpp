@@ -45,6 +45,14 @@ bool mlir::pto::isPTOLowPrecisionType(Type t) {
          isPTOHiFloat8x2Type(t) || isPTOFloat4PackedType(t);
 }
 
+bool mlir::pto::isPTOPackedFloat8x2Type(Type t) {
+  if (isPTOHiFloat8x2Type(t))
+    return true;
+  auto vecTy = dyn_cast<VectorType>(t);
+  return vecTy && vecTy.getRank() == 1 && vecTy.getDimSize(0) == 2 &&
+         isPTOFloat8Type(vecTy.getElementType());
+}
+
 unsigned mlir::pto::getPTOStorageElemBitWidth(Type t) {
   if (isPTOHiFloat8x2Type(t))
     return 16;

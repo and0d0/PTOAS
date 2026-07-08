@@ -2644,6 +2644,8 @@ static FailureOr<StringRef> buildL1CacheLoadCallee(MLIRContext *context,
     elem = "s32";
   } else if (resultType.isF64()) {
     elem = "s64";
+  } else if (pto::isPTOPackedFloat8x2Type(resultType)) {
+    elem = "s16";
   } else if (pto::isPTOFloat8Type(resultType) ||
              pto::isPTOHiFloat8Type(resultType)) {
     elem = "s8";
@@ -2676,6 +2678,8 @@ static FailureOr<StringRef> buildL1CacheStoreCallee(MLIRContext *context,
     elem = "b32";
   } else if (valueType.isF64()) {
     elem = "b64";
+  } else if (pto::isPTOPackedFloat8x2Type(valueType)) {
+    elem = "b16";
   } else if (pto::isPTOFloat8Type(valueType) ||
              pto::isPTOHiFloat8Type(valueType)) {
     elem = "b8";
@@ -9770,6 +9774,8 @@ static Type getLdgCallResultType(Type valueType, Type convertedValueType,
     return rewriter.getI32Type();
   if (valueType.isF64())
     return rewriter.getI64Type();
+  if (pto::isPTOPackedFloat8x2Type(valueType))
+    return rewriter.getI32Type();
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType))
     return rewriter.getI32Type();
   return convertedValueType;
@@ -9794,6 +9800,11 @@ static Value convertLdgCallResult(Location loc, Type valueType,
   if (valueType.isF32() || valueType.isF64())
     return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType,
                                             callResult);
+  if (pto::isPTOPackedFloat8x2Type(valueType)) {
+    Value payload =
+        rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), callResult);
+    return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType, payload);
+  }
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType)) {
     Value payload =
         rewriter.create<arith::TruncIOp>(loc, rewriter.getI8Type(), callResult);
@@ -9923,6 +9934,11 @@ static Value convertStgValue(Location loc, Type valueType, Value value,
     Value payload =
         rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI8Type(), value);
     return rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), payload);
+  }
+  if (pto::isPTOPackedFloat8x2Type(valueType)) {
+    Value payload =
+        rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI16Type(), value);
+    return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getF16Type(), payload);
   }
   if (valueType.isBF16())
     return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getF16Type(), value);
