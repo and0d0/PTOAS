@@ -117,6 +117,7 @@ jobs:
       PYPTO_REF: main
       PYPTO_WORKSPACE: ${{ github.workspace }}/.work/pypto-ci
       PYPTO_RUN_WORKSPACE: ${{ github.workspace }}/.work/pypto-run-ci
+      PTO_ISA_REPO: https://gitcode.com/cann/pto-isa.git
       PTO_ISA_COMMIT: 9cf767cbc5d3e4399e2ac2fc5d7197e7f5134fbe
       PTO_ISA_ROOT: ${{ github.workspace }}/.work/pto-isa-ci
       TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
@@ -332,13 +333,15 @@ jobs:
           persist-credentials: false
 
       - name: Checkout PTO-ISA
-        uses: actions/checkout@v4
-        with:
-          repository: hw-native-sys/pto-isa
-          ref: ${{ env.PTO_ISA_COMMIT }}
-          path: ${{ env.PTO_ISA_ROOT }}
-          fetch-depth: 1
-          persist-credentials: false
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${PTO_ISA_ROOT}"
+          git init "${PTO_ISA_ROOT}"
+          git -C "${PTO_ISA_ROOT}" remote add origin "${PTO_ISA_REPO}"
+          git -C "${PTO_ISA_ROOT}" fetch --depth 1 origin "${PTO_ISA_COMMIT}"
+          git -C "${PTO_ISA_ROOT}" checkout --force FETCH_HEAD
+          git -C "${PTO_ISA_ROOT}" rev-parse HEAD
 
       - name: Ensure GCC 15 for PyPTO simulator
         shell: bash
