@@ -136,8 +136,6 @@ struct TNotifyReleaseState {
     addressedCmoPayloads.clear();
   }
 
-  bool hasReleasePayloadAccess() const { return !pendingAccesses.empty(); }
-
   bool accessMatchesAddressedCmo(const PendingReleaseAccess &access) const {
     for (Value payload : addressedCmoPayloads)
       if (payloadMayAlias(access.payload, payload))
@@ -613,48 +611,22 @@ static void setTNotifyPipeDrainAttrs(pto::TNotifyOp op,
 static void diagnoseTNotifyRelease(pto::TNotifyOp op,
                                    const TNotifyReleaseState &state,
                                    bool &hasFailure) {
-  if (state.hasReleasePayloadAccess() && !state.hasAddressedCmo) {
+  if (!state.hasAddressedCmo)
+    return;
+
+  if (state.addressedNeedsGmCacheCmo) {
     op.emitOpError()
         << "requires explicit `pto.cmo.cacheinvalid %addr "
-           "single_cache_line` to identify the TNotify payload address";
+           "single_cache_line` after matching cacheable GM scalar stores "
+           "and before `pto.fence.barrier_all #pto.fence_scope<gm>`";
     hasFailure = true;
     return;
   }
-
-  if (state.hasAddressedCmo) {
-    if (state.addressedNeedsGmCacheCmo) {
-      op.emitOpError()
-          << "requires explicit `pto.cmo.cacheinvalid %addr "
-             "single_cache_line` after matching cacheable GM scalar stores "
-             "and before `pto.fence.barrier_all #pto.fence_scope<gm>`";
-      hasFailure = true;
-      return;
-    }
-    if (state.addressedNeedsDsbDdr) {
-      op.emitOpError()
-          << "requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>` "
-             "after the matching `pto.cmo.cacheinvalid %addr "
-             "single_cache_line` and before publishing the signal";
-      hasFailure = true;
-    }
-    return;
-  }
-
-  if (state.needsGmCacheCmo) {
-    op.emitOpError()
-        << "requires explicit "
-           "`pto.cmo.cacheinvalid all #pto.address_space<gm>` before "
-           "`pto.fence.barrier_all #pto.fence_scope<gm>` when publishing a "
-           "signal after cacheable GM scalar stores";
-    hasFailure = true;
-    return;
-  }
-  if (state.needsDsbDdr) {
+  if (state.addressedNeedsDsbDdr) {
     op.emitOpError()
         << "requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>` "
-           "before publishing a signal after GM writes; "
-           "PTOAS inserts the required MTE3/FIX pipe drain before "
-           "`pto.fence.barrier_all` when needed";
+           "after the matching `pto.cmo.cacheinvalid %addr "
+           "single_cache_line` and before publishing the signal";
     hasFailure = true;
   }
 }

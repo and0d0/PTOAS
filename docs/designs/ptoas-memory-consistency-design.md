@@ -232,9 +232,11 @@ whole-cache 形式，或者生成多条 single-line CMO。如果缺少 `cmo.cach
 ## 6. PyPTO 对接说明
 
 PyPTO 不需要手动生成 `pto.barrier #pto.pipe<PIPE_MTE3>` 或
-`pto.barrier #pto.pipe<PIPE_FIX>`。这是低层 pipe drain 细节，由 PTOAS 根据 `barrier_all`
-前的 pending GM write pipe 自动插入。这样可以保证最终顺序是对应 pipe barrier 先于
-`dsb(DSB_DDR)`，不会出现先 fence、后 drain 的错误顺序。
+`pto.barrier #pto.pipe<PIPE_FIX>`。这是低层 pipe drain 细节，由 PTOAS 根据
+`pto.cmo.cacheinvalid %payload single_cache_line` marker 匹配到的 GM payload access 自动插入。
+这样可以保证最终顺序是对应 pipe barrier 先于 `dsb(DSB_DDR)`，不会出现先 fence、后 drain
+的错误顺序。没有 marker 的 memory access 不会被 PTOAS 当作 TNotify payload；也就是说，
+marker 是 signal 和 payload 的显式关联，不是对所有前序 pending memory op 的兜底扫描。
 
 PyPTO 生成规则：
 
@@ -245,6 +247,9 @@ PyPTO 生成规则：
 | `TWait` 后读取 cacheable scalar GM payload | payload load 前生成 `pto.cmo.cacheinvalid %addr single_cache_line : !pto.ptr<T, gm>`，或使用 whole-cache 形式 | 无 |
 | `TTest` ready path 后读取 cacheable scalar GM payload | 在 ready path 的 payload load 前生成 single-line 或 whole-cache `pto.cmo.cacheinvalid` | 无 |
 | cacheable scalar GM store 后发布 signal | 必须提供 `pto.cmo.cacheinvalid %payload single_cache_line` 作为 TNotify payload marker，并在 payload store 后、signal 前完成 CMO 和 `pto.fence.barrier_all #pto.fence_scope<gm>`；如果使用 whole-cache CMO，也仍需额外提供 addressed marker | 无 |
+
+如果某个 TNotify 只是发布 signal，而不表示某块 GM payload 已经准备好，可以不生成 payload
+marker。PTOAS 不会尝试从所有前序 memory op 里推断“可能相关”的 payload。
 
 `pto.entry` launcher 可以调用多个 kernel 函数；每个 kernel 函数会被
 `pto-memory-consistency` 独立分析。kernel body 内部若通过 `func.call` 调用包含 payload
