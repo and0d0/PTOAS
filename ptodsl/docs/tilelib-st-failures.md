@@ -24,7 +24,8 @@ mani_log/fixed_attr/summary.tsv
 The following smoke testcases now build, run, and compare successfully with
 PTODSL: `tcolexpand`, `tcolexpandmax`, `tcolexpandmin`, `tcolexpandmul`,
 `softmax`, `tcolmax`, `tcolmin`, `tlrelu`, `tload`, `tmatmul`, `tmov`,
-`tpartadd`, `tpartmax`, `tpartmin`, and `tpartmul`.
+`tpartadd`, `tpartmax`, `tpartmin`, `tpartmul`, `tfillpad`,
+`tfillpad_expand`, and `tfillpad_inplace`.
 
 | Testcase | Stage | Failure type | Main error / observation |
 |---|---|---|---|
@@ -43,9 +44,9 @@ PTODSL: `tcolexpand`, `tcolexpandmax`, `tcolexpandmin`, `tcolexpandmul`,
 | tdivs | Build | Python/runtime crash | Metadata RPC crashes with `OSError: failed to make path absolute`; `Fatal Python error: error evaluating path`. |
 | textract | Build | Constraint failure | `template_textract_vec2vec_nd` exists, but custom constraints are not satisfied. |
 | textract_fp | Build | Wrong dependency / instantiation failure | `ExpandTileOp: failed to instantiate TileLib template for tmatmul`. |
-| tfillpad | Build | tfillpad instantiation failure | After the `tload` metadata fix, isolated smoke reaches `tfillpad` expansion and fails with `ExpandTileOp requires at least one template candidate` at `tfillpad.pto:57`. See `mani_log/tload_downstream/tfillpad.log`. |
-| tfillpad_expand | Runtime | Wrong output | `u16_64x16_src_63x7` and `u16_260x32_src_259x7` mismatch at idx 7: golden `65535`, output `0`. |
-| tfillpad_inplace | Build | Template instantiation failure | `ExpandTileOp: failed to instantiate TileLib template for tfillpad_inplace`. |
+| tfillpad | Fixed | Passed smoke ST | Fixed by preserving template candidate attrs through `PTOViewToMemref`, using finite float pad extrema, and filling the aligned expansion region before restoring valid tail lanes. See `mani_log/fillpad_fix/tfillpad.log`. |
+| tfillpad_expand | Fixed | Passed smoke ST | Fixed by handling `Max`/`Min` pad values and avoiding unaligned expansion stores by filling from the aligned boundary then restoring valid tail lanes. See `mani_log/fillpad_fix/tfillpad_expand.log`. |
+| tfillpad_inplace | Fixed | Passed smoke ST | Fixed by preserving template candidate attrs and avoiding writes to the valid region when no expansion is present. See `mani_log/fillpad_fix/tfillpad_inplace.log`. |
 | tload | Fixed | Passed smoke ST | Fixed by preserving `pto.make_tensor_view` strides through `pto.partition_view` metadata for TileLib selection. DN padded load/store smoke compare passes. See `mani_log/tload_fix.log`. |
 | tlog | Build | Template instantiation failure | `ExpandTileOp: failed to instantiate TileLib template for tlog`. |
 | tlrelu | Fixed | Passed smoke ST | Fixed by preserving candidates through `PTOViewToMemref` and allowing `vec` row-major tiles. See `mani_log/fixed_attr/tlrelu.log`. |
@@ -66,8 +67,10 @@ PTODSL: `tcolexpand`, `tcolexpandmax`, `tcolexpandmin`, `tcolexpandmul`,
   directories under `/tmp/mani_st_isolated`.
 - The rows above are focused on the current failing set. Passing cases are tracked by
   the ST summary output rather than repeated here.
-- `tfillpad` previously failed through `tload`. Focused reruns show it now reaches
-  its own template-candidate failure.
+- `tfillpad`, `tfillpad_expand`, and `tfillpad_inplace` smoke ST now pass. The
+  inplace template still does not use the legacy `vstus`/`vstas` unaligned
+  expansion path, so non-smoke inplace cases with column expansion should remain
+  on the parity watch list.
 - `tpartadd`, `tpartmax`, `tpartmin`, and `tpartmul` were fixed by preserving
   `TileSpec.valid_shape` when rendering entry `tile_buf` types. See
   `mani_log/tpart_fix/summary.tsv`.

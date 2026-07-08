@@ -3509,7 +3509,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TFillPadOp>(
+        replaceOpWithClonedAttrs<pto::TFillPadOp>(
+            rewriter,
             op,
             TypeRange{},
             src,
@@ -3536,7 +3537,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TFillPadInplaceOp>(
+        replaceOpWithClonedAttrs<pto::TFillPadInplaceOp>(
+            rewriter,
             op,
             TypeRange{},
             src,
