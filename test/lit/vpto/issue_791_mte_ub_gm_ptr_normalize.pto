@@ -26,9 +26,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     %c32_i64 = arith.constant 32 : i64
     %c16 = arith.constant 16 : index
     %src = pto.pointer_cast(%c0_i64) %c16, %c16 : memref<16x16xf16, #pto.address_space<vec>>
-    pto.mte_ub_gm %src, %out_gm, %c32_i64
+    pto.mte_ub_gm %src, %out_gm, %c0_i64, %c32_i64
       nburst(%c16_i64, %c32_i64, %c32_i64)
-      : memref<16x16xf16, #pto.address_space<vec>>, !pto.ptr<f16, gm>, i64, i64, i64, i64
+      : memref<16x16xf16, #pto.address_space<vec>>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
     return
   }
 }
@@ -37,8 +37,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // NORMALIZE-SAME: (vpto-ptr-normalize)
 // NORMALIZE-LABEL: func.func @issue_791_min(%arg0: !pto.ptr<f16, gm>) attributes {pto.aicore} {
 // NORMALIZE: %[[SRC:.*]] = pto.castptr %{{.*}} : i64 -> !pto.ptr<f16, ub>
-// NORMALIZE: pto.mte_ub_gm %[[SRC]], %arg0, %{{.*}} nburst(%{{.*}}, %{{.*}}, %{{.*}})
-// NORMALIZE-SAME: : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
+// NORMALIZE: pto.mte_ub_gm %[[SRC]], %arg0, %{{.*}}, %{{.*}} nburst(%{{.*}}, %{{.*}}, %{{.*}})
+// NORMALIZE-SAME: : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
 
 // EXPAND: // -----// IR Dump After
 // EXPAND-SAME: (vpto-expand-wrapper-ops)

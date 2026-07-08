@@ -90,27 +90,27 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_out_m0, %arg2, %c64_i64_m0
+    pto.mte_ub_gm %ub_out_m0, %arg2, %c0_i64_m0, %c64_i64_m0
       nburst(%c32_i64_m0, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64
-    pto.mte_ub_gm %f8_and_lowp, %arg8, %c64_i64_m0
+      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64, i64
+    pto.mte_ub_gm %f8_and_lowp, %arg8, %c0_i64_m0, %c64_i64_m0
       nburst(%c4_i64_lowp, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<f8E4M3FN, ub>, !pto.ptr<f8E4M3FN, gm>, i64, i64, i64, i64
-    pto.mte_ub_gm %f8_xor_lowp, %arg9, %c64_i64_m0
+      : !pto.ptr<f8E4M3FN, ub>, !pto.ptr<f8E4M3FN, gm>, i64, i64, i64, i64, i64
+    pto.mte_ub_gm %f8_xor_lowp, %arg9, %c0_i64_m0, %c64_i64_m0
       nburst(%c4_i64_lowp, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<f8E4M3FN, ub>, !pto.ptr<f8E4M3FN, gm>, i64, i64, i64, i64
-    pto.mte_ub_gm %f8_or_lowp, %arg10, %c64_i64_m0
+      : !pto.ptr<f8E4M3FN, ub>, !pto.ptr<f8E4M3FN, gm>, i64, i64, i64, i64, i64
+    pto.mte_ub_gm %f8_or_lowp, %arg10, %c0_i64_m0, %c64_i64_m0
       nburst(%c4_i64_lowp, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<f8E4M3FN, ub>, !pto.ptr<f8E4M3FN, gm>, i64, i64, i64, i64
-    pto.mte_ub_gm %hif8_and_lowp, %arg13, %c64_i64_m0
+      : !pto.ptr<f8E4M3FN, ub>, !pto.ptr<f8E4M3FN, gm>, i64, i64, i64, i64, i64
+    pto.mte_ub_gm %hif8_and_lowp, %arg13, %c0_i64_m0, %c64_i64_m0
       nburst(%c4_i64_lowp, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<!pto.hif8, ub>, !pto.ptr<!pto.hif8, gm>, i64, i64, i64, i64
-    pto.mte_ub_gm %hif8_xor_lowp, %arg14, %c64_i64_m0
+      : !pto.ptr<!pto.hif8, ub>, !pto.ptr<!pto.hif8, gm>, i64, i64, i64, i64, i64
+    pto.mte_ub_gm %hif8_xor_lowp, %arg14, %c0_i64_m0, %c64_i64_m0
       nburst(%c4_i64_lowp, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<!pto.hif8, ub>, !pto.ptr<!pto.hif8, gm>, i64, i64, i64, i64
-    pto.mte_ub_gm %hif8_or_lowp, %arg15, %c64_i64_m0
+      : !pto.ptr<!pto.hif8, ub>, !pto.ptr<!pto.hif8, gm>, i64, i64, i64, i64, i64
+    pto.mte_ub_gm %hif8_or_lowp, %arg15, %c0_i64_m0, %c64_i64_m0
       nburst(%c4_i64_lowp, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<!pto.hif8, ub>, !pto.ptr<!pto.hif8, gm>, i64, i64, i64, i64
+      : !pto.ptr<!pto.hif8, ub>, !pto.ptr<!pto.hif8, gm>, i64, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
 
     // merged from vand_mask_edge_kernel via LaunchVand_mask_edge_kernel
@@ -152,9 +152,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_out_m1, %arg5, %c64_i64_m1
+    pto.mte_ub_gm %ub_out_m1, %arg5, %c0_i64_m1, %c64_i64_m1
       nburst(%c32_i64_m1, %c64_i64_m1, %c64_i64_m1)
-      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64
+      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
     %__case_merge_guard = arith.constant false
 
@@ -200,9 +200,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
       
           pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
           pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-          pto.mte_ub_gm %ub_out_m0_cmg1_1, %arg2, %c64_i64_m0_cmg1_1
+          pto.mte_ub_gm %ub_out_m0_cmg1_1, %arg2, %c0_i64_m0_cmg1_1, %c64_i64_m0_cmg1_1
             nburst(%c32_i64_m0_cmg1_1, %c64_i64_m0_cmg1_1, %c64_i64_m0_cmg1_1)
-            : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64
+            : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64, i64
           pto.barrier #pto.pipe<PIPE_ALL>
       
           // merged from vxor_mask_edge_kernel via LaunchVxor_mask_edge_kernel
@@ -244,9 +244,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
       
           pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
           pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-          pto.mte_ub_gm %ub_out_m1_cmg1_1, %arg5, %c64_i64_m1_cmg1_1
+          pto.mte_ub_gm %ub_out_m1_cmg1_1, %arg5, %c0_i64_m1_cmg1_1, %c64_i64_m1_cmg1_1
             nburst(%c32_i64_m1_cmg1_1, %c64_i64_m1_cmg1_1, %c64_i64_m1_cmg1_1)
-            : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64
+            : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64, i64
           pto.barrier #pto.pipe<PIPE_ALL>
     }
 

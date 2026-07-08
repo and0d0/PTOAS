@@ -103,21 +103,21 @@ module attributes {pto.target_arch = "a5"} {
 
       scf.if %is_subblock0 {
         pto.sync.wait <PIPE_MTE3>, 1
-        pto.mte_ub_gm %ub_split_m, %out_split_m0_gm, %c256_i64
+        pto.mte_ub_gm %ub_split_m, %out_split_m0_gm, %c0_i64, %c256_i64
           nburst(%c20_i64, %c256_i64, %c256_i64)
-          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
-        pto.mte_ub_gm %ub_split_n, %out_split_n0_gm, %c128_i64
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
+        pto.mte_ub_gm %ub_split_n, %out_split_n0_gm, %c0_i64, %c128_i64
           nburst(%c40_i64, %c256_i64, %c128_i64)
-          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
       }
       scf.if %is_subblock1 {
         pto.sync.wait <PIPE_MTE3>, 1
-        pto.mte_ub_gm %ub_split_m, %out_split_m1_gm, %c256_i64
+        pto.mte_ub_gm %ub_split_m, %out_split_m1_gm, %c0_i64, %c256_i64
           nburst(%c20_i64, %c256_i64, %c256_i64)
-          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
-        pto.mte_ub_gm %ub_split_n, %out_split_n1_gm, %c128_i64
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
+        pto.mte_ub_gm %ub_split_n, %out_split_n1_gm, %c0_i64, %c128_i64
           nburst(%c40_i64, %c256_i64, %c128_i64)
-          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
       }
       pto.barrier #pto.pipe<PIPE_ALL>
     }

@@ -46,9 +46,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_out, %output, %c128_i64
+    pto.mte_ub_gm %ub_out, %output, %c0_i64, %c128_i64
       nburst(%c32_i64, %c128_i64, %c128_i64)
-      : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+      : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
     %__case_merge_guard = arith.constant false
 
@@ -85,9 +85,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
       
           pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
           pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-          pto.mte_ub_gm %ub_in_cmpost_1, %output, %c128_i64_cmpost_1
+          pto.mte_ub_gm %ub_in_cmpost_1, %output, %c0_i64_cmpost_1, %c128_i64_cmpost_1
             nburst(%c32_i64_cmpost_1, %c128_i64_cmpost_1, %c128_i64_cmpost_1)
-            : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+            : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
           pto.barrier #pto.pipe<PIPE_ALL>
     }
 
@@ -126,9 +126,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
       
           pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
           pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-          pto.mte_ub_gm %ub_out_cmpost_2, %output, %c128_i64_cmpost_2
+          pto.mte_ub_gm %ub_out_cmpost_2, %output, %c0_i64_cmpost_2, %c128_i64_cmpost_2
             nburst(%c32_i64_cmpost_2, %c128_i64_cmpost_2, %c128_i64_cmpost_2)
-            : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+            : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
           pto.barrier #pto.pipe<PIPE_ALL>
     }
     return

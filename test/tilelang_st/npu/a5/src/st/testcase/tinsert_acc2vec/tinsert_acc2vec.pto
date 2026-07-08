@@ -69,9 +69,9 @@ module attributes {pto.target_arch = "a5"} {
       %is_subblock0 = arith.cmpi eq, %subblock, %c0_i64 : i64
       scf.if %is_subblock0 {
         pto.sync.wait <PIPE_MTE3>, 1
-        pto.mte_ub_gm %dst_ub, %out_gm, %c32_i64
+        pto.mte_ub_gm %dst_ub, %out_gm, %c0_i64, %c32_i64
           nburst(%c16_i64, %c32_i64, %c32_i64)
-          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
+          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
       }
       pto.barrier #pto.pipe<PIPE_ALL>
     }
@@ -135,9 +135,9 @@ module attributes {pto.target_arch = "a5"} {
       %is_subblock0 = arith.cmpi eq, %subblock, %c0_i64 : i64
       scf.if %is_subblock0 {
         pto.sync.wait <PIPE_MTE3>, 1
-        pto.mte_ub_gm %dst_ub, %out_gm, %c64_i64
+        pto.mte_ub_gm %dst_ub, %out_gm, %c0_i64, %c64_i64
           nburst(%c16_i64, %c64_i64, %c64_i64)
-          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
       }
       pto.barrier #pto.pipe<PIPE_ALL>
     }
@@ -201,9 +201,9 @@ module attributes {pto.target_arch = "a5"} {
       %is_subblock0 = arith.cmpi eq, %subblock, %c0_i64 : i64
       scf.if %is_subblock0 {
         pto.sync.wait <PIPE_MTE3>, 1
-        pto.mte_ub_gm %dst_ub, %out_gm, %c64_i64
+        pto.mte_ub_gm %dst_ub, %out_gm, %c0_i64, %c64_i64
           nburst(%c16_i64, %c64_i64, %c64_i64)
-          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64
       }
       pto.barrier #pto.pipe<PIPE_ALL>
     }

@@ -172,18 +172,18 @@ module attributes {pto.target_arch = "a5"} {
 
       scf.if %is_subblock0 {
         pto.sync.wait <PIPE_MTE3>, 1
-        pto.mte_ub_gm %ub_scalar, %out_ub_scalar_gm, %c128_i64
+        pto.mte_ub_gm %ub_scalar, %out_ub_scalar_gm, %c0_i64, %c128_i64
           nburst(%c40_i64, %c128_i64, %c128_i64)
-          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
-        pto.mte_ub_gm %ub_vector, %out_ub_vector_gm, %c128_i64
+          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
+        pto.mte_ub_gm %ub_vector, %out_ub_vector_gm, %c0_i64, %c128_i64
           nburst(%c40_i64, %c128_i64, %c128_i64)
-          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
-        pto.mte_ub_gm %ub_l1_scalar, %out_l1_scalar_gm, %c128_i64
+          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
+        pto.mte_ub_gm %ub_l1_scalar, %out_l1_scalar_gm, %c0_i64, %c128_i64
           nburst(%c40_i64, %c128_i64, %c128_i64)
-          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
-        pto.mte_ub_gm %ub_l1_vector, %out_l1_vector_gm, %c128_i64
+          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
+        pto.mte_ub_gm %ub_l1_vector, %out_l1_vector_gm, %c0_i64, %c128_i64
           nburst(%c40_i64, %c128_i64, %c128_i64)
-          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
+          : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64
       }
       pto.barrier #pto.pipe<PIPE_ALL>
     }

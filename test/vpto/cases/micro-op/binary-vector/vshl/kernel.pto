@@ -39,9 +39,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_out_m0, %arg2, %c64_i64_m0
+    pto.mte_ub_gm %ub_out_m0, %arg2, %c0_i64_m0, %c64_i64_m0
       nburst(%c32_i64_m0, %c64_i64_m0, %c64_i64_m0)
-      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64
+      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
 
     // merged from vshl_i32_unsigned_kernel via LaunchVshl_i32_unsigned_kernel
@@ -85,9 +85,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_out_m1, %arg5, %c128_i64_m1
+    pto.mte_ub_gm %ub_out_m1, %arg5, %c0_i64_m1, %c128_i64_m1
       nburst(%c32_i64_m1, %c128_i64_m1, %c128_i64_m1)
-      : !pto.ptr<ui32, ub>, !pto.ptr<ui32, gm>, i64, i64, i64, i64
+      : !pto.ptr<ui32, ub>, !pto.ptr<ui32, gm>, i64, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
 
     // merged from vshl_shift_boundary_kernel via LaunchVshl_shift_boundary_kernel
@@ -129,9 +129,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
     pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
     pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
-    pto.mte_ub_gm %ub_out_m2, %arg8, %c64_i64_m2
+    pto.mte_ub_gm %ub_out_m2, %arg8, %c0_i64_m2, %c64_i64_m2
       nburst(%c32_i64_m2, %c64_i64_m2, %c64_i64_m2)
-      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64
+      : !pto.ptr<ui16, ub>, !pto.ptr<ui16, gm>, i64, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
 
     return
