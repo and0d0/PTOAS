@@ -647,8 +647,9 @@ dst[m, n] = sum_k lhs[m, k] * rhs[k, n]
 
 **Constraints**:
 - Shapes must satisfy the standard matrix multiply relationship: `lhs.rows == dst.rows`, `lhs.cols == rhs.rows`, and `rhs.cols == dst.cols`.
-- Supported dtype triples depend on the target architecture. Common cases include `f16`/`bf16`/`f32` inputs with `f32` accumulation and `i8` inputs with `i32` accumulation.
+- Supported dtype triples depend on the target architecture. Common cases include `f16`/`bf16`/`f32` inputs with `f32` accumulation and `i8` inputs with `i32` accumulation. On A5, ordinary FP8 inputs are also supported with `f32` accumulation for `f8e4m3 x f8e4m3`, `f8e4m3 x f8e5m2`, `f8e5m2 x f8e4m3`, and `f8e5m2 x f8e5m2`.
 - Operands should be scratch tiles allocated in LEFT, RIGHT, and ACC memory spaces respectively. Use `extract` beforehand to stage data into these scratch tiles from carrier buffers.
+- Ordinary FP8 `matmul` consumes the FP8 operand values directly and does not take scale tiles. Use `pto.tile.matmul_mx*` when the algorithm requires MX scale payloads.
 
 **Example** — compute one cube tile product:
 
@@ -704,6 +705,7 @@ dst[m, n] = acc_in[m, n] + sum_k lhs[m, k] * rhs[k, n]
 **Constraints**:
 - `lhs`, `rhs`, and `dst` must satisfy the same shape and memory-space relationship as `pto.tile.matmul`.
 - `acc_in` must be an ACC tile, typically with the same shape and dtype as `dst`.
+- The ordinary FP8 dtype triples supported by `pto.tile.matmul` are also valid for `pto.tile.matmul_acc`; both `acc_in` and `dst` use `f32`.
 
 **Example** — accumulate a second K-slice into an ACC tile:
 

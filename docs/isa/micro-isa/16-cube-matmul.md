@@ -64,6 +64,24 @@ Bias forms additionally require `%bias` in the `bt` address space with the
 same element type as `%dst`. MX forms require MX element types on both `%lhs`
 and `%rhs`; the current target-profile MX data type is `f8E4M3FN`.
 
+Ordinary non-MX FP8 GEMM uses the same `pto.mad*` family as other non-MX
+matrix products. It consumes FP8 values directly from `l0a` and `l0b`, produces
+an `f32` accumulator tile in `l0c`, and does not consume MX scale payloads.
+
+Target-supported ordinary low-precision floating type triples include:
+
+| lhs element | rhs element | dst/bias element | Forms |
+|-------------|-------------|------------------|-------|
+| E4M3-family FP8 | E4M3-family FP8 | `f32` | `pto.mad`, `pto.mad_acc`, `pto.mad_bias` |
+| E4M3-family FP8 | E5M2-family FP8 | `f32` | `pto.mad`, `pto.mad_acc`, `pto.mad_bias` |
+| E5M2-family FP8 | E4M3-family FP8 | `f32` | `pto.mad`, `pto.mad_acc`, `pto.mad_bias` |
+| E5M2-family FP8 | E5M2-family FP8 | `f32` | `pto.mad`, `pto.mad_acc`, `pto.mad_bias` |
+| `!pto.hif8` | `!pto.hif8` | `f32` | `pto.mad`, `pto.mad_acc`, `pto.mad_bias` |
+
+Use `pto.mad_mx*` only when the algorithm uses microscaling data prepared for
+the operand tiles. Ordinary FP8 `pto.mad*` and MX FP8 `pto.mad_mx*` have
+different operand contracts and are not interchangeable.
+
 ### MAD Common Clauses
 
 | Clause | Values | Effect |
@@ -144,6 +162,9 @@ pto.mad %lhs, %rhs, %dst, %m, %n, %k
   for the selected element-type combination.
 - `tf32_mode(...)` requires `f32` lhs, rhs, and dst element types.
 - `sat` / `nosat` requires a floating element-type combination.
+- Ordinary FP8 and hif8 forms require an `f32` destination accumulator.
+- `!pto.hif8` operands must appear as a matching lhs/rhs pair; do not mix
+  `!pto.hif8` with FP8 operands in ordinary `pto.mad*`.
 - Packed 4-bit integer data requires `%k` to select an even number of K
   elements.
 

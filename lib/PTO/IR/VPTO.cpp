@@ -3811,6 +3811,17 @@ static StringRef stringifyMadSatModeToken(pto::MadSatMode mode) {
   llvm_unreachable("unexpected mad sat mode");
 }
 
+static bool isOrdinaryMadFp8ElementType(Type type) {
+  return pto::isPTOFloat8E4M3LikeType(type) ||
+         pto::isPTOFloat8E5M2LikeType(type);
+}
+
+static bool isSupportedOrdinaryMadFp8Triple(Type lhsElem, Type rhsElem,
+                                            Type dstElem) {
+  return isOrdinaryMadFp8ElementType(lhsElem) &&
+         isOrdinaryMadFp8ElementType(rhsElem) && dstElem.isF32();
+}
+
 static LogicalResult verifyMadSemanticClauses(Operation *op, Type lhsTy,
                                               Type rhsTy, Type dstTy,
                                               std::optional<Type> biasTy,
@@ -3837,6 +3848,23 @@ static LogicalResult verifyMadSemanticClauses(Operation *op, Type lhsTy,
       pto::isPTOHiFloat8Type(rhsType.getElementType())) {
     return op->emitOpError(
         "requires lhs/rhs to both use hif8 or both use non-hif8 element types");
+  }
+  const Type lhsElem = lhsType.getElementType();
+  const Type rhsElem = rhsType.getElementType();
+  const Type dstElem = dstType.getElementType();
+  if (isOrdinaryMadFp8ElementType(lhsElem) ||
+      isOrdinaryMadFp8ElementType(rhsElem)) {
+    if (!isSupportedOrdinaryMadFp8Triple(lhsElem, rhsElem, dstElem)) {
+      return op->emitOpError(
+          "requires ordinary FP8 MAD element types to be "
+          "E4M3-family/E5M2-family lhs and rhs with f32 dst");
+    }
+  }
+  if (pto::isPTOHiFloat8Type(lhsElem) || pto::isPTOHiFloat8Type(rhsElem)) {
+    if (!dstElem.isF32()) {
+      return op->emitOpError(
+          "requires ordinary hif8 MAD element types to use f32 dst");
+    }
   }
   if (satMode) {
     auto isFloatLike = [](Type type) {
