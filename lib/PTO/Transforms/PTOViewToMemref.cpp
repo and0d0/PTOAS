@@ -2999,15 +2999,14 @@ struct PTOViewToMemrefPass
         }
 
         auto cmpMode = op.getCmpModeAttr();
-        auto newOp = rewriter.create<pto::TCmpSOp>(
-            op.getLoc(),
+        replaceOpWithClonedAttrs<pto::TCmpSOp>(
+            rewriter,
+            op,
             TypeRange{},
             src,
             scalar,
             cmpMode,
             dst);
-
-        rewriter.replaceOp(op, newOp->getResults()); // 0 results -> OK
       }
 
       DefaultInlineVector<mlir::pto::TColExpandOp> colexpand;

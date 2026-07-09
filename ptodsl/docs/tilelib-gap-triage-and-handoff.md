@@ -25,7 +25,8 @@ Data sources used for this snapshot:
 | Metric | Count | Notes |
 |---|---:|---|
 | Known current smoke failures | `8` | Based on the active smoke-blocker list below, after the reduction/arg-reduction smoke batch plus `tmrgsort` and `tsort32` were rechecked and passed on 2026-07-09. |
-| Full non-smoke failures | `37 / 105` | Exact count from `mani_log/full_nonsmoke_isolated_20260708-023856`. This is the last exact isolated full snapshot and still includes failures from before the 2026-07-08 reduction-family smoke fix. |
+| Full non-smoke failures | `37 / 105` | Exact count from `mani_log/full_nonsmoke_isolated_20260708-023856`. This is still the last exact isolated full snapshot; branch-tip exact non-smoke totals have not been fully rerun since later fixes landed. |
+| Focused post-snapshot non-smoke reruns | `1 stale failure shape refreshed` | `tsort32` was rerun on 2026-07-09 and still fails non-smoke, but with a newer PTODSL tracing error in the large-repeat path rather than the old no-template failure. `tmrgsort` smoke is fixed, but its non-smoke row has not yet been cleanly rerun end-to-end. |
 | Tileops still tracked in the implementation / parity table | `30` | Unique tileops in Section 3. Most are version / mode gaps; this count also still includes the two row-arg semantic holdouts because they remain closely tied to the same planning bucket. |
  
 ## Snapshot Summary
@@ -33,7 +34,7 @@ Data sources used for this snapshot:
 | Area | Current read |
 |---|---|
 | Smoke ST | Known current blocker count is `8`. The reduction/arg-reduction smoke batch plus `tmrgsort` and `tsort32` now pass. |
-| Non-smoke ST | Latest isolated full run is exact: `68 passed`, `37 failed`, `105 total`, but it predates the latest reduction-family smoke fix. |
+| Non-smoke ST | Latest isolated full run is exact: `68 passed`, `37 failed`, `105 total`, but it predates the latest reduction-family smoke fix and the later `tmrgsort` smoke / `tsort32` smoke fixes. |
 | Gap shape | The remaining work is split across three buckets: wrong-output bugs, missing template versions/modes/dtypes, and backend metadata/selection gaps. |
 | Best next wins | `tcmp`, `trandom`, `tinsert`, `tcvt`, `tlog`, `tsel`, and the high-precision math family. |
 
@@ -49,6 +50,14 @@ non-smoke rerun:
   forms with ST, forwarding `exhausted`, preserving template candidates
   through `PTOViewToMemref`, and making the PTODSL sort templates use
   runtime-safe scalar/control-flow constructs.
+- `tsort32` was rerun in non-smoke mode on 2026-07-09. It still fails, but
+  the current failure is now a PTODSL tracing/runtime issue in the
+  large-repeat path (`br.assign(...) expects PTO runtime values or authored
+  surface values; 'repeat_num' received int`) rather than the old no-template
+  callable-form mismatch.
+- `tmrgsort` non-smoke has not yet been refreshed with a clean end-to-end rerun
+  after the smoke fix, so its detailed non-smoke row below should still be read
+  as stale.
 - Because of that, the smoke blocker list below no longer treats those nine as
   active smoke failures.
 - The last exact full non-smoke number (`37 / 105`) is still useful for
@@ -98,7 +107,8 @@ This section is based on the exact isolated full run:
 | Group | Meaning | Testcases | Priority |
 |---|---|---|---|
 | Wrong output | Template expands and runs, but semantics do not match golden | `tcmp`, `tfillpad`, `tpartmax`, `tpartmin`, `trandom`, `trowargmax`, `trowargmin` | P0 |
-| Missing version / dtype / mode | No legal PTODSL template or wrong callable form | `tcmps`, `tcolargmax`, `tcolargmin`, `tcolexpanddiv`, `tcolmax`, `tcolmin`, `tcolprod`, `tcvt`, `tdiv`, `tdivs`, `textract`, `tinsert`, `tinsert_acc2vec`, `tload`, `tlrelu`, `tmov`, `tmrgsort`, `tsel`, `tsort32`, `txors` | P1 |
+| Missing version / dtype / mode | No legal PTODSL template or wrong callable form | `tcmps`, `tcolargmax`, `tcolargmin`, `tcolexpanddiv`, `tcolmax`, `tcolmin`, `tcolprod`, `tcvt`, `tdiv`, `tdivs`, `textract`, `tinsert`, `tinsert_acc2vec`, `tload`, `tlrelu`, `tmov`, `tmrgsort`, `tsel`, `txors` | P1 |
+| PTODSL tracing / runtime-control issue | Template selection is fixed, but the instantiated PTODSL template still misuses runtime values in non-smoke paths | `tsort32` | P1 |
 | Candidate / backend-sensitive cube or fixpipe path | `ExpandTileOp` sees no template candidates even though PTODSL has module coverage | `tgemv`, `tgemv_mx`, `tlog`, `tmatmul_acc`, `tmatmul_bias`, `tmatmul_bias_mx`, `tmatmul_mx`, `tmov2bias` | P1 |
 | Probably not TileLib-first | verifier or surrounding PTO IR/testcase issue before TileLib parity becomes the first blocker | `tload_mat`, `tstore_acc2gm` | P2 |
 
@@ -133,14 +143,14 @@ This section is based on the exact isolated full run:
 | `tmatmul_mx` | Candidate/backend-sensitive | no candidate | same family, MX flavor | same plus MX signature review | Backend first, then template review |
 | `tmov` | Missing dtype | no legal template | current non-smoke asks for `ui8` movement forms not accepted today | Extend movement dtype matrix where the legacy path allows it | TileLib implementation |
 | `tmov2bias` | Candidate/backend-sensitive | no candidate | build actually fails while instantiating `tmatmul.bias` downstream | Treat this as a downstream cube/bias candidate-propagation issue rather than a standalone `tmov2bias` template gap | Backend first |
-| `tmrgsort` | Missing mode / attr | no legal template | wrong operand count and wrong `ex_vec` dtype/signature for PTODSL callable forms | Match ST operand forms and add the missing `exhausted` context attr forwarding | TileLib implementation plus `InsertTemplateAttributes` |
+| `tmrgsort` | Stale non-smoke row | stale snapshot | smoke is fixed; non-smoke row still reflects the older pre-fix callable-form failure | Refresh with a clean isolated non-smoke rerun before using this row for current prioritization | Verification first, then reassess implementation status |
 | `tpartmax` | Wrong output | compare mismatch | output uses `-inf` instead of the finite legacy pad minimum | Change pad constants to match legacy finite extrema, not mathematical infinities | TileLib implementation |
 | `tpartmin` | Wrong output | compare mismatch | output uses `+inf` instead of the finite legacy pad maximum | same | TileLib implementation |
 | `trandom` | Wrong output | compare mismatch | generated Philox sequence does not match golden | Reconcile round loop, counter increment cadence, and lane ordering against legacy | TileLib implementation |
 | `trowargmax` | Wrong output | compare mismatch | many indices stay zero or wrong offsets are written | Rework row-arg index accumulation/writeback for `ui32` output and wide rows | TileLib implementation |
 | `trowargmin` | Wrong output | compare mismatch | outputs look bit-pattern wrong for `ui32` and wide rows | same | TileLib implementation |
 | `tsel` | Missing mode / too-narrow constraint | no legal template | custom constraints are not satisfied | Relax legality to the ST mask/data layout and verify predicate unpacking width by dtype | TileLib implementation |
-| `tsort32` | Missing callable form | no legal template | aligned path wants the wrong operand form; tmp path rejects current dtype | Align PTODSL operand order and index dtype coverage with legacy/ST | TileLib implementation |
+| `tsort32` | PTODSL tracing / runtime-control issue | non-smoke still fails after smoke fix | current rerun reaches template instantiation, then fails in the large-repeat path with `br.assign(...) expects PTO runtime values or authored surface values; 'repeat_num' received int` | Rework the large-repeat branch so `repeat_num` stays on PTODSL-authored/runtime-safe control flow rather than mixing Python ints into the traced branch state | TileLib implementation |
 | `tstore_acc2gm` | Upstream verifier/testcase | PTO IR verifier failure | `pto.tmatmul` address-space verifier fails before TileLib, plus alloc-tile shape issues | Fix upstream testcase/frontend shape/layout first; TileLib is downstream | PTO IR/testcase, not TileLib-first |
 | `txors` | Missing callable form | no legal template | custom constraints are not satisfied | Revisit scalar logical-op legality and signed/unsigned acceptance | TileLib implementation |
 
@@ -156,7 +166,7 @@ ST testcase.
 | Conversion matrix | `tcvt` | fp8/fp4/i64/more unsigned and mixed-width conversions, plus more version combinations | Current PTODSL covers only a small subset of TileLang `tcvt_template.py` | P1 | High | TileLib implementation, possibly PTODSL dtype/surface support; no new pass fields expected |
 | Insert mode matrix | `tinsert` | acc->mat, acc->vec ND/DN/NZ, vec->vec NZ, vec->mat ND/NZ, pre-quant + relu variants | Large user-visible feature gap versus TileLang | P0 | High | TileLib implementation plus new context attrs (`acc_to_vec_mode`, `relu_pre_mode`) in `InsertTemplateAttributes` |
 | Extract mode matrix | `textract`, `textract_fp` | mat->left/right same-fractal and cross-fractal forms, plus any still-missing fixpipe forms | Current PTODSL mostly covers only the UB vec->vec path and split fp path | P1 | Medium-high | Mostly TileLib implementation; current operand metadata/layout flow likely sufficient |
-| Sort / merge callable forms | `tmrgsort`, `tsort32` | correct operand count/order, `ex_vec` dtype, tmp/no-tmp split, and `exhausted` attr handling | These are structural mismatches, not just missing dtypes | P0 | Medium | TileLib implementation plus `InsertTemplateAttributes` for `exhausted` |
+| Sort / merge callable forms | `tmrgsort`, `tsort32` | correct operand count/order, `ex_vec` dtype, tmp/no-tmp split, and `exhausted` attr handling | The smoke-level callable-form mismatches are fixed; the remaining open work is mostly non-smoke validation for `tmrgsort` and a runtime-control/tracing bug for `tsort32` | P1 | Medium | TileLib implementation plus `InsertTemplateAttributes` for `exhausted` |
 | Row arg-reduction semantics | `trowargmax`, `trowargmin` | shared implementation now compiles and passes smoke again, but full ST semantic parity still needs rerun/confirmation | These are no longer missing-version issues; they are now remaining semantic-validation items | P0 | Low-medium | TileLib implementation |
 | Reduction dtype matrix | `trowsum` | legacy/ST used an i16 form that should stay covered, even though the previous smoke blocker is now cleared | Mostly a parity-watch item after the 2026-07-08 reduction-family smoke fix | P2 | Low-medium | TileLib implementation |
 | Default divide dtype coverage | `tdiv`, `tcolexpanddiv`, maybe `tdivs` forms | f16 default divide, integer default variants where legacy supports them | These block practical ST cases before high-precision work even starts | P1 | Medium | TileLib implementation |
@@ -170,7 +180,7 @@ ST testcase.
 | Order | Family | Why first |
 |---|---|---|
 | 1 | `tinsert` | biggest single feature gap and needs explicit attr plumbing decisions |
-| 2 | `tmrgsort` / `tsort32` | blocking ST with structural callable-form mismatches |
+| 2 | `tsort32` large-repeat non-smoke path | smoke is fixed, but non-smoke still hits a PTODSL runtime/tracing issue |
 | 3 | reduction / arg-reduction dtype matrix | good payoff, mostly TileLib-only |
 | 4 | `tcvt` conversion matrix | broad real-world coverage gap |
 | 5 | high-precision math family | large parity gap, but the existing `precisionType` plumbing is already in place |

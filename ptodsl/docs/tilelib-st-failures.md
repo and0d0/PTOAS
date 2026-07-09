@@ -3,6 +3,10 @@
 This file tracks TileLang ST smoke failures seen while validating the A5 TileLib
 templates with `PTOAS_TILE_LIB_BACKEND=ptodsl`.
 
+Important scope note: this file is smoke-focused. Some testcases listed as
+`Fixed` here, such as `tsort32`, may still have open non-smoke issues tracked
+in `ptodsl/docs/tilelib-gap-triage-and-handoff.md`.
+
 Latest focused log run:
 
 ```bash

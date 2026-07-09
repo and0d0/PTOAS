@@ -311,7 +311,10 @@ def render_request(
         context_attrs,
         candidate_id,
     )
-    return descriptor.specialize(**tile_specs).mlir_text()
+    return descriptor.specialize(
+        context_attrs=context_attrs or {},
+        **tile_specs,
+    ).mlir_text()
 
 
 class TileLibDaemonServer(socketserver.UnixStreamServer):

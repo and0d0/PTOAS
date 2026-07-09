@@ -674,6 +674,34 @@ class TileLibCatalogTest(unittest.TestCase):
                 self.assertIn(expected_op, mlir)
                 self.assertIn(expected_dist, mlir)
 
+    def test_tcmps_vec_tiles_render_packed_mask_paths(self):
+        cases = (
+            ("f32", "pto.pdintlv_b8", "PK"),
+            ("f16", "pto.vcmps", "PK"),
+            ("i8", "pto.vcmps", "NORM"),
+        )
+        for dtype_name, expected_op, expected_dist in cases:
+            with self.subTest(dtype=dtype_name):
+                specs = {
+                    "src": TileSpec(
+                        shape=(8, 64),
+                        dtype=ScalarType(dtype_name),
+                        memory_space="vec",
+                    ),
+                    "scalar": ScalarSpec(dtype=ScalarType(dtype_name), value=1),
+                    "dst": TileSpec(
+                        shape=(8, 64),
+                        dtype=ScalarType("ui8"),
+                        memory_space="vec",
+                    ),
+                }
+                selected = select("pto.tcmps", "a5", specs)
+                self.assertEqual(selected.name, "template_tcmps")
+                mlir = selected.specialize(context_attrs={"cmp_mode": "lt"}, **specs).mlir_text()
+                self.assertIn(expected_op, mlir)
+                self.assertIn(expected_dist, mlir)
+                self.assertIn('"lt"', mlir)
+
     def test_tcvt_additional_rowwise_versions_render(self):
         signatures = {
             ("i32", "f32"): "template_tcvt_i32_to_f32",

@@ -218,6 +218,24 @@ class TileLibDaemonTest(unittest.TestCase):
         self.assertIn("func.func @template_tadds", mlir)
         self.assertIn("pto.vadds", mlir)
 
+    def test_render_passes_context_attributes_into_template_body(self):
+        operands = [
+            _tile_spec(dtype="f32", shape=(8, 64)),
+            _tile_spec(dtype="f32", shape=(8, 64)),
+            _tile_spec(dtype="i8", shape=(8, 64)),
+        ]
+
+        mlir = self.client.instantiate(
+            "a5",
+            "pto.tcmp",
+            operands,
+            context_attrs={"cmp_mode": "gt"},
+            candidate_id="template_tcmp",
+        )
+
+        self.assertIn('"gt"', mlir)
+        self.assertNotIn('"eq"', mlir)
+
     def test_vector_operand_metadata_is_accepted(self):
         operands = [
             _tile_spec(),
