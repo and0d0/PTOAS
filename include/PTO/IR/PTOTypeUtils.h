@@ -24,6 +24,7 @@ bool isPTOLowPrecisionType(Type t);
 
 unsigned getPTOStorageElemBitWidth(Type t);
 unsigned getPTOStorageElemByteSize(Type t);
+unsigned getPTOPackedLdgStgTotalBits(Type t);
 
 } // namespace mlir::pto
 

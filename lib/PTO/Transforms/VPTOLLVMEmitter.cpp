@@ -2638,9 +2638,7 @@ static FailureOr<StringRef> buildL1CacheLoadCallee(MLIRContext *context,
              pto::isPTOHiFloat8Type(resultType)) {
     elem = "s8";
   } else if (pto::isPTOPackedLdgStgVectorType(resultType)) {
-    auto vecType = cast<VectorType>(resultType);
-    Type elemType = vecType.getElementType();
-    unsigned totalBits = 2 * pto::getPTOStorageElemBitWidth(elemType);
+    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(resultType);
     if (totalBits == 16)
       elem = "s16";
     else if (totalBits == 32)
@@ -2680,9 +2678,7 @@ static FailureOr<StringRef> buildL1CacheStoreCallee(MLIRContext *context,
              pto::isPTOHiFloat8Type(valueType)) {
     elem = "b8";
   } else if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    auto vecType = cast<VectorType>(valueType);
-    Type elemType = vecType.getElementType();
-    unsigned totalBits = 2 * pto::getPTOStorageElemBitWidth(elemType);
+    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
     if (totalBits == 16)
       elem = "b16";
     else if (totalBits == 32)
@@ -9522,9 +9518,7 @@ static Type getLdgCallResultType(Type valueType, Type convertedValueType,
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType))
     return rewriter.getI32Type();
   if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    auto vecType = cast<VectorType>(valueType);
-    Type elemType = vecType.getElementType();
-    unsigned totalBits = 2 * pto::getPTOStorageElemBitWidth(elemType);
+    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
     if (totalBits == 16)
       return rewriter.getI32Type();
     if (totalBits == 32)
@@ -9560,9 +9554,7 @@ static Value convertLdgCallResult(Location loc, Type valueType,
     return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType, payload);
   }
   if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    auto vecType = cast<VectorType>(valueType);
-    Type elemType = vecType.getElementType();
-    unsigned totalBits = 2 * pto::getPTOStorageElemBitWidth(elemType);
+    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
     if (totalBits == 16) {
       Value trunc = rewriter.create<arith::TruncIOp>(
           loc, rewriter.getI16Type(), callResult);
@@ -9703,9 +9695,7 @@ static Value convertStgValue(Location loc, Type valueType, Value value,
   if (valueType.isF64())
     return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI64Type(), value);
   if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    auto vecType = cast<VectorType>(valueType);
-    Type elemType = vecType.getElementType();
-    unsigned totalBits = 2 * pto::getPTOStorageElemBitWidth(elemType);
+    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
     if (totalBits == 16)
       return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getF16Type(),
                                               value);

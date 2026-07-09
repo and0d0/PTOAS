@@ -155,7 +155,10 @@ def PTOLdgOp : PTO_Op<"ldg", [
 
     Supported value types:
     - Scalar: i8/i16/i32/i64, f16/bf16/f32/f64, fp8/hif8
-    - Vector: vector<2xf16>, vector<2xbf16>, vector<2xf32>
+    - Packed: vector<2xf16>, vector<2xbf16>, vector<2xf32>,
+      vector<2xf8E4M3FN>, vector<2xf8E5M2>,
+      vector<2xi8>, vector<2xi16>, vector<2xi32>,
+      and !pto.hif8x2
 
     The offset operand is an element-level ``index`` (not byte offset).
     For ``!pto.ptr<vector<2xf32>, gm>``, offset 1 advances by 8 bytes
