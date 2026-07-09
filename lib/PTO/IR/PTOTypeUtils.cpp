@@ -45,12 +45,25 @@ bool mlir::pto::isPTOLowPrecisionType(Type t) {
          isPTOHiFloat8x2Type(t) || isPTOFloat4PackedType(t);
 }
 
-bool mlir::pto::isPTOPackedFloat8x2Type(Type t) {
+std::optional<unsigned>
+mlir::pto::getPTOPackedFloat8VectorPayloadBitWidth(Type t) {
   if (isPTOHiFloat8x2Type(t))
-    return true;
+    return 16;
+
   auto vecTy = dyn_cast<VectorType>(t);
-  return vecTy && vecTy.getRank() == 1 && vecTy.getDimSize(0) == 2 &&
-         isPTOFloat8Type(vecTy.getElementType());
+  if (!vecTy || vecTy.getRank() != 1 ||
+      !isPTOFloat8Type(vecTy.getElementType()))
+    return std::nullopt;
+
+  int64_t lanes = vecTy.getDimSize(0);
+  if (lanes == 2 || lanes == 4 || lanes == 8)
+    return static_cast<unsigned>(lanes) * kBitsPerByte;
+
+  return std::nullopt;
+}
+
+bool mlir::pto::isPTOPackedFloat8VectorType(Type t) {
+  return getPTOPackedFloat8VectorPayloadBitWidth(t).has_value();
 }
 
 unsigned mlir::pto::getPTOStorageElemBitWidth(Type t) {

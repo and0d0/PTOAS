@@ -534,12 +534,12 @@ static LogicalResult verifyLdgStgAccess(Operation *op, Type ptrType,
       valueType.isF64())
     return success();
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType) ||
-      pto::isPTOPackedFloat8x2Type(valueType))
+      pto::isPTOPackedFloat8VectorType(valueType))
     return success();
 
   return op->emitOpError()
          << "currently supports 8/16/32/64-bit integer and "
-            "f16/bf16/f32/f64/fp8/hif8/fp8x2/hif8x2 value type";
+            "f16/bf16/f32/f64/fp8/hif8/packed fp8 vector value type";
 }
 
 LogicalResult PTOLoadOp::verify() {

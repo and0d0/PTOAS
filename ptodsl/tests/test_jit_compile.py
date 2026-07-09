@@ -860,12 +860,18 @@ def simt_memory_atomic_probe(
 
 
 @pto.simt
-def simt_fp8x2_ldg_stg_probe(
-    gm: pto.ptr(pto.vec_type(pto.f8e4m3, 2), "gm"),
+def simt_fp8_packed_ldg_stg_probe(
+    gm_x2: pto.ptr(pto.vec_type(pto.f8e4m3, 2), "gm"),
+    gm_x4: pto.ptr(pto.vec_type(pto.f8e4m3, 4), "gm"),
+    gm_x8: pto.ptr(pto.vec_type(pto.f8e4m3, 8), "gm"),
 ):
     idx = scalar.index_cast(pto.get_tid_x())
-    value = pto.ldg(gm, idx)
-    pto.stg(value, gm, idx)
+    value_x2 = pto.ldg(gm_x2, idx)
+    value_x4 = pto.ldg(gm_x4, idx)
+    value_x8 = pto.ldg(gm_x8, idx)
+    pto.stg(value_x2, gm_x2, idx)
+    pto.stg(value_x4, gm_x4, idx)
+    pto.stg(value_x8, gm_x8, idx)
 
 
 @pto.simt
@@ -1002,12 +1008,20 @@ def simt_resource_attr_launch_probe(*, TRACE_TOKEN: pto.const_expr = 0):
 def simt_full_surface_probe(
     gm: pto.ptr(pto.i32, "gm"),
     gm_fp8x2: pto.ptr(pto.vec_type(pto.f8e4m3, 2), "gm"),
+    gm_fp8x4: pto.ptr(pto.vec_type(pto.f8e4m3, 4), "gm"),
+    gm_fp8x8: pto.ptr(pto.vec_type(pto.f8e4m3, 8), "gm"),
     *,
     TRACE_TOKEN: pto.const_expr = 0,
 ):
     pto.simt_launch(simt_collective_math_probe, dims=(32, 1, 1))
     pto.simt_launch(simt_memory_atomic_probe, gm, dims=(32, 1, 1))
-    pto.simt_launch(simt_fp8x2_ldg_stg_probe, gm_fp8x2, dims=(32, 1, 1))
+    pto.simt_launch(
+        simt_fp8_packed_ldg_stg_probe,
+        gm_fp8x2,
+        gm_fp8x4,
+        gm_fp8x8,
+        dims=(32, 1, 1),
+    )
     pto.simt_launch(simt_keep_stage, dims=(32, 1, 1))
     pto.simt_launch(simt_resume_stage, gm, dims=(32, 1, 1))
 
@@ -4566,19 +4580,21 @@ def main() -> None:
         "pto.resume",
     ):
         expect(op_name in simt_full_text, f"full SIMT surface should contain {op_name}")
-    expect(
-        "!pto.ptr<vector<2xf8E4M3FN>, gm>" in simt_full_text,
-        "SIMT fp8x2 GM pointer annotations should preserve vector<2xf8E4M3FN>",
-    )
-    expect(
-        "pto.ldg" in simt_full_text and "vector<2xf8E4M3FN>" in simt_full_text,
-        "SIMT fp8x2 ldg should infer a vector<2xf8E4M3FN> payload",
-    )
-    expect(
-        "pto.stg" in simt_full_text
-        and "!pto.ptr<vector<2xf8E4M3FN>, gm>, vector<2xf8E4M3FN>" in simt_full_text,
-        "SIMT fp8x2 stg should accept an exact vector payload without scalar coercion",
-    )
+    for lanes in (2, 4, 8):
+        fp8_vec = f"vector<{lanes}xf8E4M3FN>"
+        expect(
+            f"!pto.ptr<{fp8_vec}, gm>" in simt_full_text,
+            f"SIMT fp8x{lanes} GM pointer annotations should preserve {fp8_vec}",
+        )
+        expect(
+            "pto.ldg" in simt_full_text and fp8_vec in simt_full_text,
+            f"SIMT fp8x{lanes} ldg should infer a {fp8_vec} payload",
+        )
+        expect(
+            "pto.stg" in simt_full_text
+            and f"!pto.ptr<{fp8_vec}, gm>, {fp8_vec}" in simt_full_text,
+            f"SIMT fp8x{lanes} stg should accept an exact vector payload without coercion",
+        )
 
     expect_raises(
         TypeError,

@@ -2644,8 +2644,14 @@ static FailureOr<StringRef> buildL1CacheLoadCallee(MLIRContext *context,
     elem = "s32";
   } else if (resultType.isF64()) {
     elem = "s64";
-  } else if (pto::isPTOPackedFloat8x2Type(resultType)) {
-    elem = "s16";
+  } else if (auto payloadBits =
+                 pto::getPTOPackedFloat8VectorPayloadBitWidth(resultType)) {
+    if (*payloadBits == 16)
+      elem = "s16";
+    else if (*payloadBits == 32)
+      elem = "s32";
+    else if (*payloadBits == 64)
+      elem = "s64";
   } else if (pto::isPTOFloat8Type(resultType) ||
              pto::isPTOHiFloat8Type(resultType)) {
     elem = "s8";
@@ -2678,8 +2684,14 @@ static FailureOr<StringRef> buildL1CacheStoreCallee(MLIRContext *context,
     elem = "b32";
   } else if (valueType.isF64()) {
     elem = "b64";
-  } else if (pto::isPTOPackedFloat8x2Type(valueType)) {
-    elem = "b16";
+  } else if (auto payloadBits =
+                 pto::getPTOPackedFloat8VectorPayloadBitWidth(valueType)) {
+    if (*payloadBits == 16)
+      elem = "b16";
+    else if (*payloadBits == 32)
+      elem = "b32";
+    else if (*payloadBits == 64)
+      elem = "b64";
   } else if (pto::isPTOFloat8Type(valueType) ||
              pto::isPTOHiFloat8Type(valueType)) {
     elem = "b8";
@@ -9774,8 +9786,12 @@ static Type getLdgCallResultType(Type valueType, Type convertedValueType,
     return rewriter.getI32Type();
   if (valueType.isF64())
     return rewriter.getI64Type();
-  if (pto::isPTOPackedFloat8x2Type(valueType))
+  if (auto payloadBits =
+          pto::getPTOPackedFloat8VectorPayloadBitWidth(valueType)) {
+    if (*payloadBits == 64)
+      return rewriter.getI64Type();
     return rewriter.getI32Type();
+  }
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType))
     return rewriter.getI32Type();
   return convertedValueType;
@@ -9800,9 +9816,15 @@ static Value convertLdgCallResult(Location loc, Type valueType,
   if (valueType.isF32() || valueType.isF64())
     return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType,
                                             callResult);
-  if (pto::isPTOPackedFloat8x2Type(valueType)) {
-    Value payload =
-        rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), callResult);
+  if (auto payloadBits =
+          pto::getPTOPackedFloat8VectorPayloadBitWidth(valueType)) {
+    Type payloadType = *payloadBits == 64 ? rewriter.getI64Type()
+                       : *payloadBits == 32 ? rewriter.getI32Type()
+                                            : rewriter.getI16Type();
+    Value payload = callResult;
+    if (*payloadBits == 16)
+      payload =
+          rewriter.create<arith::TruncIOp>(loc, payloadType, callResult);
     return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType, payload);
   }
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType)) {
@@ -9935,9 +9957,14 @@ static Value convertStgValue(Location loc, Type valueType, Value value,
         rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI8Type(), value);
     return rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), payload);
   }
-  if (pto::isPTOPackedFloat8x2Type(valueType)) {
-    Value payload =
-        rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI16Type(), value);
+  if (auto payloadBits =
+          pto::getPTOPackedFloat8VectorPayloadBitWidth(valueType)) {
+    Type payloadType = *payloadBits == 64 ? rewriter.getI64Type()
+                       : *payloadBits == 32 ? rewriter.getI32Type()
+                                            : rewriter.getI16Type();
+    Value payload = rewriter.create<LLVM::BitcastOp>(loc, payloadType, value);
+    if (*payloadBits != 16)
+      return payload;
     return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getF16Type(), payload);
   }
   if (valueType.isBF16())
