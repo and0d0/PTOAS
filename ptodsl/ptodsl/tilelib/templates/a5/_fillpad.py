@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """Shared basic fill-pad helpers."""
 
-from ptodsl import pto
+from ptodsl import pto, scalar
 import ptodsl.tilelib as tilelib
 
 
@@ -116,19 +116,32 @@ def _copy_region(src, dst, valid_rows, col_start, col_stop):
             col_loop.update(remained=remained)
 
 
-def _fill(dst, row_start, row_stop, col_start, col_stop):
+def _scalar_tail_start(dst, lanes):
+    if len(dst.shape) < 2:
+        return None
+    cols = dst.shape[1]
+    if cols <= lanes or cols % lanes == 0:
+        return None
+    return (cols // lanes) * lanes
+
+
+def _fill(dst, row_start, row_stop, col_start, col_stop, scalar_tail_start=None):
     dtype = dst.dtype
     lanes = pto.elements_per_vreg(dtype)
     fill_scalar = _fill_scalar(dst)
+    vector_col_stop = scalar_tail_start if scalar_tail_start is not None else col_stop
     with pto.for_(row_start, row_stop, step=1) as row:
-        remained = col_stop - col_start
-        col_loop = pto.for_(col_start, col_stop, step=lanes).carry(remained=remained)
+        remained = vector_col_stop - col_start
+        col_loop = pto.for_(col_start, vector_col_stop, step=lanes).carry(remained=remained)
         with col_loop:
             col = col_loop.iv
             mask, remained = pto.make_mask(dtype, remained)
             vec = pto.vdup(fill_scalar, mask)
             pto.vsts(vec, dst[row, col:], mask)
             col_loop.update(remained=remained)
+        if scalar_tail_start is not None:
+            with pto.for_(scalar_tail_start, col_stop, step=1) as col:
+                scalar.store(fill_scalar, dst[row, col])
 
 
 def _fill_inplace(dst, src_valid_rows, src_valid_cols, dst_valid_rows, dst_valid_cols):
@@ -162,10 +175,11 @@ def register_fillpad(*, op, name, copy):
         if copy:
             _copy_region(src, dst, src_valid_rows, 0, aligned_cols)
         fill_row_stop = dst_valid_rows if op == "pto.tfillpad_expand" else src_valid_rows
-        _fill(dst, 0, fill_row_stop, aligned_cols, dst_valid_cols)
+        scalar_tail_start = _scalar_tail_start(dst, lanes)
+        _fill(dst, 0, fill_row_stop, aligned_cols, dst_valid_cols, scalar_tail_start=scalar_tail_start)
         if copy:
             _copy_region(src, dst, src_valid_rows, aligned_cols, src_valid_cols)
-        _fill(dst, src_valid_rows, dst_valid_rows, 0, dst_valid_cols)
+        _fill(dst, src_valid_rows, dst_valid_rows, 0, dst_valid_cols, scalar_tail_start=scalar_tail_start)
 
     return template
 
