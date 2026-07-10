@@ -91,7 +91,7 @@ class _PtrDescriptor(_DType):
         self._space = space
 
     def resolve(self) -> Type:
-        elem = _ensure_tensor_storage_dtype(self._elem, context="pto.ptr(...)")
+        elem = _ensure_ptr_element_dtype(self._elem, context="pto.ptr(...)")
         space_enum = _normalize_address_space(self._space)
         if space_enum is None:
             raise ValueError(
@@ -159,7 +159,7 @@ class _VecDescriptor(_DType):
         self._size = _validate_vec_size(size, context="pto.Vec(...)")
 
     def resolve(self) -> Type:
-        elem = _ensure_non_storage_only_dtype(self._elem, context="pto.Vec(...)")
+        elem = _ensure_tensor_storage_dtype(self._elem, context="pto.vec_type(...)")
         return VectorType.get([self._size], elem)
 
     @property
@@ -233,6 +233,19 @@ def _ensure_tensor_storage_dtype(dtype, *, context: str):
     if category not in {"compute", "storage_only"}:
         raise TypeError(f"{context} does not support element type {type_obj}")
     return type_obj
+
+
+def _ensure_ptr_element_dtype(dtype, *, context: str):
+    type_obj = _resolve(dtype)
+    if VectorType.isinstance(type_obj):
+        vec_type = VectorType(type_obj)
+        if vec_type.rank != 1:
+            raise TypeError(
+                f"{context} only supports rank-1 vector element types, got {type_obj}"
+            )
+        _ensure_tensor_storage_dtype(vec_type.element_type, context=context)
+        return type_obj
+    return _ensure_tensor_storage_dtype(type_obj, context=context)
 
 
 def _ensure_non_storage_only_dtype(dtype, *, context: str):
