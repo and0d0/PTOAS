@@ -4193,7 +4193,7 @@ def mte_load(source, destination, l2_cache_ctl, len_burst, *, nburst, loops=None
 
 
 @_explicit_mode_only("pto.mte_store(...)")
-def mte_store(source, destination, len_burst, *, nburst, loops=None):
+def mte_store(source, destination, len_burst, *, nburst, loops=None, l2_cache_ctl=0):
     """Ptr-based UB->GM DMA wrapper aligned with the underlying ``pto.dma_store`` surface."""
     n_burst, nburst_src_stride, nburst_dst_stride = _normalize_dma_group(
         "nburst",
@@ -4207,6 +4207,7 @@ def mte_store(source, destination, len_burst, *, nburst, loops=None):
     _pto.MteUbGmOp(
         _require_pto_ptr_operand(source, context="mte_store(...)"),
         _require_pto_ptr_operand(destination, context="mte_store(...)"),
+        _coerce_i64(l2_cache_ctl, context="mte_store l2_cache_ctl"),
         _coerce_i64(len_burst, context="mte_store len_burst"),
         n_burst,
         nburst_src_stride,
@@ -4303,7 +4304,7 @@ def mte_gm_ub(source, destination, l2_cache_ctl, len_burst, *, nburst, loops=Non
 
 
 @_explicit_mode_only("pto.mte_ub_gm(...)")
-def mte_ub_gm(source, destination, len_burst, *, nburst, loops=None):
+def mte_ub_gm(source, destination, len_burst, *, nburst, loops=None, l2_cache_ctl=0):
     """``pto.mte_ub_gm`` – grouped UB-to-GM DMA surface."""
     n_burst, nburst_src_stride, nburst_dst_stride = _normalize_dma_group(
         "nburst",
@@ -4317,6 +4318,7 @@ def mte_ub_gm(source, destination, len_burst, *, nburst, loops=None):
     _pto.MteUbGmOp(
         unwrap_surface_value(source),
         unwrap_surface_value(destination),
+        _coerce_i64(l2_cache_ctl, context="mte_ub_gm l2_cache_ctl"),
         _coerce_i64(len_burst, context="mte_ub_gm len_burst"),
         n_burst,
         nburst_src_stride,
