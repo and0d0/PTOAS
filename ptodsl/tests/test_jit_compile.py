@@ -3186,6 +3186,15 @@ def main() -> None:
             str(pto.vreg_type(256, pto.f8e4m3).resolve()) == "!pto.vreg<256xf8E4M3FN>",
             "low-precision vreg types should be valid for vector micro-ops",
         )
+        expect(
+            str(pto.vec_type(pto.f32, 64).resolve()) == "vector<64xf32>",
+            "pto.vec_type should resolve to a builtin rank-1 vector type",
+        )
+        expect(
+            str(pto.ptr(pto.vec_type(pto.f32, 64), "ub").resolve())
+            == "!pto.ptr<vector<64xf32>, ub>",
+            "pointer descriptors should accept rank-1 vector element types",
+        )
         expect_raises(
             TypeError,
             lambda: pto.hif8(1.0),
