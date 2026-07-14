@@ -493,18 +493,19 @@ memory[effective_element] = value
 %value = pto.ldg %gm[%offset] l1cache(uncache) l2cache(nmpref) : !pto.ptr<T, gm> -> T
 ```
 
-- **semantics:** Load one scalar element from GM at `%ptr + %offset` using the
-  selected cache controls.
+- **semantics:** Load one GM scalar or packed element at `%ptr + %offset` using
+  the selected cache controls.
 - **inputs:** `%ptr` is a `!pto.ptr<T, gm>`. `%offset` is an `index` element
   offset, not a byte offset.
 - **attributes:** `l1cache` may be `l1cache(cache)` or `l1cache(uncache)` and
   defaults to `cache`. `l2cache(...)` uses the load L2 cache table and defaults
   to `nmfv`.
-- **outputs:** One scalar value of type `T`.
+- **outputs:** One value of the pointer element type `T`.
 - **constraints and limitations:** `pto.ldg` supports 8/16/32/64-bit integer
-  values and `f16`, `bf16`, `f32`, and `f64` floating values. The floating
-  forms use the target's same-width GM load path and reinterpret the loaded
-  bits as the requested floating type.
+  values, `f16`, `bf16`, `f32`, and `f64` floating values, and packed vector
+  elements `vector<2/4/8xf8E4M3FN>` and `vector<2/4/8xf8E5M2>`. The
+  `!pto.hif8x2` packed element type is also supported. For vector element
+  pointers, `%offset` is still counted in elements, not bytes.
 
 ### `pto.stg`
 
@@ -522,9 +523,9 @@ pto.stg %value, %gm[%offset] l1cache(cache) : !pto.ptr<T, gm>, T
 pto.stg %value, %gm[%offset] l1cache(uncache) l2cache(wtsred) : !pto.ptr<T, gm>, T
 ```
 
-- **semantics:** Store one scalar element to GM at `%ptr + %offset` using the
-  selected cache controls.
-- **inputs:** `%value` is the scalar element to write. `%ptr` is a
+- **semantics:** Store one GM scalar or packed element to GM at `%ptr + %offset`
+  using the selected cache controls.
+- **inputs:** `%value` is the element to write. `%ptr` is a
   `!pto.ptr<T, gm>`. `%offset` is an `index` element offset.
 - **attributes:** `l1cache` may be `l1cache(cache)` or `l1cache(uncache)` and
   defaults to `cache`. `l2cache(...)` uses the store/atomic L2 cache table and
@@ -532,7 +533,10 @@ pto.stg %value, %gm[%offset] l1cache(uncache) l2cache(wtsred) : !pto.ptr<T, gm>,
 - **outputs:** None.
 - **constraints and limitations:** `%value` type must match the pointer element
   type. `pto.stg` supports 8/16/32/64-bit integer values and `f16`, `bf16`,
-  `f32`, and `f64` floating values.
+  `f32`, and `f64` floating values, plus packed vector elements
+  `vector<2/4/8xf8E4M3FN>` and `vector<2/4/8xf8E5M2>`. The `!pto.hif8x2`
+  packed element type is also supported. For vector element pointers, `%offset`
+  is counted in elements, not bytes.
 
 Example:
 

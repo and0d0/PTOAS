@@ -277,25 +277,31 @@ def simt_ops_collective_probe(dst: pto.ptr(pto.i32, "gm")):
     reduce_lane_value[32, 1, 1](dst)
 ```
 
-## 13.4 Scalar GM memory and atomic ops
+## 13.4 GM memory and atomic ops
 
-#### `pto.ldg(ptr: PtrType, offset: Index = 0, *, l1cache: str = "cache", l2cache: str = "nmfv") -> ScalarType`
-#### `pto.stg(value: ScalarType, ptr: PtrType, offset: Index = 0, *, l1cache: str = "cache", l2cache: str = "nmfv") -> None`
+#### `pto.ldg(ptr: PtrType, offset: Index = 0, *, l1cache: str = "cache", l2cache: str = "nmfv") -> ScalarType | PackedType`
+#### `pto.stg(value: ScalarType | PackedType, ptr: PtrType, offset: Index = 0, *, l1cache: str = "cache", l2cache: str = "nmfv") -> None`
 
-**Description**: Loads or stores one scalar value through a typed pointer with
-cache controls.
+**Description**: Loads or stores one GM scalar or packed element through a
+typed pointer with cache controls.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `ptr` | `pto.ptr(dtype, "gm")` | GM pointer |
-| `value` | PTO scalar | Store payload for `pto.stg` |
+| `value` | PTO scalar or matching packed element | Store payload for `pto.stg` |
 | `offset` | index-like value | Element offset |
 | `l1cache` | `"cache"` or `"uncache"` | L1 cache policy |
 | `l2cache` | cache token string | L2 cache policy accepted by VPTO |
 
 **Returns**: `pto.ldg` returns the pointer element type. `pto.stg` returns None.
+
+The pointer element type is usually a PTO scalar. It may also be
+`pto.vec_type(pto.f8e4m3, 2/4/8)` or `pto.vec_type(pto.f8e5m2, 2/4/8)`.
+For these vector pointer types, the offset is still counted in elements:
+offset `+1` on `pto.ptr(pto.vec_type(pto.f8e4m3, 4), "gm")` advances by one
+packed 4-lane element.
 
 **Example**:
 
