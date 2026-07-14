@@ -80,6 +80,36 @@ source scripts/ptoas_env.sh
 
 ---
 
+## PTODSL TileLib backend
+
+PTOAS uses the PTODSL TileLib daemon by default for VPTO tile-op expansion:
+
+```bash
+ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto \
+  input.pto -o -
+```
+
+The source-tree build bakes in `$PTOAS_REPO_ROOT/ptodsl` as the package root.
+The `PTODSL_PYTHON_ROOT` environment variable from `scripts/ptoas_env.sh`
+overrides that default. Use `--ptodsl-pkg-path=/path/to/package/root` for an
+explicit command-line override. PTODSL daemon failures are reported as errors
+and never fall back to the TileLang implementation. Use
+`--tile-lib-backend=tilelang` only when explicitly comparing against the legacy
+TileLangDSL template library.
+
+`InsertTemplateAttributes` queries legal-candidate metadata before fusion and
+stores an ordered `candidates` array containing only `id`, `name`,
+`loop_depth`, `postupdate`, and `tail`. Fusion may filter this array.
+Candidates are ordered by unique `id`. `ExpandTileOp` renders the first
+candidate that remains, providing a deterministic fallback when several
+candidates reach expansion.
+
+See the
+[PTODSL TileLib migration test checklist](docs/tilelib-migration-testing.md)
+for the complete test inventory, commands, and expected outcomes.
+
+---
+
 ## JIT examples
 
 `ptodsl/examples/` contains self-contained `@pto.jit` examples that cover

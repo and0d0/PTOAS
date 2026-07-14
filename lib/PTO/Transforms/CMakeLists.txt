@@ -43,6 +43,7 @@ add_mlir_dialect_library(PTOTransforms
   PTOViewToMemref.cpp
   PTORematerializeFixpipeVectorQuant.cpp
   PTOValidateIntToPtrUses.cpp
+  InsertTemplateAttributes.cpp
   ExpandTileOp.cpp
   FoldTileBufIntrinsics.cpp
   PTOLowerToOpLibCalls.cpp

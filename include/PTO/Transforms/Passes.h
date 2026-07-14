@@ -109,6 +109,9 @@ LogicalResult validateVPTOEmissionIR(ModuleOp module,
                                      llvm::raw_ostream *diagOS = nullptr);
 std::unique_ptr<Pass> createPTOValidateVPTOIRPass();
 std::unique_ptr<Pass> createPTOValidateVPTOEmissionIRPass();
+std::unique_ptr<Pass> createInsertTemplateAttributesPass();
+std::unique_ptr<Pass> createInsertTemplateAttributesPass(
+    const InsertTemplateAttributesOptions &options);
 std::unique_ptr<Pass> createExpandTileOpPass();
 std::unique_ptr<Pass> createExpandTileOpPass(const ExpandTileOpOptions &options);
 std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass();

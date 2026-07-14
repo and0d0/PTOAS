@@ -28,6 +28,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -374,6 +375,9 @@ static llvm::cl::opt<bool> enableTileOpExpand(
 #ifndef PTOAS_DEFAULT_TILELANG_PKG_PATH
 #define PTOAS_DEFAULT_TILELANG_PKG_PATH ""
 #endif
+#ifndef PTOAS_DEFAULT_PTODSL_PKG_PATH
+#define PTOAS_DEFAULT_PTODSL_PKG_PATH ""
+#endif
 
 static llvm::cl::opt<std::string> tilelangPath(
     "tilelang-path",
@@ -387,33 +391,78 @@ static llvm::cl::opt<std::string> tilelangPkgPath(
                    "(default: <source>/tilelang-dsl/python, baked in at build time)"),
     llvm::cl::init(PTOAS_DEFAULT_TILELANG_PKG_PATH));
 
+static llvm::cl::opt<std::string> ptodslPkgPath(
+    "ptodsl-pkg-path",
+    llvm::cl::desc("PYTHONPATH for the ptodsl package "
+                   "(default: <source>/ptodsl, baked in at build time)"),
+    llvm::cl::init(PTOAS_DEFAULT_PTODSL_PKG_PATH));
+
 static llvm::cl::opt<std::string> daemonSocketPath(
     "daemon-socket-path",
     llvm::cl::desc("Path to Unix domain socket for daemon RPC "
-                   "(default: /tmp/tilelang_daemon_{pid}.sock)"),
+                   "(default: /tmp/tilelib_daemon_{pid}.sock)"),
     llvm::cl::init(""));
+
+enum class TileLibBackend {
+  TileLang,
+  PTODSL,
+};
+
+static llvm::cl::opt<TileLibBackend> tileLibBackend(
+    "tile-lib-backend",
+    llvm::cl::desc("TileLib backend used by ExpandTileOp"),
+    llvm::cl::values(
+        clEnumValN(TileLibBackend::TileLang, "tilelang",
+                   "Use the legacy TileLang DSL TileLib"),
+        clEnumValN(TileLibBackend::PTODSL, "ptodsl",
+                   "Use the PTODSL TileLib daemon")),
+    llvm::cl::init(TileLibBackend::PTODSL));
 
 static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
                                                            char **argv) {
   pto::ExpandTileOpOptions expandOpts;
   expandOpts.tilelangPath = tilelangPath;
   expandOpts.tilelangPkgPath = tilelangPkgPath;
+  const bool usePTODSLTileLib = tileLibBackend == TileLibBackend::PTODSL;
+  std::string resolvedPtodslPkgPath = ptodslPkgPath;
 
-  if (!hasCLIOption(argc, argv, "--tilelang-path")) {
-    std::string detectedTilelangPath = detectInstalledTilelangPath(argv[0]);
-    if (!detectedTilelangPath.empty())
-      expandOpts.tilelangPath = detectedTilelangPath;
+  if (!hasCLIOption(argc, argv, "--ptodsl-pkg-path")) {
+    const char *envPtodslRoot = ::getenv("PTODSL_PYTHON_ROOT");
+    if (envPtodslRoot && envPtodslRoot[0] != '\0')
+      resolvedPtodslPkgPath = envPtodslRoot;
   }
 
-  if (!hasCLIOption(argc, argv, "--tilelang-pkg-path")) {
-    std::string detectedTilelangPkgPath = detectInstalledTilelangPkgPath(argv[0]);
-    if (!detectedTilelangPkgPath.empty())
-      expandOpts.tilelangPkgPath = detectedTilelangPkgPath;
+  if (usePTODSLTileLib) {
+    // The PTODSL backend is package-based and must not depend on legacy
+    // TileLang template or package paths.
+    expandOpts.tilelangPath.clear();
+    expandOpts.tilelangPkgPath.clear();
+  } else {
+    if (!hasCLIOption(argc, argv, "--tilelang-path")) {
+      std::string detectedTilelangPath = detectInstalledTilelangPath(argv[0]);
+      if (!detectedTilelangPath.empty())
+        expandOpts.tilelangPath = detectedTilelangPath;
+    }
+
+    if (!hasCLIOption(argc, argv, "--tilelang-pkg-path")) {
+      std::string detectedTilelangPkgPath =
+          detectInstalledTilelangPkgPath(argv[0]);
+      if (!detectedTilelangPkgPath.empty())
+        expandOpts.tilelangPkgPath = detectedTilelangPkgPath;
+    }
   }
+
+  expandOpts.tileLibBackend = usePTODSLTileLib ? "ptodsl" : "tilelang";
+  expandOpts.daemonHelperModule =
+      usePTODSLTileLib ? "ptodsl.tilelib.serving.helper"
+                       : "tilelang_dsl.daemon_helper";
+  expandOpts.tileLibPkgPath =
+      usePTODSLTileLib ? resolvedPtodslPkgPath
+                       : std::string(expandOpts.tilelangPkgPath);
 
   // Daemon mode is default (no CLI option needed)
   // Automatically start daemon for instance caching
-  if (!expandOpts.tilelangPath.empty()) {
+  if (usePTODSLTileLib || !expandOpts.tilelangPath.empty()) {
     std::string socket = daemonSocketPath;
     if (socket.empty())
       socket = ptoas::DaemonManager::generateSocketPath();
@@ -421,18 +470,44 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
     // Register cleanup handler (daemon will be stopped on PTOAS exit)
     ptoas::registerDaemonCleanup();
 
+    const std::string daemonModule =
+        usePTODSLTileLib ? "ptodsl.tilelib.serving.daemon"
+                         : "tilelang_dsl.daemon";
+    const std::string templateDir =
+        usePTODSLTileLib ? "" : std::string(expandOpts.tilelangPath);
+
     // Try to start daemon automatically
-    if (ptoas::DaemonManager::start(socket, expandOpts.tilelangPath, expandOpts.tilelangPkgPath)) {
+    if (ptoas::DaemonManager::start(socket, daemonModule,
+                                    expandOpts.tileLibPkgPath, templateDir)) {
       expandOpts.daemonSocketPath = socket;
-      llvm::errs() << "Info: TileLang daemon started successfully\n";
+      llvm::errs() << "Info: " << expandOpts.tileLibBackend
+                   << " TileLib daemon started successfully\n";
     } else {
-      // Fallback: daemon failed, use subprocess mode (current approach)
       expandOpts.daemonSocketPath = "";
-      llvm::errs() << "Warning: Failed to start daemon, using subprocess mode (fallback)\n";
+      if (usePTODSLTileLib) {
+        llvm::errs()
+            << "Error: Failed to start the PTODSL TileLib daemon; no TileLang "
+               "fallback will be used\n";
+      } else {
+        llvm::errs() << "Warning: Failed to start daemon, using legacy "
+                        "TileLang subprocess mode\n";
+      }
     }
   }
 
   return expandOpts;
+}
+
+
+static pto::InsertTemplateAttributesOptions
+buildInsertTemplateAttributesOptions(
+    const pto::ExpandTileOpOptions &expandOptions) {
+  pto::InsertTemplateAttributesOptions options;
+  options.pythonExe = expandOptions.pythonExe;
+  options.daemonSocketPath = expandOptions.daemonSocketPath;
+  options.tileLibPkgPath = expandOptions.tileLibPkgPath;
+  options.daemonHelperModule = expandOptions.daemonHelperModule;
+  return options;
 }
 
 static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
@@ -2548,15 +2623,15 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(pto::createPTOValidateVPTOEmissionIRPass());
 }
 
-static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module, int argc,
-                                  char **argv) {
+static void
+lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
+                      const pto::ExpandTileOpOptions &expandOpts) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
   auto moduleArchAttr =
       module->getAttrOfType<mlir::StringAttr>("pto.target_arch");
   const bool enableA5VPTOPostLoweringFusionLifecycle =
       enableOpFusion && moduleArchAttr && moduleArchAttr.getValue() == "a5";
 
-  pto::ExpandTileOpOptions expandOpts = resolveExpandTileOpOptions(argc, argv);
   kernelModulePM.addPass(pto::createExpandTileOpPass(expandOpts));
 
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
@@ -2636,14 +2711,21 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 }
 
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
-                                            int argc, char **argv,
-                                            bool hasTileOpsToExpand) {
+                                            bool hasTileOpsToExpand,
+                                            const pto::ExpandTileOpOptions
+                                                *expandOptions) {
   PassManager pm(module->getContext());
   pm.enableVerifier();
   pm.addPass(pto::createVPTOSplitCVModulePass());
   pm.addPass(pto::createVPTONormalizeContainerPass());
-  if (hasTileOpsToExpand)
-    lowerPTOToVPTOBackend(pm, module.get(), argc, argv);
+  if (hasTileOpsToExpand) {
+    if (!expandOptions) {
+      llvm::errs() << "Error: tile expansion requires resolved TileLib "
+                      "options.\n";
+      return failure();
+    }
+    lowerPTOToVPTOBackend(pm, module.get(), *expandOptions);
+  }
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -2838,6 +2920,10 @@ int mlir::pto::compilePTOASModule(
   }
 
   const bool hasTileOpsToExpand = hasUnexpandedTileOps(*module);
+  std::optional<pto::ExpandTileOpOptions> expandOptions;
+  if (effectiveBackend == PTOBackend::VPTO && hasTileOpsToExpand &&
+      tileLibBackend == TileLibBackend::PTODSL)
+    expandOptions = resolveExpandTileOpOptions(argc, argv);
 
   if (effectiveBackend == PTOBackend::VPTO && !hasTileOpsToExpand) {
     if (ptoPrintSeamIR || !ptoSeamIRFile.empty()) {
@@ -2845,7 +2931,8 @@ int mlir::pto::compilePTOASModule(
                       "skipping the shared PTO-to-VPTO lowering pipeline.\n";
       return 1;
     }
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
+    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand,
+                                      /*expandOptions=*/nullptr)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
                                  context.getCANNVersionOrDefault());
@@ -2877,6 +2964,16 @@ int mlir::pto::compilePTOASModule(
   pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOA5NormalizeTMovPass());
   pm.addNestedPass<mlir::func::FuncOp>(
       pto::createPTOValidateIntToPtrUsesPass());
+
+  // PTODSL legality discovery happens on tile-native PTO IR before fusion.
+  // Fusion may later filter the ordered `candidates` array; ExpandTileOp
+  // consumes the first candidate that remains.
+  if (expandOptions && expandOptions->tileLibBackend == "ptodsl") {
+    auto insertOptions =
+        buildInsertTemplateAttributesOptions(*expandOptions);
+    pm.addPass(
+        pto::createInsertTemplateAttributesPass(insertOptions));
+  }
 
   // Keep frontend fusion on tile-native PTO IR and annotate last_use directly
   // on scheduled block-local spans before the shared mainline lowers tiles.
@@ -2947,6 +3044,10 @@ int mlir::pto::compilePTOASModule(
   if (effectiveBackend == PTOBackend::EmitC)
     pm.addPass(createNarrowUnusedMultiResultProvenancePass());
 
+  module->getOperation()->setAttr(
+      "pto.target_arch",
+      mlir::StringAttr::get(module->getContext(), arch));
+
   if (emitMlirIR) {
     if (failed(pm.run(*module))) {
       llvm::errs() << "Error: Pass execution failed.\n";
@@ -2981,6 +3082,14 @@ int mlir::pto::compilePTOASModule(
       return 1;
     }
 
+    if (ptoPrintSeamIR)
+      printSharedPreBackendSeamIR(*module);
+    // The PTODSL daemon is needed before the main pipeline for metadata.
+    // Legacy TileLang can still be resolved lazily immediately before
+    // ExpandTileOp, preserving the prior --emit-pto-ir behavior.
+    if (hasTileOpsToExpand && !expandOptions)
+      expandOptions = resolveExpandTileOpOptions(argc, argv);
+
     if (ptoPrintSeamIR) {
       module->print(llvm::errs());
       llvm::errs() << "\n";
@@ -2988,7 +3097,9 @@ int mlir::pto::compilePTOASModule(
     if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
       return 1;
 
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
+    if (failed(runVPTOBackendPipeline(
+            module, hasTileOpsToExpand,
+            expandOptions ? &*expandOptions : nullptr)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
                                  context.getCANNVersionOrDefault());

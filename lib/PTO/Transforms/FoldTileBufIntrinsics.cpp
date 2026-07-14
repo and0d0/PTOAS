@@ -299,6 +299,16 @@ static std::optional<ViewChain> traceViewChain(Value tensorView,
     }
   }
 
+  if (auto memrefCastOp =
+          memrefVal.getDefiningOp<UnrealizedConversionCastOp>()) {
+    if (memrefCastOp.getNumOperands() == 1 && memrefCastOp.getNumResults() == 1 &&
+        isa<MemRefType>(memrefCastOp.getOperand(0).getType()) &&
+        isa<MemRefType>(memrefCastOp.getResult(0).getType())) {
+      castOp = memrefCastOp;
+      memrefVal = memrefCastOp.getOperand(0);
+    }
+  }
+
   auto subviewOp = memrefVal.getDefiningOp<memref::SubViewOp>();
   if (!subviewOp) {
     user->emitError("FoldTileBufIntrinsics: expected memref to be defined by "
@@ -785,6 +795,34 @@ struct FoldTileBufIntrinsicsPass
         addrOp.getDst().replaceAllUsesWith(replacement);
         addrOp.erase();
       }
+    }
+
+    // Clean up dead unrealized_conversion_cast ops that bridged
+    // memref -> partition_tensor_view / tile_buf and are now unused
+    // after folding.
+    SmallVector<UnrealizedConversionCastOp, 8> deadCasts;
+    func.walk([&](UnrealizedConversionCastOp castOp) {
+      if (castOp.use_empty() && castOp.getNumOperands() == 1 &&
+          isa<MemRefType>(castOp.getOperand(0).getType()) &&
+          isa<MemRefType, pto::PartitionTensorViewType, pto::TileBufType>(
+              castOp.getResult(0).getType()))
+        deadCasts.push_back(castOp);
+    });
+    for (auto castOp : llvm::reverse(deadCasts))
+      castOp.erase();
+
+    while (true) {
+      SmallVector<Operation *, 8> deadMemrefOps;
+      func.walk([&](Operation *op) {
+        if ((isa<memref::SubViewOp>(op) ||
+             isa<memref::ReinterpretCastOp>(op)) &&
+            op->use_empty())
+          deadMemrefOps.push_back(op);
+      });
+      if (deadMemrefOps.empty())
+        break;
+      for (auto *op : llvm::reverse(deadMemrefOps))
+        op->erase();
     }
 
     // Erase pto.set_validshape ops. Every valid-shape reader
