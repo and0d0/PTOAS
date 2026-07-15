@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Bin2LNormModeRowRpt: 5x128 f32, v_col=40. headRepeats=3 -> per-row scf.for count mode.
+// Bin2LNormModeRowRpt: five valid 40-element rows in a physical 5x128 tile.
 // RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
@@ -15,11 +15,15 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    // CHECK: scf.for
-    // CHECK: pto.ub.set_mask_count
+    // CHECK: %[[MASK:.*]] = arith.constant 1099511627775 : i64
+    // CHECK: pto.ub.set_mask %[[MASK]],
+    // CHECK: %[[RPT:.*]] = arith.constant 5 : i64
+    // CHECK: %[[STRIDE:.*]] = arith.constant 16 : i64
     // CHECK: pto.ub.vadd {{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}
+    // CHECK-SAME: %[[RPT]],
+    // CHECK-SAME: %[[STRIDE]], %[[STRIDE]],
     // CHECK-SAME: : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
-    // CHECK: pto.ub.set_mask_norm
+    // CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
     pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     // CHECK-NOT: pto.tadd
     return

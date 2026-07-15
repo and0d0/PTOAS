@@ -170,7 +170,7 @@ def runtime_library_flags(*, sim_mode: bool = False) -> list[str]:
     return flags
 
 
-def aicore_arch_for_kernel_kind(kernel_kind: str, target_arch: str = "a5") -> str:
+def aicore_arch_for_kernel_kind(kernel_kind: str, target_arch: str) -> str:
     target = target_arch.lower()
     if kernel_kind == "vector":
         if target in {"a2", "a3"}:

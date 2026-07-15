@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ptodsl._runtime import toolchain
+from ptodsl._runtime import native_build, toolchain
 
 
 class RuntimeToolchainTest(unittest.TestCase):
@@ -35,6 +35,17 @@ class RuntimeToolchainTest(unittest.TestCase):
         self.assertEqual(
             toolchain.aicore_arch_for_kernel_kind("cube", "a5"), "dav-c310-cube"
         )
+
+    def test_native_launch_flags_use_target_arch(self):
+        with mock.patch.object(native_build, "common_include_flags", return_value=[]):
+            self.assertIn(
+                "--cce-aicore-arch=dav-c220-vec",
+                native_build._kernel_compile_flags("vector", "a3"),
+            )
+            self.assertIn(
+                "--cce-aicore-arch=dav-c310-cube",
+                native_build._kernel_compile_flags("cube", "a5"),
+            )
 
 
 class ResolvePtoasBinaryTests(unittest.TestCase):

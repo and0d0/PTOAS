@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -2689,8 +2690,12 @@ lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
 
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createLowerPTOToUBufOpsPass());
-  if (isA2A3)
+  if (isA2A3) {
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        memref::createExpandStridedMetadataPass());
+    kernelModulePM.addPass(mlir::createCanonicalizerPass());
     return;
+  }
 
   kernelModulePM.addPass(pto::createExpandTileOpPass(expandOpts));
 
@@ -2723,7 +2728,8 @@ buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion,
   options.targetTriple = "hiipu64-hisilicon-cce";
   options.cannVersion = cannVersion;
   std::string arch = normalizeArch(targetArch);
-  options.march = isA2A3Arch(arch) ? "dav-c220-vec" : "dav-c310-vec";
+  if (isA2A3Arch(arch))
+    options.march = "dav-c220-vec";
   return options;
 }
 
@@ -3040,7 +3046,8 @@ int mlir::pto::compilePTOASModule(
   // PTODSL legality discovery happens on tile-native PTO IR before fusion.
   // Fusion may later filter the ordered `candidates` array; ExpandTileOp
   // consumes the first candidate that remains.
-  if (expandOptions && expandOptions->tileLibBackend == "ptodsl") {
+  if (!isA2A3 && expandOptions &&
+      expandOptions->tileLibBackend == "ptodsl") {
     auto insertOptions =
         buildInsertTemplateAttributesOptions(*expandOptions);
     pm.addPass(

@@ -7,6 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
+from dataclasses import replace
 from pathlib import Path
 import os
 import re
@@ -3931,16 +3932,22 @@ def main() -> None:
         multi_abi_graph.dependencies == (("entry_calls_kernel_module_multiple_abi_probe", ("process_tile_module",)),),
         "higher-level dependency metadata should still preserve the authored caller->callee edge",
     )
+    host_vec_copy_compiled = host_vec_copy.compile()
     native_build_variants = (
-        ("pure-container", host_vec_copy.compile()),
-        ("explicit-level3-container", host_vec_copy_explicit_addr.compile()),
-        ("same-backend-multi-child-container", kernel_module_compiled),
-        ("mixed-backend-container", emitc_entry_calls_vpto_kernel_module_probe.compile()),
-        ("source-auto", source_native_build_compiled),
-        ("source-explicit", source_explicit_native_build_compiled),
-        ("source-no-insert-sync", source_no_insert_sync_native_build_compiled),
+        (
+            "a3-pure-container",
+            host_vec_copy_compiled,
+            replace(host_vec_copy_compiled._module_spec, target_arch="a3"),
+        ),
+        ("explicit-level3-container", host_vec_copy_explicit_addr.compile(), None),
+        ("same-backend-multi-child-container", kernel_module_compiled, None),
+        ("mixed-backend-container", emitc_entry_calls_vpto_kernel_module_probe.compile(), None),
+        ("source-auto", source_native_build_compiled, None),
+        ("source-explicit", source_explicit_native_build_compiled, None),
+        ("source-no-insert-sync", source_no_insert_sync_native_build_compiled, None),
     )
     native_build_observations = []
+    launch_target_arches = []
 
     with TemporaryDirectory() as tmpdir:
         build_root = Path(tmpdir)
@@ -3970,9 +3977,17 @@ def main() -> None:
             )
             kernel_object.write_text("fake fatobj\n", encoding="utf-8")
 
-        def fake_compile_launch_cpp(launch_cpp, launch_object, *, kernel_kind, export_macro):
+        def fake_compile_launch_cpp(
+            launch_cpp,
+            launch_object,
+            *,
+            kernel_kind,
+            target_arch,
+            export_macro,
+        ):
             expect(launch_cpp.is_file(), "native build should materialize launch.cpp before compiling it")
             expect(kernel_kind in {"vector", "cube"}, "native build should forward the authored kernel kind")
+            launch_target_arches.append(target_arch)
             expect(export_macro.endswith("_EXPORTS"), "native build should preserve launch export macro naming")
             launch_object.write_text("fake launch object\n", encoding="utf-8")
 
@@ -3989,10 +4004,11 @@ def main() -> None:
         ), mock.patch.object(
             native_build_runtime, "_link_shared_library", side_effect=fake_link_shared_library
         ), mock.patch.object(native_build_runtime, "runtime_library_flags", return_value=("-laclrt",)):
-            for label, compiled in native_build_variants:
+            for label, compiled, module_spec_override in native_build_variants:
+                module_spec = module_spec_override or compiled._module_spec
                 lib_path, launch_symbol = native_build_runtime.build_native_library(
                     py_name=compiled._py_name,
-                    module_spec=compiled._module_spec,
+                    module_spec=module_spec,
                     kernel_signature=compiled._kernel_signature,
                     mlir_text=compiled.mlir_text(),
                     specialization_key=compiled.specialization_key,
@@ -4007,22 +4023,29 @@ def main() -> None:
         len(native_build_observations) == len(native_build_variants),
         "native build should drive ptoas once per compiled container variant under test",
     )
-    for (label, compiled), observation in zip(native_build_variants, native_build_observations):
+    for (label, compiled, module_spec_override), observation, launch_target_arch in zip(
+        native_build_variants, native_build_observations, launch_target_arches
+    ):
+        module_spec = module_spec_override or compiled._module_spec
         expect(
-            observation["target_arch"] == compiled._module_spec.target_arch,
+            observation["target_arch"] == module_spec.target_arch,
             f"{label} native build should still pass the target arch to ptoas",
         )
+        expect(
+            launch_target_arch == module_spec.target_arch,
+            f"{label} native build should pass the target arch to launch compilation",
+        )
         expected_insert_sync = (
-            compiled._module_spec.insert_sync
-            if compiled._module_spec.insert_sync is not None
-            else compiled._module_spec.mode != "explicit"
+            module_spec.insert_sync
+            if module_spec.insert_sync is not None
+            else module_spec.mode != "explicit"
         )
         expect(
             observation["insert_sync"] == expected_insert_sync,
             f"{label} native build should forward the effective insert_sync policy to ptoas",
         )
-        expected_backend = compiled._module_spec.backend if compiled._module_spec.jit_source is not None else None
-        expected_pto_level = "level3" if compiled._module_spec.mode == "explicit" else None
+        expected_backend = module_spec.backend if module_spec.jit_source is not None else None
+        expected_pto_level = "level3" if module_spec.mode == "explicit" else None
         expect(
             observation["backend"] == expected_backend,
             f"{label} native build should only forward ptoas backend overrides for source-backed kernels",
@@ -4035,7 +4058,7 @@ def main() -> None:
             observation["mlir_text"] == compiled.mlir_text(),
             f"{label} native build should hand the backend-partitioned container MLIR to ptoas unchanged",
         )
-        if compiled._module_spec.jit_source is None:
+        if module_spec.jit_source is None:
             expect(
                 observation["mlir_text"].count("module") >= 2,
                 f"{label} native build should route the unified outer+child container through ptoas",
