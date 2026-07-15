@@ -2739,6 +2739,8 @@ static void prepareVPTOForEmission(PassManager &pm) {
       pto::createPTOInferVPTOVecScopePass());
   if (enableVMI)
     kernelModulePM.addPass(createLoopInvariantCodeMotionPass());
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      pto::createPTONarrowVPTOLoopCountersPass());
   kernelModulePM.addPass(createCanonicalizerPass());
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addPass(pto::createPTOValidateVPTOEmissionIRPass());
