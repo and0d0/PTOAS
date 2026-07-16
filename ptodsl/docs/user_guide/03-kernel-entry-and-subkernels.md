@@ -2,12 +2,12 @@
 
 PTODSL provides one kernel decorator (`@pto.jit`) with two roles
 (`entry=True` / `entry=False`), two compilation backends (`vpto` / `emitc`),
-and two reusable compute helper decorators (`@pto.tileop` and `@pto.simt`),
-plus reusable PTODSL helper functions (`@pto.func`) and inline unit-specific
-context managers. This chapter covers
-the `@pto.jit` entry and module contracts, the two programming models, the two
-compilation backends, helper functions, sub-kernel reference, parameter
-contracts, and boundary constraints.
+two reusable compute helper decorators (`@pto.tileop` and `@pto.simt`), and
+reusable PTODSL helper functions (`@pto.func`) plus inline unit-specific
+context managers. This chapter covers the `@pto.jit` entry and module
+contracts, the two programming models, the two compilation backends, helper
+functions, sub-kernel reference, parameter contracts, and boundary
+constraints.
 
 
 ## 3.1 `@pto.jit` — roles, backends, and modes
@@ -23,7 +23,7 @@ Decorator overview:
   mode="explicit"           micro-instruction authoring, user-managed staging
 
 @pto.tileop                 Single-core Tile/scalar compute helper with inferred Vector/Cube kind
-@pto.func                   Reusable PTODSL helper, no host/module ABI boundary
+@pto.func                   Reusable PTODSL helper with AST-rewritten control flow
 @pto.simt                   Explicitly launched SIMT helper with pointer/scalar ABI
 ```
 
@@ -61,14 +61,12 @@ manual-address, user-managed staging contract of explicit kernels.
 (`@pto.tileop` and `@pto.simt`) define sub-kernels that
 are called from within `@pto.jit` bodies.
 
-`@pto.func` is the lightweight helper boundary for reusable PTODSL code. It
-does not create a host-launchable entry, a kernel-module ABI, or a hardware-unit
-sub-kernel section. When traced PTODSL code calls a `@pto.func` helper, PTODSL
-materializes one helper `func.func` in the caller's active compilation context
-and emits `func.call` at call sites. Supported native Python `if` and
-`for range(...)` in the helper body use the same AST rewrite path as `@pto.jit`
-and named sub-kernels. The helper can return PTODSL runtime values, including
-multiple values via a tuple.
+`@pto.func` defines reusable PTODSL helper functions. Use it when a helper
+contains PTODSL operations or native Python `if` / `for range(...)` that should
+compile as device-side control flow. By default, supported native control flow
+in a `@pto.func` body is AST-rewritten just like in `@pto.jit` and named
+sub-kernels. The helper can return PTODSL runtime values, including multiple
+values via a tuple.
 
 ```python
 @pto.func
