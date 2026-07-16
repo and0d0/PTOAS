@@ -3,10 +3,11 @@
 PTODSL provides one kernel decorator (`@pto.jit`) with two roles
 (`entry=True` / `entry=False`), two compilation backends (`vpto` / `emitc`),
 and two reusable compute helper decorators (`@pto.tileop` and `@pto.simt`),
-plus inline unit-specific context managers. This chapter covers
+plus reusable PTODSL helper functions (`@pto.func`) and inline unit-specific
+context managers. This chapter covers
 the `@pto.jit` entry and module contracts, the two programming models, the two
-compilation backends, sub-kernel reference, parameter contracts, and boundary
-constraints.
+compilation backends, helper functions, sub-kernel reference, parameter
+contracts, and boundary constraints.
 
 
 ## 3.1 `@pto.jit` — roles, backends, and modes
@@ -22,6 +23,7 @@ Decorator overview:
   mode="explicit"           micro-instruction authoring, user-managed staging
 
 @pto.tileop                 Single-core Tile/scalar compute helper with inferred Vector/Cube kind
+@pto.func                   Reusable PTODSL helper, no host/module ABI boundary
 @pto.simt                   Explicitly launched SIMT helper with pointer/scalar ABI
 ```
 
@@ -58,6 +60,30 @@ manual-address, user-managed staging contract of explicit kernels.
 `entry=True` — runtime launch binding. The compute helper decorators
 (`@pto.tileop` and `@pto.simt`) define sub-kernels that
 are called from within `@pto.jit` bodies.
+
+`@pto.func` is the lightweight helper boundary for reusable PTODSL code. It
+does not create a host-launchable entry, a kernel-module ABI, or a hardware-unit
+sub-kernel section. When traced PTODSL code calls a `@pto.func` helper, PTODSL
+materializes one helper `func.func` in the caller's active compilation context
+and emits `func.call` at call sites. Supported native Python `if` and
+`for range(...)` in the helper body use the same AST rewrite path as `@pto.jit`
+and named sub-kernels. The helper can return PTODSL runtime values, including
+multiple values via a tuple.
+
+```python
+@pto.func
+def add_rows(total: pto.i32, rows: pto.i32):
+    one = pto.const(1, dtype=pto.i32)
+    for _ in range(rows):
+        total = total + one
+    return total
+
+
+@pto.jit(target="a5")
+def kernel(rows: pto.i32):
+    total = add_rows(pto.const(0, dtype=pto.i32), rows)
+    _ = total
+```
 
 
 ## 3.2 `entry=True` — host-launchable kernel entry
