@@ -1268,6 +1268,46 @@ def ast_nested_helper_ast_rewrite_probe(rows: pto.i32):
     _ = value
 
 
+@pto.func
+def func_runtime_for_return_helper(limit: pto.i32, initial: pto.i32):
+    one = pto.const(1, dtype=pto.i32)
+    total = initial
+    for _ in range(limit):
+        total = total + one
+    return total
+
+
+@pto.func
+def func_runtime_if_return_helper(lhs: pto.i32, rhs: pto.i32):
+    if lhs > rhs:
+        total = lhs + rhs
+    else:
+        total = rhs + lhs
+    return total
+
+
+@pto.func
+def func_multi_return_helper(value: pto.i32):
+    one = pto.const(1, dtype=pto.i32)
+    return value, value + one
+
+
+@pto.func
+def func_void_helper():
+    pto.pipe_barrier(pto.Pipe.ALL)
+
+
+@pto.jit(target="a5")
+def ptodsl_func_call_probe(rows: pto.i32):
+    init = pto.const(0, dtype=pto.i32)
+    total = func_runtime_for_return_helper(rows, init)
+    merged = func_runtime_if_return_helper(total, init)
+    first, second = func_multi_return_helper(merged)
+    _ = first + second
+    func_void_helper()
+    func_void_helper()
+
+
 @pto.jit(target="a5")
 def ast_nested_helper_freevar_if_merge_probe():
     lhs = pto.const(4, dtype=pto.i32)
@@ -1460,6 +1500,29 @@ def sourceless_subkernel_helper():
 
 
 sourceless_subkernel_entry_probe = make_sourceless_subkernel_entry()
+
+
+def make_sourceless_ptodsl_func_probe():
+    namespace = {"pto": pto}
+    exec(
+        """
+@pto.func
+def sourceless_ptodsl_func_helper():
+    if True:
+        pto.pipe_barrier(pto.Pipe.ALL)
+""",
+        namespace,
+    )
+    helper = namespace["sourceless_ptodsl_func_helper"]
+
+    @pto.jit(target="a5")
+    def sourceless_ptodsl_func_probe(*, TRACE_TOKEN: pto.const_expr = 0):
+        helper()
+
+    return sourceless_ptodsl_func_probe
+
+
+sourceless_ptodsl_func_probe = make_sourceless_ptodsl_func_probe()
 
 
 def make_entry_closure_kernel_module_probe():
@@ -4994,6 +5057,28 @@ def main() -> None:
         "rewritten nested helpers should preserve loop-carried and branch live-out values",
     )
 
+    ptodsl_func_call_text = ptodsl_func_call_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(ptodsl_func_call_text, "@pto.func helper call specialization")
+    expect(
+        re.search(r"func\.func @func_runtime_for_return_helper__ptodsl_[0-9a-f]+\(.*\) -> i32", ptodsl_func_call_text)
+        is not None,
+        "@pto.func helpers that return one runtime value should materialize a typed helper result",
+    )
+    expect(
+        re.search(r"func\.func @func_multi_return_helper__ptodsl_[0-9a-f]+\(.*\) -> \(i32, i32\)", ptodsl_func_call_text)
+        is not None,
+        "@pto.func helpers should support multiple returned runtime values",
+    )
+    expect(
+        ptodsl_func_call_text.count("scf.for") >= 1 and ptodsl_func_call_text.count("scf.if") >= 1,
+        "@pto.func helper bodies should use native control-flow AST rewrite",
+    )
+    expect(
+        len(re.findall(r"func\.func @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 1
+        and len(re.findall(r"call @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 2,
+        "repeated @pto.func calls should reuse one materialized helper artifact",
+    )
+
     ast_nested_helper_freevar_if_merge_text = ast_nested_helper_freevar_if_merge_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(
         ast_nested_helper_freevar_if_merge_text,
@@ -5115,6 +5200,16 @@ def main() -> None:
     expect(
         sourceless_subkernel_text.count("pto.simt_launch @tileop_noop_simt_probe__simt_") == 1,
         "source-less subkernels should fall back to original trace-time Python execution",
+    )
+
+    sourceless_ptodsl_func_text = sourceless_ptodsl_func_probe.compile(TRACE_TOKEN=1).mlir_text()
+    expect_parse_roundtrip_and_verify(
+        sourceless_ptodsl_func_text,
+        "source-less @pto.func AST rewrite fallback specialization",
+    )
+    expect(
+        sourceless_ptodsl_func_text.count("pto.barrier <PIPE_ALL>") == 1,
+        "source-less @pto.func helpers should fall back to original trace-time Python execution",
     )
 
     ast_python_bool_guard_enabled_text = ast_python_bool_guard_probe.compile().mlir_text()

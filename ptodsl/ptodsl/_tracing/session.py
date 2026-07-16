@@ -12,12 +12,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import inspect
 
 from .._diagnostics import (
     inline_subkernel_value_escape_error,
     inline_tileop_capture_type_error,
     subkernel_kernel_kind_mismatch_error,
 )
+from .._scalar_coercion import coerce_scalar_to_type
 from .._kernel_signature import RuntimeScalarParameterSpec
 from .._ops import const
 from .._surface_values import (
@@ -25,13 +27,14 @@ from .._surface_values import (
     is_tile_ir_type,
     unwrap_surface_value,
     wrap_like_surface_value,
+    wrap_surface_value,
 )
 from .control_flow import (
     build_carry_loop_frame,
     finish_carry_loop_frame,
     yield_carry_loop_state,
 )
-from .._types import _strip_integer_signedness
+from .._types import _resolve, _strip_integer_signedness, int1
 from .module_builder import create_container_child_module
 
 from mlir.dialects import arith, func
@@ -45,6 +48,7 @@ from mlir.ir import (
     IntegerType,
     Operation,
     StringAttr,
+    TypeAttr,
     UnitAttr,
 )
 
@@ -57,6 +61,7 @@ class HelperFunctionSpec:
     arg_types: tuple
     result_types: tuple = ()
     attributes: tuple[tuple[str, object], ...] = ()
+    identity: tuple = ()
 
     def cache_key(self) -> tuple:
         """Return one stable ABI-sensitive cache key for this helper signature."""
@@ -65,6 +70,7 @@ class HelperFunctionSpec:
             tuple(str(arg_type) for arg_type in self.arg_types),
             tuple(str(result_type) for result_type in self.result_types),
             tuple((attr_name, str(attr_value)) for attr_name, attr_value in self.attributes),
+            self.identity,
         )
 
     def specialized_symbol_name(self) -> str:
@@ -536,6 +542,81 @@ class TraceSession:
         func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in arg_templates])
         return None
 
+    def lower_ptodsl_func_call(self, func_template, *args, **kwargs):
+        """Lower one ``@pto.func`` helper call in the active trace."""
+        bound = func_template.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        ordered_arg_values = []
+        normalized_values = {}
+        for name, param in func_template.signature.parameters.items():
+            value = self._normalize_ptodsl_func_argument(
+                name,
+                param,
+                bound.arguments[name],
+            )
+            normalized_values[name] = value
+            ordered_arg_values.append(value)
+            if param.kind not in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }:
+                raise TypeError("@pto.func helpers do not support var-positional or var-keyword parameters yet")
+
+        arg_templates = tuple(ordered_arg_values)
+        owner_symbol_name = self.current_function_owner_symbol_name
+        helper_spec = HelperFunctionSpec(
+            symbol_name=func_template.spec.symbol_name,
+            arg_types=tuple(unwrap_surface_value(arg).type for arg in arg_templates),
+            attributes=(("pto.ptodsl.callable_kind", StringAttr.get("func")),),
+            identity=func_template.__ptodsl_cache_signature__(),
+        )
+        helper_fn, created = self.get_or_create_helper_function(
+            helper_spec,
+            owner_symbol_name=owner_symbol_name,
+        )
+
+        if created:
+            entry_block = helper_fn.add_entry_block()
+            entry_args = tuple(entry_block.arguments)
+            wrapped_args = []
+            wrapped_kwargs = {}
+            entry_arg_index = 0
+            for name, param in func_template.signature.parameters.items():
+                entry_arg = entry_args[entry_arg_index]
+                entry_arg_index += 1
+                wrapped_value = wrap_like_surface_value(normalized_values[name], entry_arg)
+                if param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
+                    wrapped_args.append(wrapped_value)
+                elif param.kind == inspect.Parameter.KEYWORD_ONLY:
+                    wrapped_kwargs[name] = wrapped_value
+                else:
+                    raise TypeError("@pto.func helpers do not support var-positional or var-keyword parameters yet")
+            with (
+                self.enter_function(helper_fn, owner_symbol_name=owner_symbol_name),
+                self.suspend_subkernel_scope(),
+                InsertionPoint(entry_block),
+            ):
+                result = func_template.emit_body(*wrapped_args, **wrapped_kwargs)
+                return_values = self._normalize_ptodsl_func_return_values(
+                    result,
+                    func_template=func_template,
+                )
+                result_types = tuple(value.type for value in return_values)
+                helper_fn.attributes["function_type"] = TypeAttr.get(
+                    func.FunctionType.get(
+                        list(helper_spec.arg_types),
+                        list(result_types),
+                    )
+                )
+                if return_values:
+                    func.ReturnOp([unwrap_surface_value(value) for value in return_values])
+                else:
+                    func.ReturnOp([])
+
+        call_op = func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in arg_templates])
+        return self._wrap_ptodsl_func_call_results(call_op.results)
+
     def begin_carry_loop(self, start, stop, step, state_items):
         """Materialize one authored ``pto.for_(...).carry(...)`` loop body."""
         frame = build_carry_loop_frame(start, stop, step, state_items)
@@ -754,6 +835,88 @@ class TraceSession:
             if helper.name.value == symbol_name:
                 return helper
         return None
+
+    def _normalize_ptodsl_func_argument(self, name: str, param, value):
+        raw_value = unwrap_surface_value(value)
+        if hasattr(raw_value, "type"):
+            return raw_value
+        if param.annotation is not inspect.Parameter.empty:
+            try:
+                target_type = _resolve(param.annotation)
+            except Exception:
+                target_type = param.annotation
+            try:
+                return coerce_scalar_to_type(
+                    raw_value,
+                    target_type,
+                    context=f"@pto.func parameter {name!r}",
+                )
+            except TypeError:
+                pass
+        if isinstance(raw_value, bool):
+            return const(int(raw_value), dtype=int1)
+        if isinstance(raw_value, int):
+            return const(raw_value)
+        raise TypeError(
+            f"@pto.func parameter {name!r} expects a traced runtime value or a supported literal, "
+            f"got {raw_value!r}"
+        )
+
+    def _normalize_ptodsl_func_return_values(self, result, *, func_template):
+        if result is None:
+            return ()
+        if isinstance(result, tuple):
+            values = result
+        elif isinstance(result, list):
+            values = tuple(result)
+        else:
+            values = (result,)
+
+        normalized = []
+        return_annotation = func_template.signature.return_annotation
+        target_type = None
+        if return_annotation is not inspect.Signature.empty:
+            try:
+                target_type = _resolve(return_annotation)
+            except Exception:
+                target_type = None
+
+        for index, value in enumerate(values):
+            raw_value = unwrap_surface_value(value)
+            if hasattr(raw_value, "type"):
+                normalized.append(raw_value)
+                continue
+            if target_type is not None:
+                try:
+                    normalized.append(
+                        coerce_scalar_to_type(
+                            raw_value,
+                            target_type,
+                            context=f"@pto.func return value {index}",
+                        )
+                    )
+                    continue
+                except TypeError:
+                    pass
+            if isinstance(raw_value, bool):
+                normalized.append(const(int(raw_value), dtype=int1))
+                continue
+            if isinstance(raw_value, int):
+                normalized.append(const(raw_value))
+                continue
+            raise TypeError(
+                f"@pto.func return value {index} must be a traced runtime value or supported literal, "
+                f"got {raw_value!r}"
+            )
+        return tuple(normalized)
+
+    def _wrap_ptodsl_func_call_results(self, results):
+        if not results:
+            return None
+        wrapped = tuple(wrap_surface_value(result) for result in results)
+        if len(wrapped) == 1:
+            return wrapped[0]
+        return wrapped
 
     def _attach_ptodsl_logical_name_attr(self, func_op, logical_name: str) -> None:
         """Mark one ABI-specialized PTODSL symbol with its authored logical name."""
