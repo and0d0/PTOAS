@@ -14,8 +14,10 @@ from functools import update_wrapper
 import inspect
 
 from ._ast_rewrite import rewrite_jit_function
-from ._cache_signature import closure_cache_signature
+from ._cache_signature import cache_signature_atom, closure_cache_signature
 from ._tracing import current_runtime
+
+_RETURNS_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -28,11 +30,21 @@ class FuncSpec:
 class FuncTemplate:
     """Callable decorated PTODSL helper surface."""
 
-    def __init__(self, spec: FuncSpec, py_fn, *, ast_rewrite: bool = True):
+    def __init__(self, spec: FuncSpec, py_fn, *, ast_rewrite: bool = True, returns=_RETURNS_UNSET):
         self.spec = spec
         self.py_fn = py_fn
         self._ast_rewrite = ast_rewrite
         self.signature = inspect.signature(py_fn)
+        if returns is not _RETURNS_UNSET:
+            self.declared_returns = returns
+        elif self.signature.return_annotation is not inspect.Signature.empty:
+            self.declared_returns = self.signature.return_annotation
+        else:
+            raise TypeError(
+                "@pto.func helpers must explicitly declare return types with "
+                "@pto.func(returns=...) or a Python return annotation; use "
+                "returns=None or -> None for helpers that do not return values"
+            )
         update_wrapper(self, py_fn)
 
     def emit_body(self, *args, **kwargs):
@@ -54,11 +66,12 @@ class FuncTemplate:
             self.spec.symbol_name,
             id(self.py_fn),
             self._ast_rewrite,
+            cache_signature_atom(self.declared_returns),
             closure_cache_signature(self.py_fn),
         )
 
 
-def func(fn=None, *, name: str | None = None, ast_rewrite: bool = True):
+def func(fn=None, *, name: str | None = None, ast_rewrite: bool = True, returns=_RETURNS_UNSET):
     """Decorate a Python function as a reusable PTODSL callable helper."""
 
     def decorator(py_fn):
@@ -66,6 +79,7 @@ def func(fn=None, *, name: str | None = None, ast_rewrite: bool = True):
             FuncSpec(symbol_name=name or py_fn.__name__),
             py_fn,
             ast_rewrite=ast_rewrite,
+            returns=returns,
         )
 
     if fn is not None:
