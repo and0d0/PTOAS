@@ -48,7 +48,6 @@ from mlir.ir import (
     IntegerType,
     Operation,
     StringAttr,
-    TypeAttr,
     UnitAttr,
 )
 
@@ -568,6 +567,7 @@ class TraceSession:
         helper_spec = HelperFunctionSpec(
             symbol_name=func_template.spec.symbol_name,
             arg_types=tuple(unwrap_surface_value(arg).type for arg in arg_templates),
+            result_types=self._declared_ptodsl_func_result_types(func_template),
             attributes=(("pto.ptodsl.callable_kind", StringAttr.get("func")),),
             identity=func_template.__ptodsl_cache_signature__(),
         )
@@ -601,13 +601,7 @@ class TraceSession:
                 return_values = self._normalize_ptodsl_func_return_values(
                     result,
                     func_template=func_template,
-                )
-                result_types = tuple(value.type for value in return_values)
-                helper_fn.attributes["function_type"] = TypeAttr.get(
-                    func.FunctionType.get(
-                        list(helper_spec.arg_types),
-                        list(result_types),
-                    )
+                    result_types=helper_spec.result_types,
                 )
                 if return_values:
                     func.ReturnOp([unwrap_surface_value(value) for value in return_values])
@@ -862,8 +856,21 @@ class TraceSession:
             f"got {raw_value!r}"
         )
 
-    def _normalize_ptodsl_func_return_values(self, result, *, func_template):
+    def _declared_ptodsl_func_result_types(self, func_template):
+        declared_returns = func_template.declared_returns
+        if declared_returns is None or declared_returns is type(None):
+            return ()
+        if isinstance(declared_returns, (tuple, list)):
+            return tuple(_resolve(return_type) for return_type in declared_returns)
+        return (_resolve(declared_returns),)
+
+    def _normalize_ptodsl_func_return_values(self, result, *, func_template, result_types):
         if result is None:
+            if result_types:
+                raise TypeError(
+                    f"@pto.func {func_template.spec.symbol_name!r} must return "
+                    f"{len(result_types)} value(s) matching its declared return type"
+                )
             return ()
         if isinstance(result, tuple):
             values = result
@@ -872,41 +879,36 @@ class TraceSession:
         else:
             values = (result,)
 
-        normalized = []
-        return_annotation = func_template.signature.return_annotation
-        target_type = None
-        if return_annotation is not inspect.Signature.empty:
-            try:
-                target_type = _resolve(return_annotation)
-            except Exception:
-                target_type = None
+        if len(values) != len(result_types):
+            raise TypeError(
+                f"@pto.func {func_template.spec.symbol_name!r} returned {len(values)} value(s), "
+                f"but its declared return type expects {len(result_types)}"
+            )
 
-        for index, value in enumerate(values):
+        normalized = []
+        for index, (value, target_type) in enumerate(zip(values, result_types)):
             raw_value = unwrap_surface_value(value)
             if hasattr(raw_value, "type"):
+                if str(raw_value.type) != str(target_type):
+                    raise TypeError(
+                        f"@pto.func return value {index} has type {raw_value.type}, "
+                        f"but the declared return type is {target_type}"
+                    )
                 normalized.append(raw_value)
                 continue
-            if target_type is not None:
-                try:
-                    normalized.append(
-                        coerce_scalar_to_type(
-                            raw_value,
-                            target_type,
-                            context=f"@pto.func return value {index}",
-                        )
+            try:
+                normalized.append(
+                    coerce_scalar_to_type(
+                        raw_value,
+                        target_type,
+                        context=f"@pto.func return value {index}",
                     )
-                    continue
-                except TypeError:
-                    pass
-            if isinstance(raw_value, bool):
-                normalized.append(const(int(raw_value), dtype=int1))
+                )
                 continue
-            if isinstance(raw_value, int):
-                normalized.append(const(raw_value))
-                continue
+            except TypeError:
+                pass
             raise TypeError(
-                f"@pto.func return value {index} must be a traced runtime value or supported literal, "
-                f"got {raw_value!r}"
+                f"@pto.func return value {index} must match declared type {target_type}, got {raw_value!r}"
             )
         return tuple(normalized)
 

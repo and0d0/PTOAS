@@ -257,10 +257,11 @@ rewritten scope become device-side control flow. Use `pto.const_expr(...)` and
 
 PTODSL does not recursively rewrite arbitrary undecorated Python callees. If an
 external helper should contain runtime native control flow, decorate it with
-`@pto.func` or one of the other PTODSL callable decorators. A plain Python
-helper is still executed during tracing; static `range(...)` loops in such a
-helper unroll at trace time, and runtime loop bounds or branch conditions are
-not converted into `scf.for` / `scf.if`.
+`@pto.func` or one of the other PTODSL callable decorators. `@pto.func` helpers
+must explicitly declare their return type with `returns=...` or a Python return
+annotation. A plain Python helper is still executed during tracing; static
+`range(...)` loops in such a helper unroll at trace time, and runtime loop
+bounds or branch conditions are not converted into `scf.for` / `scf.if`.
 
 ### Runtime branches
 

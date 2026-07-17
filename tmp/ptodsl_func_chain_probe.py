@@ -17,7 +17,7 @@ def plain_trace_helper():
             pto.pipe_barrier(pto.Pipe.ALL)
 
 
-@pto.func
+@pto.func(returns=pto.i32)
 def dyn_loop_helper(limit: pto.i32, value: pto.i32):
     one = pto.const(1, dtype=pto.i32)
     total = value
@@ -26,7 +26,7 @@ def dyn_loop_helper(limit: pto.i32, value: pto.i32):
     return total
 
 
-@pto.func
+@pto.func(returns=pto.i32)
 def dyn_if_helper(lhs: pto.i32, rhs: pto.i32):
     if lhs > rhs:
         chosen = lhs - rhs
@@ -35,7 +35,7 @@ def dyn_if_helper(lhs: pto.i32, rhs: pto.i32):
     return chosen
 
 
-@pto.func(ast_rewrite=False)
+@pto.func(ast_rewrite=False, returns=pto.i32)
 def no_rewrite_static_helper(value: pto.i32):
     total = value
     if True:
@@ -44,7 +44,7 @@ def no_rewrite_static_helper(value: pto.i32):
     return total
 
 
-@pto.func
+@pto.func(returns=pto.i32)
 def chain_mid(limit: pto.i32, seed: pto.i32):
     looped = dyn_loop_helper(limit, seed)
     branched = dyn_if_helper(looped, seed)
@@ -52,7 +52,7 @@ def chain_mid(limit: pto.i32, seed: pto.i32):
     return static_expanded
 
 
-@pto.func
+@pto.func(returns=(pto.i32, pto.i32))
 def multi_return_helper(limit: pto.i32, seed: pto.i32):
     value = chain_mid(limit, seed)
     return value, value + pto.const(1, dtype=pto.i32)

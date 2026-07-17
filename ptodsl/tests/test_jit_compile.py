@@ -1268,7 +1268,7 @@ def ast_nested_helper_ast_rewrite_probe(rows: pto.i32):
     _ = value
 
 
-@pto.func
+@pto.func(returns=pto.i32)
 def func_runtime_for_return_helper(limit: pto.i32, initial: pto.i32):
     one = pto.const(1, dtype=pto.i32)
     total = initial
@@ -1277,7 +1277,7 @@ def func_runtime_for_return_helper(limit: pto.i32, initial: pto.i32):
     return total
 
 
-@pto.func
+@pto.func(returns=pto.i32)
 def func_runtime_if_return_helper(lhs: pto.i32, rhs: pto.i32):
     if lhs > rhs:
         total = lhs + rhs
@@ -1286,13 +1286,13 @@ def func_runtime_if_return_helper(lhs: pto.i32, rhs: pto.i32):
     return total
 
 
-@pto.func
+@pto.func(returns=(pto.i32, pto.i32))
 def func_multi_return_helper(value: pto.i32):
     one = pto.const(1, dtype=pto.i32)
     return value, value + one
 
 
-@pto.func
+@pto.func(returns=None)
 def func_void_helper():
     pto.pipe_barrier(pto.Pipe.ALL)
 
@@ -1506,7 +1506,7 @@ def make_sourceless_ptodsl_func_probe():
     namespace = {"pto": pto}
     exec(
         """
-@pto.func
+@pto.func(returns=None)
 def sourceless_ptodsl_func_helper():
     if True:
         pto.pipe_barrier(pto.Pipe.ALL)
@@ -5077,6 +5077,11 @@ def main() -> None:
         len(re.findall(r"func\.func @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 1
         and len(re.findall(r"call @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 2,
         "repeated @pto.func calls should reuse one materialized helper artifact",
+    )
+    expect_raises(
+        TypeError,
+        lambda: pto.func(lambda value: value),
+        "must explicitly declare return types",
     )
 
     ast_nested_helper_freevar_if_merge_text = ast_nested_helper_freevar_if_merge_probe.compile().mlir_text()

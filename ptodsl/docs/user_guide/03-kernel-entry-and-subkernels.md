@@ -66,10 +66,12 @@ contains PTODSL operations or native Python `if` / `for range(...)` that should
 compile as device-side control flow. By default, supported native control flow
 in a `@pto.func` body is AST-rewritten just like in `@pto.jit` and named
 sub-kernels. The helper can return PTODSL runtime values, including multiple
-values via a tuple.
+values via a tuple. Every `@pto.func` helper must declare its return type with
+`returns=...` or a Python return annotation; use `returns=None` or `-> None` for
+helpers that do not return values.
 
 ```python
-@pto.func
+@pto.func(returns=pto.i32)
 def add_rows(total: pto.i32, rows: pto.i32):
     one = pto.const(1, dtype=pto.i32)
     for _ in range(rows):
