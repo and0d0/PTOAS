@@ -193,29 +193,6 @@ static Value computeDelta(Value v, scf::ForOp forOp, OpBuilder &builder) {
 }
 
 //===----------------------------------------------------------------------===//
-// Legality Checks
-//===----------------------------------------------------------------------===//
-
-// Check if the offset computation has no uses other than the candidate op.
-static bool hasNoExtraUses(Value offset, Operation *candidateOp,
-                           scf::ForOp forOp) {
-  if (!offset)
-    return true;
-  // If offset is the IV itself or defined outside the loop, other uses are fine
-  // since we don't delete those.
-  if (offset == forOp.getInductionVar() || forOp.isDefinedOutsideOfLoop(offset))
-    return true;
-  // Check uses within the loop body
-  for (Operation *user : offset.getUsers()) {
-    if (user == candidateOp)
-      continue;
-    if (forOp->isAncestor(user))
-      return false;
-  }
-  return true;
-}
-
-//===----------------------------------------------------------------------===//
 // Rewrite: create new ForOp with additional iter_arg
 //===----------------------------------------------------------------------===//
 
@@ -438,10 +415,6 @@ private:
 
       // Stride must be loop-invariant.
       if (!forOp.isDefinedOutsideOfLoop(stride))
-        continue;
-
-      // Check no extra uses of the offset within the loop.
-      if (!hasNoExtraUses(offset, &op, forOp))
         continue;
 
       rewrites.push_back({&op, base, offset, stride});
