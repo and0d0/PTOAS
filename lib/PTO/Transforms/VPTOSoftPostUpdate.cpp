@@ -227,6 +227,14 @@ struct PostUpdateRewrite {
   Value stride; // loop-invariant stride value
 };
 
+// A unique key for grouping rewrites that can share an iter_arg.
+// Same base + same stride (by Value identity) = same group.
+using IterArgGroupKey = std::pair<Value, Value>;
+
+static IterArgGroupKey getGroupKey(const PostUpdateRewrite &rw) {
+  return {rw.base, rw.stride};
+}
+
 // Apply post-update rewrites to a single scf.for.
 // Returns the new ForOp if any rewrites were applied, null otherwise.
 static scf::ForOp applyPostUpdateRewrites(
@@ -234,19 +242,28 @@ static scf::ForOp applyPostUpdateRewrites(
   if (rewrites.empty())
     return nullptr;
 
-  // Group rewrites by base pointer, each unique base gets its own iter_arg.
-  DenseMap<Value, SmallVector<const PostUpdateRewrite *>> baseGroups;
-  SmallVector<Value> baseOrder; // preserve insertion order
-  for (auto &rw : rewrites) {
-    if (!baseGroups.contains(rw.base))
-      baseOrder.push_back(rw.base);
-    baseGroups[rw.base].push_back(&rw);
+  // Group rewrites by (base, stride). Ops in the same group share one iter_arg
+  // and all use the pre-update pointer. Only one updated_base per group is
+  // yielded. This avoids redundant iter_args for same-address ops (e.g. vlds
+  // + vsts both accessing %base[%iv]).
+  DenseMap<IterArgGroupKey, unsigned> groupToIdx; // group key -> iter_arg index
+  SmallVector<unsigned> rwGroupIdx(rewrites.size()); // rewrite -> group index
+  SmallVector<Value> groupBases; // one base per group
+
+  for (auto [i, rw] : llvm::enumerate(rewrites)) {
+    auto key = getGroupKey(rw);
+    auto [it, inserted] = groupToIdx.try_emplace(key, groupBases.size());
+    if (inserted)
+      groupBases.push_back(rw.base);
+    rwGroupIdx[i] = it->second;
   }
 
-  // Build new init args: original + one new pointer per unique base.
+  unsigned numGroups = groupBases.size();
+
+  // Build new init args: original + one new pointer per group.
   SmallVector<Value> newInitArgs(forOp.getInitArgs().begin(),
                                 forOp.getInitArgs().end());
-  for (Value base : baseOrder)
+  for (Value base : groupBases)
     newInitArgs.push_back(base);
 
   unsigned origIterArgCount = forOp.getInitArgs().size();
@@ -266,11 +283,6 @@ static scf::ForOp applyPostUpdateRewrites(
   for (unsigned i = 0; i < origIterArgCount; ++i)
     mapping.map(oldBody->getArgument(i + 1), newBody->getArgument(i + 1));
 
-  // Build a map from base to new block arg index.
-  DenseMap<Value, unsigned> baseToNewArgIdx;
-  for (auto [i, base] : llvm::enumerate(baseOrder))
-    baseToNewArgIdx[base] = origIterArgCount + 1 + i; // +1 for IV
-
   // Clone the body, tracking old->new op correspondence.
   DenseMap<Operation *, Operation *> opMapping;
   builder.setInsertionPointToStart(newBody);
@@ -279,59 +291,58 @@ static scf::ForOp applyPostUpdateRewrites(
     opMapping[&op] = cloned;
   }
 
-  // Now apply rewrites: replace each candidate op with post-update form.
-  // Track the current pointer value for each base (for chaining multiple ops).
-  DenseMap<Value, Value> currentPtr;
-  for (Value base : baseOrder)
-    currentPtr[base] = newBody->getArgument(baseToNewArgIdx[base]);
+  // Apply rewrites. All ops in a group use the same pre-update pointer (block
+  // arg). Track the last updated_base per group for yielding.
+  SmallVector<Value> groupYieldPtrs(numGroups);
+  for (unsigned g = 0; g < numGroups; ++g)
+    groupYieldPtrs[g] = newBody->getArgument(origIterArgCount + 1 + g);
 
-  for (Value base : baseOrder) {
-    for (const PostUpdateRewrite *rw : baseGroups[base]) {
-      auto it = opMapping.find(rw->op);
-      if (it == opMapping.end())
-        continue;
-      Operation *clonedOp = it->second;
-      Value ptr = currentPtr[base];
-      Value stride = mapping.lookupOrDefault(rw->stride);
+  for (auto [rwIdx, rw] : llvm::enumerate(rewrites)) {
+    auto it = opMapping.find(rw.op);
+    if (it == opMapping.end())
+      continue;
+    Operation *clonedOp = it->second;
+    unsigned gIdx = rwGroupIdx[rwIdx];
+    Value ptr = newBody->getArgument(origIterArgCount + 1 + gIdx);
+    Value stride = mapping.lookupOrDefault(rw.stride);
 
-      builder.setInsertionPoint(clonedOp);
+    builder.setInsertionPoint(clonedOp);
 
-      if (auto vlds = dyn_cast<pto::VldsOp>(clonedOp)) {
-        auto newVlds = builder.create<pto::VldsOp>(
-            vlds.getLoc(),
-            /*result=*/vlds.getResult().getType(),
-            /*updated_base=*/ptr.getType(),
-            /*source=*/ptr,
-            /*offset=*/stride,
-            /*dist=*/vlds.getDistAttr());
-        vlds.getResult().replaceAllUsesWith(newVlds.getResult());
-        currentPtr[base] = newVlds.getUpdatedBase();
-        clonedOp->erase();
-      } else if (auto vsts = dyn_cast<pto::VstsOp>(clonedOp)) {
-        Value value = vsts.getValue();
-        Value mask = vsts.getMask();
-        auto newVsts = builder.create<pto::VstsOp>(
-            vsts.getLoc(),
-            /*updated_base=*/ptr.getType(),
-            /*value=*/value,
-            /*destination=*/ptr,
-            /*offset=*/stride,
-            /*dist=*/vsts.getDistAttr(),
-            /*mask=*/mask);
-        currentPtr[base] = newVsts.getUpdatedBase();
-        clonedOp->erase();
-      }
-      // TODO: handle vsstb
+    if (auto vlds = dyn_cast<pto::VldsOp>(clonedOp)) {
+      auto newVlds = builder.create<pto::VldsOp>(
+          vlds.getLoc(),
+          /*result=*/vlds.getResult().getType(),
+          /*updated_base=*/ptr.getType(),
+          /*source=*/ptr,
+          /*offset=*/stride,
+          /*dist=*/vlds.getDistAttr());
+      vlds.getResult().replaceAllUsesWith(newVlds.getResult());
+      groupYieldPtrs[gIdx] = newVlds.getUpdatedBase();
+      clonedOp->erase();
+    } else if (auto vsts = dyn_cast<pto::VstsOp>(clonedOp)) {
+      Value value = vsts.getValue();
+      Value mask = vsts.getMask();
+      auto newVsts = builder.create<pto::VstsOp>(
+          vsts.getLoc(),
+          /*updated_base=*/ptr.getType(),
+          /*value=*/value,
+          /*destination=*/ptr,
+          /*offset=*/stride,
+          /*dist=*/vsts.getDistAttr(),
+          /*mask=*/mask);
+      groupYieldPtrs[gIdx] = newVsts.getUpdatedBase();
+      clonedOp->erase();
     }
+    // TODO: handle vsstb
   }
 
-  // Build yield: original yields + new pointer values.
+  // Build yield: original yields + one pointer per group.
   auto oldYield = cast<scf::YieldOp>(oldBody->getTerminator());
   SmallVector<Value> newYields;
   for (Value v : oldYield.getOperands())
     newYields.push_back(mapping.lookupOrDefault(v));
-  for (Value base : baseOrder)
-    newYields.push_back(currentPtr[base]);
+  for (Value ptr : groupYieldPtrs)
+    newYields.push_back(ptr);
 
   builder.setInsertionPointToEnd(newBody);
   builder.create<scf::YieldOp>(oldYield.getLoc(), newYields);
