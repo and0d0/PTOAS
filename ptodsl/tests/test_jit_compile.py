@@ -20,6 +20,7 @@ from unittest import mock
 
 from ptodsl import pto, scalar
 from ptodsl import _types as pto_types
+from ptodsl._ast_rewrite import PTODSLAstRewriteError
 from ptodsl._bootstrap import make_context
 from ptodsl._kernel_signature import DeviceParameterSpec, HelperMarkerParameterSpec, RuntimeScalarParameterSpec
 from ptodsl._tracing.runtime import SignatureTracingRuntime
@@ -1286,6 +1287,26 @@ def func_runtime_if_return_helper(lhs: pto.i32, rhs: pto.i32):
     return total
 
 
+@pto.func(returns=pto.i32)
+def func_runtime_if_early_return_helper(lhs: pto.i32, rhs: pto.i32):
+    if lhs > rhs:
+        return lhs
+    return rhs
+
+
+@pto.func(returns=pto.i32)
+def func_runtime_for_early_return_helper(limit: pto.i32, initial: pto.i32):
+    for _ in range(limit):
+        return initial
+    return initial
+
+
+@pto.func(returns=None)
+def func_runtime_if_yield_helper(lhs: pto.i32, rhs: pto.i32):
+    if lhs > rhs:
+        yield lhs
+
+
 @pto.func(returns=(pto.i32, pto.i32))
 def func_multi_return_helper(value: pto.i32):
     one = pto.const(1, dtype=pto.i32)
@@ -1306,6 +1327,24 @@ def ptodsl_func_call_probe(rows: pto.i32):
     _ = first + second
     func_void_helper()
     func_void_helper()
+
+
+@pto.jit(target="a5")
+def ptodsl_func_if_early_return_probe(rows: pto.i32):
+    init = pto.const(0, dtype=pto.i32)
+    _ = func_runtime_if_early_return_helper(rows, init)
+
+
+@pto.jit(target="a5")
+def ptodsl_func_for_early_return_probe(rows: pto.i32):
+    init = pto.const(0, dtype=pto.i32)
+    _ = func_runtime_for_early_return_helper(rows, init)
+
+
+@pto.jit(target="a5")
+def ptodsl_func_if_yield_probe(rows: pto.i32):
+    init = pto.const(0, dtype=pto.i32)
+    func_runtime_if_yield_helper(rows, init)
 
 
 @pto.jit(target="a5")
@@ -5077,6 +5116,21 @@ def main() -> None:
         len(re.findall(r"func\.func @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 1
         and len(re.findall(r"call @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 2,
         "repeated @pto.func calls should reuse one materialized helper artifact",
+    )
+    expect_raises(
+        PTODSLAstRewriteError,
+        lambda: ptodsl_func_if_early_return_probe.compile().mlir_text(),
+        "return/yield inside rewritten if branches",
+    )
+    expect_raises(
+        PTODSLAstRewriteError,
+        lambda: ptodsl_func_for_early_return_probe.compile().mlir_text(),
+        "return/yield inside rewritten for-loop bodies",
+    )
+    expect_raises(
+        PTODSLAstRewriteError,
+        lambda: ptodsl_func_if_yield_probe.compile().mlir_text(),
+        "return/yield inside rewritten if branches",
     )
     expect_raises(
         TypeError,
