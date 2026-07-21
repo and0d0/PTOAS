@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --emit-vpto %s -o - | FileCheck %s
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --enable-vpto-soft-postupdate --emit-vpto %s -o - | FileCheck %s
 
 // Op inside scf.if within loop: should not transform.
 // CHECK-LABEL: func.func @control_flow

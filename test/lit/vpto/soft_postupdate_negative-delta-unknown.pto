@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --emit-vpto %s -o - | FileCheck %s
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --enable-vpto-soft-postupdate --emit-vpto %s -o - | FileCheck %s
 
 // offset = iv * iv (quadratic, non-affine): delta is unknown, should not transform.
 // CHECK-LABEL: func.func @delta_unknown

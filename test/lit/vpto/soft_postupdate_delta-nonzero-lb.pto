@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --emit-vpto %s -o - | FileCheck %s
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --enable-vpto-soft-postupdate --emit-vpto %s -o - | FileCheck %s
 
 // IV starts at 64 (not 0). The initial pointer must be base + 64, not base.
 // CHECK-LABEL: func.func @nonzero_lb

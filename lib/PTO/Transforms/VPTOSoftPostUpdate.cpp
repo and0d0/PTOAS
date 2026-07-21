@@ -242,8 +242,10 @@ static Value computeInitialPtr(Value base, Value strideOperand,
   builder.setInsertionPoint(forOp);
   Value scaledOffset = soAtEntry;
   if (weight != 1) {
-    Value soIndex = builder.create<arith::IndexCastUIOp>(
-        forOp.getLoc(), builder.getIndexType(), soAtEntry);
+    Value soIndex = soAtEntry;
+    if (soAtEntry.getType() != builder.getIndexType())
+      soIndex = builder.create<arith::IndexCastUIOp>(
+          forOp.getLoc(), builder.getIndexType(), soAtEntry);
     Value weightVal =
         builder.create<arith::ConstantIndexOp>(forOp.getLoc(), weight);
     scaledOffset =
@@ -508,8 +510,10 @@ private:
         if (!constTotal || *constTotal % weight != 0)
           continue;
         builder.setInsertionPoint(forOp);
+        unsigned bitWidth =
+            strideOperand.getType().getIntOrFloatBitWidth();
         strideNew = builder.create<arith::ConstantIntOp>(
-            forOp.getLoc(), *constTotal / weight, 16);
+            forOp.getLoc(), *constTotal / weight, bitWidth);
       } else {
         strideNew = stride;
       }

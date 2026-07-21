@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --emit-vpto %s -o - | FileCheck %s
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --enable-vpto-soft-postupdate --emit-vpto %s -o - | FileCheck %s
 
 // Two ops share the same non-IV offset expression (%off = iv * 2).
 // Both should be transformed — the shared offset must not block either.
