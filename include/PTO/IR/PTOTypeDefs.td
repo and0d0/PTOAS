@@ -308,17 +308,28 @@ def LocalArrayType : TypeDef<PTO_Dialect, "LocalArray"> {
 // !pto.local_array: it lowers to a plain C++ `struct { ... };` whose address is
 // decided by the host C++ compiler, never by PTO memory planning or
 // pto.pointer_cast. Fields are positionally numbered (f0, f1, ...), matching an
-// LLVM literal struct. A field type may be a scalar (int / float), a nested
-// !pto.local_array, or a nested !pto.struct — this is how nested / complex
-// aggregates are expressed. Vec/cube types (tile_buf / tensor_view) are
-// forbidden by the type verifier, keeping the scalar world disjoint from the
-// fractal/layout world.
+// LLVM literal struct.
+//
+// A field type is either a scalar the backend can name exactly (an integer of
+// width 8/16/32/64, or f16/bf16/f32/f64) or a nested !pto.struct — that is how
+// nested aggregates are expressed. Three things are rejected by the type
+// verifier:
+//   - vec/cube types (tile_buf / tensor_view), keeping the scalar world
+//     disjoint from the fractal/layout world;
+//   - scalars with no exact C++ spelling (i1, i24, the packed f8/f4 formats),
+//     which would otherwise be emitted as `float`;
+//   - !pto.local_array, because a field is reached with emitc.member, whose
+//     result must be an !emitc.lvalue, and !emitc.lvalue cannot wrap the
+//     !emitc.array an array field lowers to.
+//
+// A value of this type lowers to a *pointer* to the struct's storage, so it can
+// be passed to a helper function and mutated there; see PTOToEmitC.cpp.
 def StructType : TypeDef<PTO_Dialect, "Struct"> {
   let mnemonic = "struct";
   let summary = "Scalar-unit heterogeneous aggregate (C++ struct / llvm.struct)";
   let parameters = (ins ArrayRefParameter<"mlir::Type">:$fieldTypes);
 
-  let hasCustomAssemblyFormat = 1;   // form: !pto.struct<f16, i8, !pto.local_array<4xf32>>
+  let hasCustomAssemblyFormat = 1;   // form: !pto.struct<f16, i8, !pto.struct<f32, i8>>
   let genVerifyDecl = 1;
 
   let extraClassDeclaration = [{

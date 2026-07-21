@@ -10517,9 +10517,9 @@ Section 2.7 for type-level constraints.
 **Summary:** Read the field reached by a constant `path` of field indices,
 descending through nested structs.
 
-**Semantics:** `s.fA.fB...` — a scalar result is snapshotted into a fresh
-variable (value semantics, like `pto.local_array_get`); an aggregate result
-(nested array / struct) is the member-access lvalue itself.
+**Semantics:** `s.fA.fB...`, read into a fresh variable so the SSA value keeps
+its value if the struct is mutated later (value semantics, like
+`pto.local_array_get`).
 
 **Arguments:**
 
@@ -10528,12 +10528,15 @@ variable (value semantics, like `pto.local_array_get`); an aggregate result
 | `s` | `!pto.struct<...>` | The struct |
 | `path` | `DenseI64ArrayAttr` | Constant field indices, e.g. `[0, 2]` |
 
-**Results:** `value` — the field type at the end of `path`.
+**Results:** `value` — the scalar field type at the end of `path`.
 
 **Constraints & Verification:**
 
 - `path` is non-empty; every index is in range at its level.
 - An intermediate index may only descend into a nested struct.
+- `path` must **end at a scalar field**. A path stopping on a nested
+  `!pto.struct` is rejected — returning the aggregate would copy it out of the
+  parent struct; extend the path to reach a scalar inside it.
 - Result type must equal the field type at the end of `path`.
 
 **Basic Example:**
@@ -10541,7 +10544,7 @@ variable (value semantics, like `pto.local_array_get`); an aggregate result
 ```mlir
 %r = pto.struct_get %s[0]    : !pto.struct<f16, i8> -> f16      // r = s.f0;
 %v = pto.struct_get %s[0, 1]                                    // v = s.f0.f1;
-   : !pto.struct<!pto.struct<f32, i8>, !pto.local_array<4xf32>> -> i8
+   : !pto.struct<!pto.struct<f32, i8>, i16> -> i8
 ```
 
 ---
@@ -10566,18 +10569,22 @@ indices, descending through nested structs.
 **Constraints & Verification:**
 
 - `path` is non-empty; every index is in range at its level.
+- An intermediate index may only descend into a nested struct.
+- `path` must **end at a scalar field**, same as `pto.struct_get`. A path
+  stopping on a nested `!pto.struct` is rejected — extend it to reach a scalar.
 - Value type must equal the field type at the end of `path`.
-- The terminal field must be copy-assignable: a `!pto.local_array` terminal is
-  rejected (a C array cannot be assigned). Use `pto.struct_get` to obtain the
-  array, then write elements with `pto.local_array_set`.
 
 **Basic Example:**
 
 ```mlir
 pto.struct_set %s[1], %v : !pto.struct<f16, i8>, i8            // s.f1 = v;
 pto.struct_set %s[0, 0], %v                                    // s.f0.f0 = v;
-   : !pto.struct<!pto.struct<f32, i8>, !pto.local_array<4xf32>>, f32
+   : !pto.struct<!pto.struct<f32, i8>, i16>, f32
 ```
+
+When the struct is a function argument the same op emits `s->f0 = v;` — see
+[Section 2.7](#27-ptostructt0-t1--tn-1) for why a struct is carried as a
+pointer.
 
 ---
 

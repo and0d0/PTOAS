@@ -13324,8 +13324,8 @@ LogicalResult LocalArrayType::verify(
 
 // ---- StructType ----
 // Asm form: !pto.struct<T0, T1, ..., Tn-1>
-// A field type must be "scalar-storable": a scalar integer/float, a nested
-// !pto.local_array, or a nested !pto.struct. This allowlist deliberately
+// A field type must be "scalar-storable": an exactly-nameable scalar or a
+// nested !pto.struct (see the two predicates below). The allowlist deliberately
 // excludes the vec/cube types (tile_buf / tensor_view / partition view) and any
 // other handle type, keeping the scalar struct world disjoint from the
 // fractal/layout world.
