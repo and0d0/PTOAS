@@ -1007,6 +1007,42 @@ class _SlotValueRewriter(ast.NodeTransformer):
                 return ast.copy_location(_name(value_name, node.ctx), node)
         return self.generic_visit(node)
 
+class _ControlFlowExitVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.exit_node = None
+
+    def visit_Return(self, node):
+        self.exit_node = node
+
+    def visit_Yield(self, node):
+        self.exit_node = node
+
+    def visit_YieldFrom(self, node):
+        self.exit_node = node
+
+    def visit_FunctionDef(self, node):
+        return
+
+    def visit_AsyncFunctionDef(self, node):
+        return
+
+    def visit_Lambda(self, node):
+        return
+
+    def visit_ClassDef(self, node):
+        return
+
+
+def _reject_control_flow_exits(stmts, context: str):
+    visitor = _ControlFlowExitVisitor()
+    for stmt in stmts:
+        visitor.visit(stmt)
+        if visitor.exit_node is not None:
+            raise PTODSLAstRewriteError(
+                f"ast_rewrite=True does not support return/yield inside rewritten {context}; "
+                "assign values to locals and return after the rewritten control flow"
+            )
+
 
 class _ControlFlowRewriter:
     def __init__(self, static_env=None, *, section_entry_bindings=None, section_uninitialized_aliases=None):
@@ -1150,6 +1186,9 @@ class _ControlFlowRewriter:
                 static_iters=static_iters,
             )
             return [stmt]
+
+        _reject_control_flow_exits(stmt.body, "if branches")
+        _reject_control_flow_exits(stmt.orelse, "if branches")
 
         cond_name = self._fresh("cond")
         then_info = _name_info(stmt.body)
@@ -1420,6 +1459,7 @@ class _ControlFlowRewriter:
             raise PTODSLAstRewriteError("ast_rewrite=True does not support for-else on runtime loops")
         if not isinstance(stmt.target, ast.Name):
             raise PTODSLAstRewriteError("ast_rewrite=True runtime for-loops require a simple name target")
+        _reject_control_flow_exits(stmt.body, "for-loop bodies")
         if stmt.target.id in live_after:
             raise PTODSLAstRewriteError(
                 "ast_rewrite=True runtime for-loops cannot expose the loop induction variable outside the loop yet; "
