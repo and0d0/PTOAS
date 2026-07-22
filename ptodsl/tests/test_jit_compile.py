@@ -1318,6 +1318,11 @@ def func_void_helper():
     pto.pipe_barrier(pto.Pipe.ALL)
 
 
+@pto.func(returns=pto.i32)
+def func_partition_metadata_helper(part: pto.PartitionTensorView, cols: pto.i32):
+    return part.sizes[0] + cols
+
+
 @pto.jit(target="a5")
 def ptodsl_func_call_probe(rows: pto.i32):
     init = pto.const(0, dtype=pto.i32)
@@ -1327,6 +1332,16 @@ def ptodsl_func_call_probe(rows: pto.i32):
     _ = first + second
     func_void_helper()
     func_void_helper()
+
+
+@pto.jit(target="a5")
+def ptodsl_func_partition_metadata_probe(
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    cols: pto.i32,
+):
+    a_view = pto.make_tensor_view(A_ptr, shape=[1, 16], strides=[16, 1])
+    part = pto.partition_view(a_view, offsets=[0, 0], sizes=[1, 16])
+    _ = func_partition_metadata_helper(part, cols)
 
 
 @pto.jit(target="a5")
@@ -5116,6 +5131,19 @@ def main() -> None:
         len(re.findall(r"func\.func @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 1
         and len(re.findall(r"call @func_void_helper__ptodsl_[0-9a-f]+", ptodsl_func_call_text)) == 2,
         "repeated @pto.func calls should reuse one materialized helper artifact",
+    )
+    ptodsl_func_partition_metadata_text = ptodsl_func_partition_metadata_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        ptodsl_func_partition_metadata_text,
+        "@pto.func partition metadata specialization",
+    )
+    expect(
+        re.search(r"func\.func @func_partition_metadata_helper__ptodsl_[0-9a-f]+", ptodsl_func_partition_metadata_text)
+        is not None
+        and re.search(r"func\.func @func_partition_metadata_helper__ptodsl_[0-9a-f]+\(.*\) -> i32", ptodsl_func_partition_metadata_text)
+        is not None
+        and ptodsl_func_partition_metadata_text.count("pto.partition_view") >= 2,
+        "@pto.func should preserve partition metadata across the helper boundary",
     )
     expect_raises(
         PTODSLAstRewriteError,

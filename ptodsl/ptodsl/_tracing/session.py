@@ -546,15 +546,16 @@ class TraceSession:
         bound = func_template.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         ordered_arg_values = []
-        normalized_values = {}
+        arg_templates = []
         for name, param in func_template.signature.parameters.items():
+            original_value = bound.arguments[name]
             value = self._normalize_ptodsl_func_argument(
                 name,
                 param,
-                bound.arguments[name],
+                original_value,
             )
-            normalized_values[name] = value
             ordered_arg_values.append(value)
+            arg_templates.append(original_value)
             if param.kind not in {
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -562,11 +563,12 @@ class TraceSession:
             }:
                 raise TypeError("@pto.func helpers do not support var-positional or var-keyword parameters yet")
 
-        arg_templates = tuple(ordered_arg_values)
+        arg_values = tuple(ordered_arg_values)
+        arg_templates = tuple(arg_templates)
         owner_symbol_name = self.current_function_owner_symbol_name
         helper_spec = HelperFunctionSpec(
             symbol_name=func_template.spec.symbol_name,
-            arg_types=tuple(unwrap_surface_value(arg).type for arg in arg_templates),
+            arg_types=tuple(unwrap_surface_value(arg).type for arg in arg_values),
             result_types=self._declared_ptodsl_func_result_types(func_template),
             attributes=(("pto.ptodsl.callable_kind", StringAttr.get("func")),),
             identity=func_template.__ptodsl_cache_signature__(),
@@ -584,8 +586,9 @@ class TraceSession:
             entry_arg_index = 0
             for name, param in func_template.signature.parameters.items():
                 entry_arg = entry_args[entry_arg_index]
+                arg_template = arg_templates[entry_arg_index]
                 entry_arg_index += 1
-                wrapped_value = wrap_like_surface_value(normalized_values[name], entry_arg)
+                wrapped_value = wrap_like_surface_value(arg_template, entry_arg)
                 if param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
                     wrapped_args.append(wrapped_value)
                 elif param.kind == inspect.Parameter.KEYWORD_ONLY:
@@ -608,7 +611,7 @@ class TraceSession:
                 else:
                     func.ReturnOp([])
 
-        call_op = func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in arg_templates])
+        call_op = func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in arg_values])
         return self._wrap_ptodsl_func_call_results(call_op.results)
 
     def begin_carry_loop(self, start, stop, step, state_items):
