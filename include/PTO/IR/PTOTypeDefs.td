@@ -323,7 +323,10 @@ def LocalArrayType : TypeDef<PTO_Dialect, "LocalArray"> {
 //     !emitc.array an array field lowers to.
 //
 // A value of this type lowers to a *pointer* to the struct's storage, so it can
-// be passed to a helper function and mutated there; see PTOToEmitC.cpp.
+// be passed to a helper function and mutated there. To keep the pointed-to
+// lifetime visible, storage originates from pto.declare_struct or a function
+// argument, and other operations may not produce derived values of this type;
+// see PTOToEmitC.cpp.
 def StructType : TypeDef<PTO_Dialect, "Struct"> {
   let mnemonic = "struct";
   let summary = "Scalar-unit heterogeneous aggregate (C++ struct / llvm.struct)";

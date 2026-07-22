@@ -226,10 +226,9 @@ void setExternalArtifactVisibility(func::FuncOp func, bool isExternal);
 /// Validate module-level PTO entry configuration before EmitC lowering.
 LogicalResult validatePTOEntryFunctions(ModuleOp module);
 
-/// Reject any function returning a !pto.struct. A struct value is a pointer to
-/// stack storage, so a function result launders its provenance and defeats the
-/// per-op escape check in DeclareStructOp::verify().
-LogicalResult validateStructNeverReturned(ModuleOp module);
+/// Reject !pto.struct function results and operation results other than
+/// pto.declare_struct, so aliases cannot hide stack-storage provenance.
+LogicalResult validateStructProvenance(ModuleOp module);
 
 /// Compatibility hook kept for existing pass pipelines. This is now a no-op
 /// because PTO entry state is expressed directly through explicit entry attrs

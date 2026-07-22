@@ -264,7 +264,7 @@ The number of indices on `get` / `set` must equal the array's rank
 
 ---
 
-### 2.7 `!pto.struct<T0, T1, ..., Tn-1>`
+### 2.8 `!pto.struct<T0, T1, ..., Tn-1>`
 
 A **C++ stack-local heterogeneous aggregate** — the heterogeneous dual of
 `!pto.local_array`. Lowers to a plain `struct PtoStruct_X { ... };` definition
@@ -351,9 +351,10 @@ func.func private @passthrough(%s : !pto.struct<f32, i8>) -> !pto.struct<f32, i8
 }
 ```
 
-A function result is the only place provenance can be laundered, so banning it
-leaves exactly two ways to obtain a struct value — declare it, or receive it as
-an argument. Provenance is then always local and always visible to the verifier.
+Operation and region results can launder provenance in the same way. Therefore,
+struct storage must originate from `pto.declare_struct` or a function argument.
+Other operation results of this type are rejected; this includes aliases
+produced by `arith.select`, `scf.if`, calls, casts, and loop-carried values.
 
 This costs nothing in expressiveness: `pto.struct_set` mutates in place, so a
 struct never needs to be returned or yielded. Declare it in the outer scope and
@@ -10529,8 +10530,8 @@ C++ stack-local heterogeneous aggregate ops. Disjoint from the tile-buf /
 scratch memory world: the struct's address is decided by the host C++
 compiler. Naming and asm style mirror the `local_array` triad.
 
-Operates on the [`!pto.struct<...>`](#27-ptostructt0-t1--tn-1) type. See
-Section 2.7 for type-level constraints.
+Operates on the [`!pto.struct<...>`](#28-ptostructt0-t1--tn-1) type. See
+Section 2.8 for type-level constraints.
 
 ##### `pto.declare_struct` - Declare a Stack-Local Struct
 
@@ -10550,8 +10551,11 @@ Section 2.7 for type-level constraints.
 - Relatedly, no function may **return** a `!pto.struct` (checked module-wide),
   which is what stops a pass-through helper from laundering that address past
   the per-op check.
+- No other operation may produce a `!pto.struct` result. This prevents
+  `arith.select`, `scf.if`, calls, casts, or loop-carried values from hiding the
+  storage origin.
 
-  See [Section 2.7](#27-ptostructt0-t1--tn-1); mutation is in place, so declare
+  See [Section 2.8](#28-ptostructt0-t1--tn-1); mutation is in place, so declare
   the struct in the outer scope and pass it down instead.
 
 **Basic Example:**
@@ -10633,7 +10637,7 @@ pto.struct_set %s[0, 0], %v                                    // s.f0.f0 = v;
 ```
 
 When the struct is a function argument the same op emits `s->f0 = v;` — see
-[Section 2.7](#27-ptostructt0-t1--tn-1) for why a struct is carried as a
+[Section 2.8](#28-ptostructt0-t1--tn-1) for why a struct is carried as a
 pointer.
 
 ---
@@ -10661,5 +10665,6 @@ pointer.
 | Runtime Intrinsics | 4 | - (Pure) |
 | Debug | 3 | - |
 | Stack-Local Array | 3 | - (Scalar / Host) |
+| Stack-Local Struct | 3 | - (Scalar / Host) |
 
-**Total: 110 operations**
+**Total: 113 operations**

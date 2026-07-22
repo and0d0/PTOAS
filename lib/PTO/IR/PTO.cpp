@@ -2890,43 +2890,56 @@ LogicalResult mlir::pto::validatePTOEntryFunctions(ModuleOp module) {
   return success();
 }
 
-// A !pto.struct is a pointer to stack storage, so a function that returns one
-// launders provenance: the value handed back is no longer a pto.declare_struct
-// result, which is all DeclareStructOp::verify() can see. A helper as small as
+// A !pto.struct is represented as a pointer to stack storage. Its provenance
+// therefore has to remain explicit: the value either comes directly from
+// pto.declare_struct or is received as a function entry argument. Operations
+// such as arith.select and scf.if must not manufacture another struct-typed SSA
+// result, because that alias hides the declaration from DeclareStructOp's
+// direct-use escape check. CFG block arguments may relay an existing value:
+// forwarding a declaration directly is already rejected because the branch is
+// a terminator, while forwarding a function argument preserves its lifetime.
 //
-//   func.func @passthrough(%s : !pto.struct<...>) -> !pto.struct<...> {
-//     return %s : !pto.struct<...>
-//   }
-//
-// is enough to route a caller's own local straight back out of its frame, past
-// the direct-use check, and into `return passthrough(&local);`.
-//
-// Banning the struct result type closes that off at the only place laundering
-// can happen. Together with the declare-op check (its result may not reach a
-// terminator) it leaves exactly two ways to obtain a struct value: declare it,
-// or receive it as an argument. Provenance is then always local and always
-// visible. Passing structs *down* into helpers is unaffected, and nothing is
-// lost: pto.struct_set mutates in place, so results are never needed.
-LogicalResult mlir::pto::validateStructNeverReturned(ModuleOp module) {
+// Function results are rejected separately because func.func records them in
+// its signature rather than as SSA results. Passing structs down into helpers
+// remains supported, and pto.struct_set mutates in place, so no derived struct
+// result is needed.
+LogicalResult mlir::pto::validateStructProvenance(ModuleOp module) {
   if (!module)
     return success();
 
-  for (auto func : module.getOps<func::FuncOp>()) {
-    for (auto [i, resultTy] :
-         llvm::enumerate(func.getFunctionType().getResults())) {
-      if (!llvm::isa<StructType>(resultTy))
-        continue;
-      return func.emitOpError()
-             << "result " << i << " has type " << resultTy
-             << ", but a stack-local struct must not be returned: the value is "
-                "a pointer into the callee's frame, and returning it (even "
-                "when it merely passes an argument back through) lets a caller "
-                "leak the address of its own local past the escape check; pass "
-                "the struct down as an argument instead (pto.struct_set "
-                "mutates in place, so a result is never needed)";
+  WalkResult result = module.walk([&](Operation *op) -> WalkResult {
+    if (auto func = dyn_cast<func::FuncOp>(op)) {
+      for (auto [i, resultTy] :
+           llvm::enumerate(func.getFunctionType().getResults())) {
+        if (!isa<StructType>(resultTy))
+          continue;
+        func.emitOpError()
+            << "result " << i << " has type " << resultTy
+            << ", but a stack-local struct must not be returned: the value is "
+               "a pointer into the callee's frame, and returning it (even "
+               "when it merely passes an argument back through) launders its "
+               "provenance; pass the struct down as an argument instead "
+               "(pto.struct_set mutates in place, so a result is never needed)";
+        return WalkResult::interrupt();
+      }
     }
-  }
-  return success();
+
+    if (!isa<DeclareStructOp>(op)) {
+      for (auto [i, opResult] : llvm::enumerate(op->getResults())) {
+        if (!isa<StructType>(opResult.getType()))
+          continue;
+        op->emitOpError()
+            << "result " << i << " has type " << opResult.getType()
+            << ", but only 'pto.declare_struct' may produce a !pto.struct "
+               "result; derived results hide the stack-storage lifetime and "
+               "can escape their declaring scope";
+        return WalkResult::interrupt();
+      }
+    }
+
+    return WalkResult::advance();
+  });
+  return result.wasInterrupted() ? failure() : success();
 }
 
 void mlir::pto::annotatePTOEntryFunctions(ModuleOp module) {

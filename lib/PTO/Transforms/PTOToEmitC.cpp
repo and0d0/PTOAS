@@ -14593,7 +14593,7 @@ struct EmitPTOManualPass
 
     if (failed(pto::validatePTOEntryFunctions(mop)))
       return signalPassFailure();
-    if (failed(pto::validateStructNeverReturned(mop)))
+    if (failed(pto::validateStructProvenance(mop)))
       return signalPassFailure();
     pto::annotatePTOEntryFunctions(mop);
 
