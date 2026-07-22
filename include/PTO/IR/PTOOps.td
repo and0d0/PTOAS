@@ -2673,6 +2673,104 @@ def LocalArraySetOp : PTO_Op<"local_array_set"> {
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// Stack-local heterogeneous aggregate (struct)
+//===----------------------------------------------------------------------===//
+//
+// Mirrors the `local_array` triad (declare / get / set) for a generic
+// heterogeneous scalar-unit aggregate. The struct's address is decided by the
+// host C++ compiler at codegen time, never by PTO memory planning or
+// `pto.pointer_cast`. Field positions are constant (struct semantics), so
+// `get` / `set` carry a constant `path` of field indices that may descend
+// through nested structs. The path always ends at a scalar; a nested struct is
+// traversed by a longer path, never handed back as a value.
+
+def DeclareStructOp : PTO_Op<"declare_struct"> {
+  let summary = "Declare a stack-local heterogeneous aggregate";
+  let description = [{
+    Lowers to a plain C++ stack variable like `PtoStruct_X s;`. Field types are
+    restricted to scalars (integers of width 8/16/32/64, f16/bf16/f32/f64) or a
+    nested `!pto.struct`.
+
+    This op does not participate in PTO memory planning. The resulting struct's
+    address is determined by the host C++ compiler.
+
+    The struct is stack storage owned by the scope that declares it, and a
+    `!pto.struct` value lowers to a pointer to that storage. Handing the value
+    to a terminator would publish the address outside the owning scope, so it is
+    rejected: returning it would leave the caller holding a pointer to a dead
+    frame. Module-level provenance validation also rejects function results and
+    derived operation results of this type, so aliases cannot launder that
+    address past the direct-use check. Struct storage originates from this op
+    or is received through a function argument.
+    Since `pto.struct_set` mutates in place, a struct never needs to be returned
+    or yielded — declare it in the outer scope and pass it down as a function
+    argument instead.
+  }];
+
+  let results = (outs StructType:$s);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    attr-dict `->` qualified(type($s))
+  }];
+}
+
+def StructGetOp : PTO_Op<"struct_get"> {
+  let summary = "Read a field from a stack-local struct by constant path";
+  let description = [{
+    Reads the field reached by following the constant `path` of field indices
+    from the struct, descending through nested structs. Lowers to `s.fA.fB...`
+    member access, read into a fresh variable so the SSA value keeps its value
+    if the struct is mutated later (mirrors `pto.local_array_get`).
+
+    The path must end at a scalar field, and the result type must equal that
+    field's type. A path stopping on a nested `!pto.struct` is rejected —
+    extend it to reach a scalar inside.
+  }];
+
+  let arguments = (ins
+    StructType:$s,
+    DenseI64ArrayAttr:$path
+  );
+  let results = (outs AnyType:$value);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $s custom<StructPath>($path) attr-dict
+      `:` qualified(type($s)) `->` type($value)
+  }];
+}
+
+def StructSetOp : PTO_Op<"struct_set"> {
+  let summary = "Write a field into a stack-local struct by constant path";
+  let description = [{
+    Writes `value` into the field reached by following the constant `path` of
+    field indices, descending through nested structs. Lowers to
+    `s.fA.fB... = value;`.
+
+    The path must end at a scalar field, and the value type must equal that
+    field's type. A path stopping on a nested `!pto.struct` is rejected —
+    extend it to reach a scalar inside.
+  }];
+
+  let arguments = (ins
+    StructType:$s,
+    DenseI64ArrayAttr:$path,
+    AnyType:$value
+  );
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $s custom<StructPath>($path) `,` $value attr-dict
+      `:` qualified(type($s)) `,` type($value)
+  }];
+}
+
 def DeclareTileMemRefOp : PTO_Op<"declare_tile_memref"> {
   let summary = "Internal memref placeholder for a tile whose address is assigned later";
   let description = [{
