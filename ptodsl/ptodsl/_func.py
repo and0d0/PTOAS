@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import update_wrapper
 import inspect
+import typing
 
 from ._ast_rewrite import rewrite_jit_function
 from ._cache_signature import cache_signature_atom, closure_cache_signature
@@ -35,8 +36,18 @@ class FuncTemplate:
         self.py_fn = py_fn
         self._ast_rewrite = ast_rewrite
         self.signature = inspect.signature(py_fn)
+        try:
+            self.type_hints = typing.get_type_hints(py_fn)
+        except Exception as exc:
+            if _has_annotations(self.signature):
+                raise TypeError(
+                    f"failed to resolve @pto.func annotations for {py_fn.__qualname__!r}"
+                ) from exc
+            self.type_hints = {}
         if returns is not _RETURNS_UNSET:
             self.declared_returns = returns
+        elif "return" in self.type_hints:
+            self.declared_returns = self.type_hints["return"]
         elif self.signature.return_annotation is not inspect.Signature.empty:
             self.declared_returns = self.signature.return_annotation
         else:
@@ -85,6 +96,15 @@ def func(fn=None, *, name: str | None = None, ast_rewrite: bool = True, returns=
     if fn is not None:
         return decorator(fn)
     return decorator
+
+
+def _has_annotations(signature: inspect.Signature) -> bool:
+    if signature.return_annotation is not inspect.Signature.empty:
+        return True
+    return any(
+        param.annotation is not inspect.Parameter.empty
+        for param in signature.parameters.values()
+    )
 
 
 __all__ = [
