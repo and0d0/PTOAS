@@ -1160,6 +1160,26 @@ LogicalResult VMIMaxFOp::verify() {
   return verifyElementwiseVRegOp(getOperation(), lhsType, rhsType, resultType);
 }
 
+LogicalResult VMIMinIOp::verify() {
+  auto lhsType = cast<VMIVRegType>(getLhs().getType());
+  auto rhsType = cast<VMIVRegType>(getRhs().getType());
+  auto resultType = cast<VMIVRegType>(getResult().getType());
+  if (!isVMIIntegerLikeType(lhsType.getElementType()) ||
+      !isVMIAnyI8I16I32Type(lhsType.getElementType()))
+    return emitOpError("requires i8, i16, or i32 integer-like VMI element type");
+  return verifyElementwiseVRegOp(getOperation(), lhsType, rhsType, resultType);
+}
+
+LogicalResult VMIMaxIOp::verify() {
+  auto lhsType = cast<VMIVRegType>(getLhs().getType());
+  auto rhsType = cast<VMIVRegType>(getRhs().getType());
+  auto resultType = cast<VMIVRegType>(getResult().getType());
+  if (!isVMIIntegerLikeType(lhsType.getElementType()) ||
+      !isVMIAnyI8I16I32Type(lhsType.getElementType()))
+    return emitOpError("requires i8, i16, or i32 integer-like VMI element type");
+  return verifyElementwiseVRegOp(getOperation(), lhsType, rhsType, resultType);
+}
+
 LogicalResult VMINegFOp::verify() {
   auto sourceType = cast<VMIVRegType>(getSource().getType());
   auto resultType = cast<VMIVRegType>(getResult().getType());

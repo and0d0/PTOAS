@@ -118,8 +118,12 @@ static std::optional<Value> rematerializeBinaryDataOp(Operation *op,
     return rebuild(divf);
   if (auto minf = dyn_cast<VMIMinFOp>(op))
     return rebuild(minf);
+  if (auto mini = dyn_cast<VMIMinIOp>(op))
+    return rebuild(mini);
   if (auto maxf = dyn_cast<VMIMaxFOp>(op))
     return rebuild(maxf);
+  if (auto maxi = dyn_cast<VMIMaxIOp>(op))
+    return rebuild(maxi);
   if (auto andi = dyn_cast<VMIAndIOp>(op))
     return rebuild(andi);
   if (auto ori = dyn_cast<VMIOrIOp>(op))
@@ -375,8 +379,10 @@ struct VMILayoutRematerializePass
           continue;
         }
 
-        if (auto ensure = dyn_cast<VMIEnsureMaskGranularityOp>(op))
+        if (auto ensure = dyn_cast<VMIEnsureMaskGranularityOp>(op)) {
           changed |= tryReplaceMaskEnsure(ensure);
+          continue;
+        }
 
         if (auto trunc = dyn_cast<VMITruncIOp>(op))
           changed |= tryRematerializeTruncIThroughSourceEnsure(trunc);

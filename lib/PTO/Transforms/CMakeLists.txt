@@ -40,6 +40,7 @@ add_mlir_dialect_library(PTOTransforms
   PTOUnrollSIMTForPass.cpp
   PTOValidateVMIIR.cpp
   VMIPreAssignmentCombine.cpp
+  VMIControlFlowSupport.cpp
   VMILegalizeArithSelect.cpp
   VMIMaskGranularityAssignment.cpp
   VMILowerUnifiedToLegacy.cpp

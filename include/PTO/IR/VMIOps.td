@@ -214,6 +214,22 @@ def VMIMaxFOp : VMI_Op<"maxf", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
+def VMIMinIOp : VMI_Op<"mini", [Pure]> {
+  let summary = "VMI integer elementwise minimum";
+  let arguments = (ins VMI_VRegTypeConstraint:$lhs, VMI_VRegTypeConstraint:$rhs);
+  let results = (outs VMI_VRegTypeConstraint:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def VMIMaxIOp : VMI_Op<"maxi", [Pure]> {
+  let summary = "VMI integer elementwise maximum";
+  let arguments = (ins VMI_VRegTypeConstraint:$lhs, VMI_VRegTypeConstraint:$rhs);
+  let results = (outs VMI_VRegTypeConstraint:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
 def VMINegFOp : VMI_Op<"negf", [Pure]> {
   let summary = "VMI floating-point elementwise negate";
   let arguments = (ins VMI_VRegTypeConstraint:$source);

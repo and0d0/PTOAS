@@ -20,6 +20,7 @@
 #include "PTO/IR/PTOTypeUtils.h"
 #include "PTO/IR/VMIUtils.h"
 #include "PTO/Transforms/Passes.h"
+#include "PTO/Transforms/VMIControlFlowSupport.h"
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -557,60 +558,17 @@ struct MaskGranularitySolver {
   }
 
   LogicalResult addWhileConstraints(scf::WhileOp whileOp) {
-    auto inits = whileOp.getInits();
-    auto beforeArgs = whileOp.getBeforeArguments();
-    Block &afterBlock = whileOp.getAfter().front();
-    auto conditionOp =
-        dyn_cast<scf::ConditionOp>(whileOp.getBefore().front().getTerminator());
-    auto yieldOp = dyn_cast<scf::YieldOp>(afterBlock.getTerminator());
-
-    for (auto [index, init] : llvm::enumerate(inits)) {
-      Value anchor = init;
-      if (index < beforeArgs.size() &&
-          failed(uniteEquivalentValues(anchor, beforeArgs[index], whileOp)))
-        return failure();
-      if (conditionOp && index < conditionOp.getArgs().size() &&
-          failed(uniteEquivalentValues(anchor, conditionOp.getArgs()[index],
-                                       whileOp)))
-        return failure();
-      if (index < afterBlock.getNumArguments() &&
-          failed(uniteEquivalentValues(anchor, afterBlock.getArgument(index),
-                                       whileOp)))
-        return failure();
-      if (yieldOp && index < yieldOp.getNumOperands() &&
-          failed(uniteEquivalentValues(anchor, yieldOp.getOperand(index),
-                                       whileOp)))
-        return failure();
-      if (index < whileOp.getNumResults() &&
-          failed(
-              uniteEquivalentValues(anchor, whileOp.getResult(index), whileOp)))
-        return failure();
-    }
-    return success();
+    return VMIControlFlowSupport::addWhileConstraints(
+        whileOp, [&](Value lhs, Value rhs, Operation *op) {
+          return uniteEquivalentValues(lhs, rhs, op);
+        });
   }
 
   LogicalResult addForConstraints(scf::ForOp forOp) {
-    auto initArgs = forOp.getInitArgs();
-    auto regionIterArgs = forOp.getRegionIterArgs();
-    auto results = forOp.getResults();
-    scf::YieldOp yieldOp = nullptr;
-    if (Block *body = forOp.getBody())
-      yieldOp = dyn_cast<scf::YieldOp>(body->getTerminator());
-
-    for (auto [index, initArg] : llvm::enumerate(initArgs)) {
-      Value anchor = initArg;
-      if (index < regionIterArgs.size() &&
-          failed(uniteEquivalentValues(anchor, regionIterArgs[index], forOp)))
-        return failure();
-      if (index < results.size() &&
-          failed(uniteEquivalentValues(anchor, results[index], forOp)))
-        return failure();
-      if (yieldOp && index < yieldOp.getNumOperands() &&
-          failed(
-              uniteEquivalentValues(anchor, yieldOp.getOperand(index), forOp)))
-        return failure();
-    }
-    return success();
+    return VMIControlFlowSupport::addForConstraints(
+        forOp, [&](Value lhs, Value rhs, Operation *op) {
+          return uniteEquivalentValues(lhs, rhs, op);
+        });
   }
 
   LogicalResult addBranchConstraints(Block *dest, OperandRange operands,

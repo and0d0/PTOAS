@@ -21,8 +21,8 @@
 //   vadd/vsub/vmul/vdiv/vmin/vmax → legacy type-specific binary op
 //   vneg/vabs/vsqrt/vexp/vln/vrelu → legacy unary op
 //   vand/vor/vxor/vshl/vshr/vnot → legacy bitwise op
-//   vshr selects shrui for explicit unsigned elements and shrsi for
-//   signless/signed elements.
+//   vshr selects shrui for unsigned/signless elements and shrsi for
+//   explicitly signed elements.
 //   Mask/pmode synthesis is intentionally bypassed here so two-stage lowering
 //   does not introduce select chains before layout assignment.
 //
@@ -55,8 +55,8 @@
 // Category C5 — vector-scalar ops, one-step to legacy (6 ops):
 //   vadds/vmuls/vmaxs/vmins/vshls/vshrs
 //     → broadcast scalar → legacy binary
-//   vshrs selects shrui for explicit unsigned elements and shrsi for
-//   signless/signed elements.
+//   vshrs selects shrui for unsigned/signless elements and shrsi for
+//   explicitly signed elements.
 //
 // Category C3 — unified load/store (2 ops, dispatch by dist_mode/group):
 //   vload → load / deinterleave_load / group_load
@@ -1333,18 +1333,24 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
     }
 
     if (auto vop = dyn_cast<VMIMaxSOp>(op)) {
+      Type elemType = getVMIElementType(vop.getSrc());
       auto createLegacy = [&](Location loc, Type ty, Value lhs,
                               Value rhs) -> Value {
-        return builder.create<VMIMaxFOp>(loc, ty, lhs, rhs).getResult();
+        if (isFloatType(elemType))
+          return builder.create<VMIMaxFOp>(loc, ty, lhs, rhs).getResult();
+        return builder.create<VMIMaxIOp>(loc, ty, lhs, rhs).getResult();
       };
       (void)lowerVecScalar(vop, builder, createLegacy);
       continue;
     }
 
     if (auto vop = dyn_cast<VMIMinSOp>(op)) {
+      Type elemType = getVMIElementType(vop.getSrc());
       auto createLegacy = [&](Location loc, Type ty, Value lhs,
                               Value rhs) -> Value {
-        return builder.create<VMIMinFOp>(loc, ty, lhs, rhs).getResult();
+        if (isFloatType(elemType))
+          return builder.create<VMIMinFOp>(loc, ty, lhs, rhs).getResult();
+        return builder.create<VMIMinIOp>(loc, ty, lhs, rhs).getResult();
       };
       (void)lowerVecScalar(vop, builder, createLegacy);
       continue;
@@ -1364,7 +1370,7 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
       auto createLegacy = [&](Location loc, Type ty, Value lhs,
                               Value rhs) -> Value {
         auto intType = cast<IntegerType>(elemType);
-        if (intType.isUnsigned())
+        if (!intType.isSigned())
           return builder.create<VMIShRUIOp>(loc, ty, lhs, rhs).getResult();
         return builder.create<VMIShRSIOp>(loc, ty, lhs, rhs).getResult();
       };
@@ -1564,7 +1570,7 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
       auto createLegacy = [&](Location loc, Type ty, Value lhs,
                               Value rhs) -> Value {
         auto intType = cast<IntegerType>(elemType);
-        if (intType.isUnsigned())
+        if (!intType.isSigned())
           return builder.create<VMIShRUIOp>(loc, ty, lhs, rhs).getResult();
         return builder.create<VMIShRSIOp>(loc, ty, lhs, rhs).getResult();
       };

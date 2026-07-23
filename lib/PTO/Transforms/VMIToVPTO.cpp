@@ -11689,7 +11689,9 @@ void populateVMIConversionPatterns(
       OneToNVMIBinaryOpPattern<VMIMulIOp, VmulOp>, OneToNVMIVmullOpPattern,
       OneToNVMIFmaOpPattern, OneToNVMIBinaryOpPattern<VMIDivFOp, VdivOp>,
       OneToNVMIBinaryOpPattern<VMIMinFOp, VminOp>,
+      OneToNVMIBinaryOpPattern<VMIMinIOp, VminOp>,
       OneToNVMIBinaryOpPattern<VMIMaxFOp, VmaxOp>,
+      OneToNVMIBinaryOpPattern<VMIMaxIOp, VmaxOp>,
       OneToNVMIUnaryOpPattern<VMINegFOp, VnegOp>,
       OneToNVMIUnaryOpPattern<VMIAbsFOp, VabsOp>,
       OneToNVMIUnaryOpPattern<VMIAbsIOp, VabsOp>,
@@ -12768,9 +12770,15 @@ verifySupportedVMIToVPTOOps(ModuleOp module,
     if (auto minf = dyn_cast<VMIMinFOp>(op))
       return emitMaskableUnsupported(
           op, "pto.vmi.minf", cast<VMIVRegType>(minf.getResult().getType()));
+    if (auto mini = dyn_cast<VMIMinIOp>(op))
+      return emitMaskableUnsupported(
+          op, "pto.vmi.mini", cast<VMIVRegType>(mini.getResult().getType()));
     if (auto maxf = dyn_cast<VMIMaxFOp>(op))
       return emitMaskableUnsupported(
           op, "pto.vmi.maxf", cast<VMIVRegType>(maxf.getResult().getType()));
+    if (auto maxi = dyn_cast<VMIMaxIOp>(op))
+      return emitMaskableUnsupported(
+          op, "pto.vmi.maxi", cast<VMIVRegType>(maxi.getResult().getType()));
     if (auto negf = dyn_cast<VMINegFOp>(op))
       return emitMaskableUnsupported(
           op, "pto.vmi.negf", cast<VMIVRegType>(negf.getResult().getType()));

@@ -81,8 +81,12 @@ getSinkableBinaryOperands(Operation *op) {
     return BinaryVRegOperands{&divf.getLhsMutable(), &divf.getRhsMutable()};
   if (auto minf = dyn_cast<VMIMinFOp>(op))
     return BinaryVRegOperands{&minf.getLhsMutable(), &minf.getRhsMutable()};
+  if (auto mini = dyn_cast<VMIMinIOp>(op))
+    return BinaryVRegOperands{&mini.getLhsMutable(), &mini.getRhsMutable()};
   if (auto maxf = dyn_cast<VMIMaxFOp>(op))
     return BinaryVRegOperands{&maxf.getLhsMutable(), &maxf.getRhsMutable()};
+  if (auto maxi = dyn_cast<VMIMaxIOp>(op))
+    return BinaryVRegOperands{&maxi.getLhsMutable(), &maxi.getRhsMutable()};
   if (auto andi = dyn_cast<VMIAndIOp>(op))
     return BinaryVRegOperands{&andi.getLhsMutable(), &andi.getRhsMutable()};
   if (auto ori = dyn_cast<VMIOrIOp>(op))
