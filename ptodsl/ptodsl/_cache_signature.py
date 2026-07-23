@@ -10,6 +10,23 @@
 from __future__ import annotations
 
 
+def function_cache_signature(fn):
+    """Return one stable cache signature for a Python function body."""
+    code = fn.__code__
+    return (
+        "python-function",
+        code.co_filename,
+        code.co_firstlineno,
+        code.co_qualname,
+        code.co_argcount,
+        code.co_posonlyargcount,
+        code.co_kwonlyargcount,
+        code.co_names,
+        code.co_consts,
+        code.co_code,
+    )
+
+
 def closure_cache_signature(fn):
     """Return one stable cache signature for the closure state captured by *fn*."""
     try:
@@ -55,4 +72,5 @@ def cache_signature_atom(value):
 __all__ = [
     "cache_signature_atom",
     "closure_cache_signature",
+    "function_cache_signature",
 ]

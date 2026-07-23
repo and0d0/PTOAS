@@ -15,7 +15,7 @@ import inspect
 import typing
 
 from ._ast_rewrite import rewrite_jit_function
-from ._cache_signature import cache_signature_atom, closure_cache_signature
+from ._cache_signature import cache_signature_atom, closure_cache_signature, function_cache_signature
 from ._tracing import current_runtime
 
 _RETURNS_UNSET = object()
@@ -75,7 +75,7 @@ class FuncTemplate:
         return (
             type(self).__name__,
             self.spec.symbol_name,
-            id(self.py_fn),
+            function_cache_signature(self.py_fn),
             self._ast_rewrite,
             cache_signature_atom(self.declared_returns),
             closure_cache_signature(self.py_fn),
