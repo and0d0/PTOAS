@@ -147,6 +147,13 @@ def _validate_static_buf_id(buf_id, *, context: str):
         raise ValueError(f"{context} expects static buf_id in [0, 31], got {buf_id}")
 
 
+def _validate_static_event_id_range(event_id, *, context: str, lo: int, hi: int, meaning: str = "event_id"):
+    if isinstance(event_id, bool):
+        raise TypeError(f"{context} does not accept bool values")
+    if isinstance(event_id, int) and not lo <= event_id <= hi:
+        raise ValueError(f"{context} expects static {meaning} in [{lo}, {hi}], got {event_id}")
+
+
 def _validate_sync_pipe(pipe, *, context: str, allowed: tuple[str, ...]):
     canonical = _canonical_pipe_token(pipe)
     if canonical is None:
@@ -154,6 +161,7 @@ def _validate_sync_pipe(pipe, *, context: str, allowed: tuple[str, ...]):
     if canonical not in allowed:
         expected = ", ".join(f"<{name}>" for name in allowed)
         raise ValueError(f"{context} expects pipe to be one of {expected}, got <{canonical}>")
+    return canonical
 
 
 def _require_explicit_mode(surface: str):
@@ -4067,6 +4075,82 @@ def _acc_store_unit_flag_attr(unit_flag):
         context="acc store unit_flag",
     )
 
+_ACC_STORE_PRE_QUANT_MODES = frozenset({
+    "no_convert",
+    "f32_f16",
+    "qf322hif8_pre_vec",
+    "qf322hif8_pre_scalar",
+    "qf322hif8_pre_hybrid_vec",
+    "qf322hif8_pre_hybrid_scalar",
+    "deqs32_int_vec",
+    "deqs32_int_scalar",
+    "req8_vec",
+    "req8_scalar",
+    "deqf16_vec",
+    "deqf16_scalar",
+    "qf322fp8_pre_vec",
+    "qf322fp8_pre_scalar",
+    "qf322f32_pre_vec",
+    "qf322f32_pre_scalar",
+    "f32_bf16",
+    "qf162b8_pre_vec",
+    "qf162b8_pre_scalar",
+    "qf162s4_pre_vec",
+    "qf162s4_pre_scalar",
+    "req4_vec",
+    "req4_scalar",
+    "qf322b8_pre_vec",
+    "qf322b8_pre_scalar",
+    "qf322s4_pre_vec",
+    "qf322s4_pre_scalar",
+    "deqs16_vec",
+    "deqs16_scalar",
+    "qf162s16_pre_vec",
+    "qf162s16_pre_scalar",
+    "qf322f16_pre_vec",
+    "qf322f16_pre_scalar",
+    "qf322bf16_pre_vec",
+    "qf322bf16_pre_scalar",
+    "qs322bf16_pre_vec",
+    "qs322bf16_pre_scalar",
+})
+
+_ACC_STORE_PRE_QUANT_SKIP_PAYLOAD_KIND_CHECK = frozenset({
+    "no_convert",
+})
+
+_ACC_STORE_VECTOR_PRE_QUANT_MODES = frozenset({
+    mode for mode in _ACC_STORE_PRE_QUANT_MODES if mode.endswith("_vec")
+})
+
+
+def _is_acc_store_float_scalar_payload(value) -> bool:
+    raw_value = unwrap_surface_value(value)
+    return hasattr(raw_value, "type") and any(
+        cls.isinstance(raw_value.type) for cls in (F16Type, BF16Type, F32Type)
+    )
+
+
+def _is_acc_store_scaling_pointer_payload(value) -> bool:
+    raw_value = unwrap_surface_value(value)
+    if not hasattr(raw_value, "type"):
+        return False
+    try:
+        ptr_type = _pto.PtrType(raw_value.type)
+    except Exception:
+        return False
+    scaling_attr = _pto.AddressSpaceAttr.get(_pto.AddressSpace.SCALING)
+    memory_space = getattr(ptr_type, "memory_space", None)
+    if (
+        memory_space != scaling_attr
+        and getattr(memory_space, "value", None) != _pto.AddressSpace.SCALING
+    ):
+        return False
+    return any(
+        cls.isinstance(ptr_type.element_type)
+        for cls in (F16Type, BF16Type, F32Type)
+    )
+
 
 def _acc_store_pre_quant(pre_quant):
     if pre_quant is None:
@@ -4074,9 +4158,25 @@ def _acc_store_pre_quant(pre_quant):
     if not isinstance(pre_quant, tuple) or len(pre_quant) != 2:
         raise TypeError("acc store pre_quant expects (payload, mode)")
     payload, mode = pre_quant
+    normalized_mode = _normalize_token(mode, context="acc store pre_quant mode")
+    if normalized_mode not in _ACC_STORE_PRE_QUANT_MODES:
+        raise ValueError(f"unsupported acc store pre_quant mode: {normalized_mode}")
+    if normalized_mode in _ACC_STORE_PRE_QUANT_SKIP_PAYLOAD_KIND_CHECK:
+        pass
+    elif normalized_mode in _ACC_STORE_VECTOR_PRE_QUANT_MODES:
+        if not _is_acc_store_scaling_pointer_payload(payload):
+            raise TypeError(
+                "acc store vector pre_quant payload must be a scaling pointer "
+                "with f16, bf16, or f32 elements"
+            )
+    else:
+        if not _is_acc_store_float_scalar_payload(payload):
+            raise TypeError(
+                "acc store scalar pre_quant payload must be an f16, bf16, or f32 scalar"
+            )
     return (
         unwrap_surface_value(payload),
-        Attribute.parse(f"#pto<quant_pre_mode {_normalize_token(mode, context='acc store pre_quant mode')}>"),
+        Attribute.parse(f"#pto<quant_pre_mode {normalized_mode}>"),
     )
 
 
@@ -5762,6 +5862,11 @@ def _sync_event_id_operand(event_id, *, context: str):
     return event_id if isinstance(event_id, int) else unwrap_surface_value(event_id)
 
 
+def _sync_event_id_operand_in_range(event_id, *, context: str, lo: int, hi: int, meaning: str = "event_id"):
+    _validate_static_event_id_range(event_id, context=context, lo=lo, hi=hi, meaning=meaning)
+    return event_id if isinstance(event_id, int) else unwrap_surface_value(event_id)
+
+
 def _flag_event_id_operand(event_id, *, context: str):
     if isinstance(event_id, int):
         _validate_static_event_id(event_id, context=context)
@@ -5785,15 +5890,35 @@ def wait_cross_flag(pipe, event_id):
 
 def set_intra_flag(pipe, event_id):
     """``pto.set_intra_flag(pipe, event_id)`` – intra-block sync facade for ``pto.sync.set``."""
-    _validate_sync_pipe(pipe, context="set_intra_flag(pipe, event_id)", allowed=("PIPE_MTE3",))
-    event_operand = _sync_event_id_operand(event_id, context="set_intra_flag(..., event_id=...)")
+    _validate_sync_pipe(
+        pipe,
+        context="set_intra_flag(pipe, event_id)",
+        allowed=("PIPE_FIX", "PIPE_MTE3"),
+    )
+    event_operand = _sync_event_id_operand_in_range(
+        event_id,
+        context="set_intra_flag(..., event_id=...)",
+        lo=0,
+        hi=31,
+        meaning="physical event_id",
+    )
     _pto.sync_set(_pipe_attr(pipe), event_operand)
 
 
 def wait_intra_flag(pipe, event_id):
     """``pto.wait_intra_flag(pipe, event_id)`` – intra-block sync facade for ``pto.sync.wait``."""
-    _validate_sync_pipe(pipe, context="wait_intra_flag(pipe, event_id)", allowed=("PIPE_V",))
-    event_operand = _sync_event_id_operand(event_id, context="wait_intra_flag(..., event_id=...)")
+    _validate_sync_pipe(
+        pipe,
+        context="wait_intra_flag(pipe, event_id)",
+        allowed=("PIPE_FIX", "PIPE_V"),
+    )
+    event_operand = _sync_event_id_operand_in_range(
+        event_id,
+        context="wait_intra_flag(..., event_id=...)",
+        lo=0,
+        hi=31,
+        meaning="physical event_id",
+    )
     _pto.sync_wait(_pipe_attr(pipe), event_operand)
 
 

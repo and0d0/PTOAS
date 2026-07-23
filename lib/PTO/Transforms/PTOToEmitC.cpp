@@ -5616,6 +5616,21 @@ static void emitDsbDdr(ConversionPatternRewriter &rewriter, Location loc) {
                                        ArrayAttr{}, ValueRange{});
 }
 
+static void emitPipeBarrier(ConversionPatternRewriter &rewriter, Location loc,
+                            StringRef pipeTok) {
+  auto *ctx = rewriter.getContext();
+  auto args = rewriter.getArrayAttr({emitc::OpaqueAttr::get(ctx, pipeTok)});
+  rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, "pipe_barrier", args,
+                                       ArrayAttr{}, ValueRange{});
+}
+
+static void emitConservativeGmFencePipeDrains(
+    ConversionPatternRewriter &rewriter, Location loc) {
+  emitPipeBarrier(rewriter, loc, "PIPE_MTE2");
+  emitPipeBarrier(rewriter, loc, "PIPE_MTE3");
+  emitPipeBarrier(rewriter, loc, "PIPE_FIX");
+}
+
 struct PTOBarrierToEmitC : public OpConversionPattern<pto::BarrierOp> {
   using OpConversionPattern<pto::BarrierOp>::OpConversionPattern;
 
@@ -5668,6 +5683,7 @@ struct PTOFenceToEmitC : public OpConversionPattern<FenceOp> {
         op.getScope().getScope() != pto::FenceScope::All)
       return rewriter.notifyMatchFailure(op, "unsupported fence scope");
 
+    emitConservativeGmFencePipeDrains(rewriter, op.getLoc());
     emitDsbDdr(rewriter, op.getLoc());
     rewriter.eraseOp(op);
     return success();
@@ -6282,12 +6298,9 @@ struct PTOSyncSetToEmitC : public OpConversionPattern<mlir::pto::SyncSetOp> {
       return rewriter.notifyMatchFailure(
           op, "expects exactly one of static event_id attr or dynamic event_id operand");
 
-    // A5 inter-core sync mirrors +16 only for cube-side producer (PIPE_FIX).
-    // Vec-side producer (PIPE_MTE3) emits a single set; hardware handles the
-    // subblock mapping in PTO-ISA custom flow.
+    // A5 sync uses physical semaphore IDs. Emit exactly the ID authored in IR;
+    // callers that need to notify both AIV subblocks must emit both IDs.
     if (targetArch == PTOArch::A5) {
-      pto::PIPE pipe = op.getPipe().getPipe();
-      bool needsMirrorPlus16 = (pipe == pto::PIPE::PIPE_FIX);
       std::string pipeTok = pipeTokFromPipeAttr(op.getPipe());
       auto emitSet = [&](Value eventOperand, IntegerAttr eventLiteral,
                          bool isDynamic) {
@@ -6314,21 +6327,9 @@ struct PTOSyncSetToEmitC : public OpConversionPattern<mlir::pto::SyncSetOp> {
 
       if (eventIdAttr) {
         emitSet(Value{}, eventIdAttr, /*isDynamic=*/false);
-        if (needsMirrorPlus16) {
-          auto plus16 = IntegerAttr::get(eventIdAttr.getType(),
-                                         getIntegerAttrSignedValue(eventIdAttr) + 16);
-          emitSet(Value{}, plus16, /*isDynamic=*/false);
-        }
       } else {
         Value eventI32 = castInterCoreEventIdToI32(rewriter, loc, eventIdDyn);
         emitSet(eventI32, IntegerAttr{}, /*isDynamic=*/true);
-        if (needsMirrorPlus16) {
-          auto i32Ty = emitc::OpaqueType::get(ctx, "int32_t");
-          Value c16 = makeEmitCIntConstant(rewriter, loc, i32Ty, 16);
-          Value eventI32Plus16 =
-              rewriter.create<emitc::AddOp>(loc, i32Ty, eventI32, c16).getResult();
-          emitSet(eventI32Plus16, IntegerAttr{}, /*isDynamic=*/true);
-        }
       }
 
       rewriter.eraseOp(op);
@@ -7425,21 +7426,10 @@ static std::string notifyOpTok(pto::NotifyOp op) {
   return "pto::comm::NotifyOp::Set";
 }
 
-static void emitPipeBarrier(ConversionPatternRewriter &rewriter, Location loc,
-                            StringRef pipeTok) {
-  auto *ctx = rewriter.getContext();
-  auto args = rewriter.getArrayAttr({emitc::OpaqueAttr::get(ctx, pipeTok)});
-  rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, "pipe_barrier", args,
-                                       ArrayAttr{}, ValueRange{});
-}
-
-// Issue #711: TNOTIFY writes its signal on the scalar pipe, and
-// TNOTIFY_IMPL's trailing pipe_barrier(PIPE_ALL) runs *after* that store.
-// If prior MTE work is still in flight when the signal lands, the receiver's
-// matching TWAIT can return before the producer-side payload operation is
-// complete. MemoryConsistency now validates explicit CMO/fence operations for
-// DDR visibility; lowering only keeps the pipe-drain actions that the pass may
-// still annotate automatically.
+// Historical hook for pre-annotated TNotify release drains. The automatic
+// MemoryConsistency analysis pass that used to produce these attrs has been
+// removed from the default pipeline; keeping the lowering hook is harmless for
+// hand-authored or legacy IR that already carries the internal attrs.
 static void emitTNotifyReleaseActions(ConversionPatternRewriter &rewriter,
                                       Location loc, bool drainMte2,
                                       bool drainMte3) {

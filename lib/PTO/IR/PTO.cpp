@@ -3389,6 +3389,14 @@ LogicalResult mlir::pto::SyncSetOp::verify() {
 
   auto verifyA2A3 = [&]() -> LogicalResult { return success(); };
   auto verifyA5 = [&]() -> LogicalResult {
+    if (IntegerAttr eventIdAttr = getEventIdAttr()) {
+      int64_t eventId = eventIdAttr.getInt();
+      if (eventId < 0 || eventId > 31) {
+        return emitOpError()
+               << "A5 sync.set expects static event_id in [0, 31], but got "
+               << eventId;
+      }
+    }
     switch (getPipe().getPipe()) {
     case PIPE::PIPE_FIX:
     case PIPE::PIPE_MTE3:
@@ -3552,6 +3560,13 @@ LogicalResult mlir::pto::SyncWaitOp::verify() {
 
   auto verifyA2A3 = [&]() -> LogicalResult { return success(); };
   auto verifyA5 = [&]() -> LogicalResult {
+    if (IntegerAttr eventIdAttr = getEventIdAttr()) {
+      int64_t eventId = eventIdAttr.getInt();
+      if (eventId < 0 || eventId > 31)
+        return emitOpError()
+               << "A5 sync.wait expects static physical event_id in [0, 31], but got "
+               << eventId;
+    }
     switch (getPipe().getPipe()) {
     case PIPE::PIPE_FIX:
     case PIPE::PIPE_MTE1:
