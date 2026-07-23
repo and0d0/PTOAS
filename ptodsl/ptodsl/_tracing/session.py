@@ -547,21 +547,23 @@ class TraceSession:
         bound.apply_defaults()
         ordered_arg_values = []
         arg_templates = []
+        type_hints = getattr(func_template, "type_hints", {})
         for name, param in func_template.signature.parameters.items():
-            original_value = bound.arguments[name]
-            value = self._normalize_ptodsl_func_argument(
-                name,
-                param,
-                original_value,
-            )
-            ordered_arg_values.append(value)
-            arg_templates.append(original_value)
             if param.kind not in {
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 inspect.Parameter.KEYWORD_ONLY,
             }:
                 raise TypeError("@pto.func helpers do not support var-positional or var-keyword parameters yet")
+            original_value = bound.arguments[name]
+            annotation = type_hints.get(name, param.annotation)
+            value = self._normalize_ptodsl_func_argument(
+                name,
+                annotation,
+                original_value,
+            )
+            ordered_arg_values.append(value)
+            arg_templates.append(original_value)
 
         arg_values = tuple(ordered_arg_values)
         arg_templates = tuple(arg_templates)
@@ -833,15 +835,15 @@ class TraceSession:
                 return helper
         return None
 
-    def _normalize_ptodsl_func_argument(self, name: str, param, value):
+    def _normalize_ptodsl_func_argument(self, name: str, annotation, value):
         raw_value = unwrap_surface_value(value)
         if hasattr(raw_value, "type"):
             return raw_value
-        if param.annotation is not inspect.Parameter.empty:
+        if annotation is not inspect.Parameter.empty:
             try:
-                target_type = _resolve(param.annotation)
+                target_type = _resolve(annotation)
             except Exception:
-                target_type = param.annotation
+                target_type = annotation
             try:
                 return coerce_scalar_to_type(
                     raw_value,

@@ -1323,6 +1323,41 @@ def func_partition_metadata_helper(part: pto.PartitionTensorView, cols: pto.i32)
     return part.sizes[0] + cols
 
 
+def _make_future_annotations_ptodsl_func_helpers():
+    namespace = {"pto": pto}
+    exec(
+        """
+from __future__ import annotations
+
+@pto.func
+def func_future_i32_return_helper(x: pto.i32) -> pto.i32:
+    return x + pto.const(1, dtype=pto.i32)
+
+@pto.func
+def func_future_i64_literal_helper(x: pto.i64) -> pto.i64:
+    return x + pto.const(1, dtype=pto.i64)
+
+@pto.func
+def func_future_void_helper(x: pto.i32) -> None:
+    _ = x
+    pto.pipe_barrier(pto.Pipe.ALL)
+""",
+        namespace,
+    )
+    return (
+        namespace["func_future_i32_return_helper"],
+        namespace["func_future_i64_literal_helper"],
+        namespace["func_future_void_helper"],
+    )
+
+
+(
+    func_future_i32_return_helper,
+    func_future_i64_literal_helper,
+    func_future_void_helper,
+) = _make_future_annotations_ptodsl_func_helpers()
+
+
 @pto.jit(target="a5")
 def ptodsl_func_call_probe(rows: pto.i32):
     init = pto.const(0, dtype=pto.i32)
@@ -1342,6 +1377,14 @@ def ptodsl_func_partition_metadata_probe(
     a_view = pto.make_tensor_view(A_ptr, shape=[1, 16], strides=[16, 1])
     part = pto.partition_view(a_view, offsets=[0, 0], sizes=[1, 16])
     _ = func_partition_metadata_helper(part, cols)
+
+
+@pto.jit(target="a5")
+def ptodsl_func_future_annotations_probe(rows: pto.i32):
+    i32_value = func_future_i32_return_helper(rows)
+    i64_value = func_future_i64_literal_helper(1)
+    func_future_void_helper(i32_value)
+    _ = i64_value
 
 
 @pto.jit(target="a5")
@@ -5144,6 +5187,35 @@ def main() -> None:
         is not None
         and ptodsl_func_partition_metadata_text.count("pto.partition_view") >= 2,
         "@pto.func should preserve partition metadata across the helper boundary",
+    )
+    ptodsl_func_future_annotations_text = ptodsl_func_future_annotations_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        ptodsl_func_future_annotations_text,
+        "@pto.func future annotations specialization",
+    )
+    expect(
+        re.search(
+            r"func\.func @func_future_i32_return_helper__ptodsl_[0-9a-f]+\(.*i32.*\) -> i32",
+            ptodsl_func_future_annotations_text,
+        )
+        is not None,
+        "@pto.func should resolve PEP 563 string return annotations to PTO result types",
+    )
+    expect(
+        re.search(
+            r"func\.func @func_future_i64_literal_helper__ptodsl_[0-9a-f]+\(.*i64.*\) -> i64",
+            ptodsl_func_future_annotations_text,
+        )
+        is not None,
+        "@pto.func should resolve PEP 563 string parameter annotations before materializing literals",
+    )
+    expect(
+        re.search(
+            r"func\.func @func_future_void_helper__ptodsl_[0-9a-f]+\(.*i32.*\) attributes",
+            ptodsl_func_future_annotations_text,
+        )
+        is not None,
+        "@pto.func should resolve PEP 563 -> None annotations as void helpers",
     )
     expect_raises(
         PTODSLAstRewriteError,
