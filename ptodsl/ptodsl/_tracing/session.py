@@ -19,9 +19,11 @@ from .._diagnostics import (
     inline_tileop_capture_type_error,
     subkernel_kernel_kind_mismatch_error,
 )
+from .._cache_signature import cache_signature_atom
 from .._scalar_coercion import coerce_scalar_to_type
 from .._kernel_signature import RuntimeScalarParameterSpec
 from .._ops import const
+from .._surface_types import const_expr as _const_expr_marker
 from .._surface_values import (
     is_runtime_scalar_ir_type,
     is_tile_ir_type,
@@ -550,8 +552,10 @@ class TraceSession:
         """Lower one ``@pto.func`` helper call in the active trace."""
         bound = func_template.signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        ordered_arg_values = []
-        arg_templates = []
+        runtime_arg_values = []
+        runtime_arg_templates = []
+        param_bindings = []
+        constexpr_bindings = []
         type_hints = getattr(func_template, "type_hints", {})
         for name, param in func_template.signature.parameters.items():
             if param.kind not in {
@@ -562,23 +566,35 @@ class TraceSession:
                 raise TypeError("@pto.func helpers do not support var-positional or var-keyword parameters yet")
             original_value = bound.arguments[name]
             annotation = type_hints.get(name, param.annotation)
+            if annotation is _const_expr_marker:
+                value = self._normalize_ptodsl_func_constexpr_argument(name, original_value)
+                param_bindings.append(("constexpr", name, param, value))
+                constexpr_bindings.append((name, cache_signature_atom(value)))
+                continue
             value = self._normalize_ptodsl_func_argument(
                 name,
                 annotation,
                 original_value,
             )
-            ordered_arg_values.append(value)
-            arg_templates.append(original_value)
+            param_bindings.append(("runtime", name, param, original_value))
+            runtime_arg_values.append(value)
+            runtime_arg_templates.append(original_value)
 
-        arg_values = tuple(ordered_arg_values)
-        arg_templates = tuple(arg_templates)
+        runtime_arg_values = tuple(runtime_arg_values)
+        runtime_arg_templates = tuple(runtime_arg_templates)
+        identity = func_template.__ptodsl_cache_signature__()
+        if constexpr_bindings:
+            identity = (
+                identity,
+                ("constexprs", tuple(constexpr_bindings)),
+            )
         owner_symbol_name = self.current_function_owner_symbol_name
         helper_spec = HelperFunctionSpec(
             symbol_name=func_template.spec.symbol_name,
-            arg_types=tuple(unwrap_surface_value(arg).type for arg in arg_values),
+            arg_types=tuple(unwrap_surface_value(arg).type for arg in runtime_arg_values),
             result_types=self._declared_ptodsl_func_result_types(func_template),
             attributes=(("pto.ptodsl.callable_kind", StringAttr.get("func")),),
-            identity=func_template.__ptodsl_cache_signature__(),
+            identity=identity,
         )
         helper_fn, created = self.get_or_create_helper_function(
             helper_spec,
@@ -591,11 +607,14 @@ class TraceSession:
             wrapped_args = []
             wrapped_kwargs = {}
             entry_arg_index = 0
-            for name, param in func_template.signature.parameters.items():
-                entry_arg = entry_args[entry_arg_index]
-                arg_template = arg_templates[entry_arg_index]
-                entry_arg_index += 1
-                wrapped_value = wrap_like_surface_value(arg_template, entry_arg)
+            for binding_kind, name, param, value in param_bindings:
+                if binding_kind == "constexpr":
+                    wrapped_value = value
+                else:
+                    entry_arg = entry_args[entry_arg_index]
+                    arg_template = runtime_arg_templates[entry_arg_index]
+                    entry_arg_index += 1
+                    wrapped_value = wrap_like_surface_value(arg_template, entry_arg)
                 if param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
                     wrapped_args.append(wrapped_value)
                 elif param.kind == inspect.Parameter.KEYWORD_ONLY:
@@ -618,7 +637,7 @@ class TraceSession:
                 else:
                     func.ReturnOp([])
 
-        call_op = func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in arg_values])
+        call_op = func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in runtime_arg_values])
         return self._wrap_ptodsl_func_call_results(call_op.results)
 
     def begin_carry_loop(self, start, stop, step, state_items):
@@ -865,6 +884,15 @@ class TraceSession:
             f"@pto.func parameter {name!r} expects a traced runtime value or a supported literal, "
             f"got {raw_value!r}"
         )
+
+    def _normalize_ptodsl_func_constexpr_argument(self, name: str, value):
+        raw_value = unwrap_surface_value(value)
+        if hasattr(raw_value, "type"):
+            raise TypeError(
+                f"@pto.func const_expr parameter {name!r} expects a compile-time Python value, "
+                f"got traced runtime value of type {raw_value.type}"
+            )
+        return raw_value
 
     def _declared_ptodsl_func_result_types(self, func_template):
         declared_returns = func_template.declared_returns

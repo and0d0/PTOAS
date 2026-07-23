@@ -1323,6 +1323,15 @@ def func_partition_metadata_helper(part: pto.PartitionTensorView, cols: pto.i32)
     return part.sizes[0] + cols
 
 
+@pto.func(returns=pto.i32)
+def func_constexpr_static_helper(value: pto.i32, *, BLOCK: pto.const_expr = 2):
+    total = value
+    one = pto.const(1, dtype=pto.i32)
+    for _ in pto.static_range(BLOCK):
+        total = total + one
+    return total
+
+
 def _make_future_annotations_ptodsl_func_helpers():
     namespace = {"pto": pto}
     exec(
@@ -1385,6 +1394,18 @@ def ptodsl_func_future_annotations_probe(rows: pto.i32):
     i64_value = func_future_i64_literal_helper(1)
     func_future_void_helper(i32_value)
     _ = i64_value
+
+
+@pto.jit(target="a5")
+def ptodsl_func_constexpr_probe(rows: pto.i32):
+    first = func_constexpr_static_helper(rows, BLOCK=2)
+    second = func_constexpr_static_helper(rows, BLOCK=4)
+    _ = first + second
+
+
+@pto.jit(target="a5")
+def ptodsl_func_constexpr_runtime_value_probe(rows: pto.i32):
+    _ = func_constexpr_static_helper(rows, BLOCK=rows)
 
 
 @pto.jit(target="a5")
@@ -5216,6 +5237,29 @@ def main() -> None:
         )
         is not None,
         "@pto.func should resolve PEP 563 -> None annotations as void helpers",
+    )
+    ptodsl_func_constexpr_text = ptodsl_func_constexpr_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(
+        ptodsl_func_constexpr_text,
+        "@pto.func const_expr specialization",
+    )
+    constexpr_helper_names = re.findall(
+        r"func\.func @(func_constexpr_static_helper__ptodsl_[0-9a-f]+)\(%arg0: i32\) -> i32",
+        ptodsl_func_constexpr_text,
+    )
+    expect(
+        len(set(constexpr_helper_names)) == 2,
+        "@pto.func const_expr parameters should specialize helpers without entering the runtime ABI",
+    )
+    expect(
+        ptodsl_func_constexpr_text.count("call @func_constexpr_static_helper__ptodsl_") == 2
+        and ptodsl_func_constexpr_text.count("arith.addi") >= 6,
+        "@pto.func const_expr values should remain available for static_range unrolling",
+    )
+    expect_raises(
+        TypeError,
+        lambda: ptodsl_func_constexpr_runtime_value_probe.compile().mlir_text(),
+        "const_expr parameter 'BLOCK' expects a compile-time Python value",
     )
     expect_raises(
         PTODSLAstRewriteError,
