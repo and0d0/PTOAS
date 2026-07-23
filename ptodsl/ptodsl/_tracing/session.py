@@ -69,12 +69,17 @@ class HelperFunctionSpec:
             tuple(str(arg_type) for arg_type in self.arg_types),
             tuple(str(result_type) for result_type in self.result_types),
             tuple((attr_name, str(attr_value)) for attr_name, attr_value in self.attributes),
-            self.identity,
         )
 
+    def specialization_key(self) -> tuple:
+        """Return one stable semantic cache key for this helper specialization."""
+        if not self.identity:
+            return self.cache_key()
+        return (*self.cache_key(), self.identity)
+
     def specialized_symbol_name(self) -> str:
-        """Return one stable symbol name that is unique for this helper ABI."""
-        digest = hashlib.sha1(repr(self.cache_key()).encode("utf-8")).hexdigest()[:10]
+        """Return one stable symbol name that is unique for this helper specialization."""
+        digest = hashlib.sha1(repr(self.specialization_key()).encode("utf-8")).hexdigest()[:10]
         return f"{self.symbol_name}__ptodsl_{digest}"
 
 
@@ -939,7 +944,7 @@ class TraceSession:
         owner_symbol_name = (
             self.current_function_owner_symbol_name if owner_symbol_name is None else owner_symbol_name
         )
-        cache_key = (owner_symbol_name, spec.cache_key())
+        cache_key = (owner_symbol_name, spec.specialization_key())
         helper = self._helpers.get(cache_key)
         if helper is not None:
             return helper, False
@@ -962,7 +967,7 @@ class TraceSession:
 
     def get_or_create_kernel_module_primary_function(self, spec: HelperFunctionSpec, module_spec):
         """Look up or create the primary definition for one kernel-module callee."""
-        cache_key = spec.cache_key()
+        cache_key = spec.specialization_key()
         helper = self._kernel_module_primary_functions.get(cache_key)
         if helper is not None:
             return helper, False
