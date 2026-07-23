@@ -60,7 +60,11 @@ class FuncTemplate:
 
     def emit_body(self, *args, **kwargs):
         """Emit this helper body into the currently active trace."""
-        py_fn = rewrite_jit_function(self.py_fn) if self._ast_rewrite else self.py_fn
+        py_fn = (
+            rewrite_jit_function(self.py_fn, reject_bare_returns=True)
+            if self._ast_rewrite
+            else self.py_fn
+        )
         return py_fn(*args, **kwargs)
 
     def __call__(self, *args, **kwargs):

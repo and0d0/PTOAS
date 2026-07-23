@@ -20,7 +20,13 @@ class PTODSLAstRewriteError(SyntaxError):
     """Raised when AST rewrite sees unsupported Python control flow."""
 
 
-def rewrite_jit_function(fn, *, static_bindings=None, rewrite_control_flow=True):
+def rewrite_jit_function(
+    fn,
+    *,
+    static_bindings=None,
+    rewrite_control_flow=True,
+    reject_bare_returns: bool = False,
+):
     """Return a function with PTODSL lexical sections lowered safely.
 
     ``pto.section`` is a physical SSA region, not a Python ``with`` hint.  The
@@ -28,6 +34,9 @@ def rewrite_jit_function(fn, *, static_bindings=None, rewrite_control_flow=True)
     the optional control-flow rewrite is disabled.  This keeps Python's
     function-local assignment rules from leaking a section-local SSA value into
     a sibling physical section.
+    ``reject_bare_returns`` controls whether a bare ``return`` inside
+    rewritten control flow is rejected, while value returns are always
+    rejected because rewritten branches must communicate through locals.
     """
     try:
         source = inspect.getsource(fn)
@@ -60,6 +69,7 @@ def rewrite_jit_function(fn, *, static_bindings=None, rewrite_control_flow=True)
             static_env,
             section_entry_bindings=section_rewriter.section_entry_bindings,
             section_uninitialized_aliases=section_rewriter.section_uninitialized_aliases,
+            reject_bare_returns=reject_bare_returns,
         )
         function_def.body = rewriter.rewrite_block(function_def.body, live_after=set())
     tree = ast.Module(body=[function_def], type_ignores=[])
@@ -1008,11 +1018,13 @@ class _SlotValueRewriter(ast.NodeTransformer):
         return self.generic_visit(node)
 
 class _ControlFlowExitVisitor(ast.NodeVisitor):
-    def __init__(self):
+    def __init__(self, *, reject_bare_returns: bool):
         self.exit_node = None
+        self._reject_bare_returns = reject_bare_returns
 
     def visit_Return(self, node):
-        self.exit_node = node
+        if self._reject_bare_returns or node.value is not None:
+            self.exit_node = node
 
     def visit_Yield(self, node):
         self.exit_node = node
@@ -1033,8 +1045,8 @@ class _ControlFlowExitVisitor(ast.NodeVisitor):
         return
 
 
-def _reject_control_flow_exits(stmts, context: str):
-    visitor = _ControlFlowExitVisitor()
+def _reject_control_flow_exits(stmts, context: str, *, reject_bare_returns: bool):
+    visitor = _ControlFlowExitVisitor(reject_bare_returns=reject_bare_returns)
     for stmt in stmts:
         visitor.visit(stmt)
         if visitor.exit_node is not None:
@@ -1045,11 +1057,19 @@ def _reject_control_flow_exits(stmts, context: str):
 
 
 class _ControlFlowRewriter:
-    def __init__(self, static_env=None, *, section_entry_bindings=None, section_uninitialized_aliases=None):
+    def __init__(
+        self,
+        static_env=None,
+        *,
+        section_entry_bindings=None,
+        section_uninitialized_aliases=None,
+        reject_bare_returns: bool = False,
+    ):
         self._static_env = dict(static_env or {})
         self._section_entry_bindings = dict(section_entry_bindings or {})
         self._section_uninitialized_aliases = set(section_uninitialized_aliases or ())
         self._counter = 0
+        self._reject_bare_returns = reject_bare_returns
 
     def _fresh(self, prefix: str) -> str:
         value = f"__pto_ast_{prefix}_{self._counter}"
@@ -1187,8 +1207,16 @@ class _ControlFlowRewriter:
             )
             return [stmt]
 
-        _reject_control_flow_exits(stmt.body, "if branches")
-        _reject_control_flow_exits(stmt.orelse, "if branches")
+        _reject_control_flow_exits(
+            stmt.body,
+            "if branches",
+            reject_bare_returns=self._reject_bare_returns,
+        )
+        _reject_control_flow_exits(
+            stmt.orelse,
+            "if branches",
+            reject_bare_returns=self._reject_bare_returns,
+        )
 
         cond_name = self._fresh("cond")
         then_info = _name_info(stmt.body)
@@ -1459,7 +1487,11 @@ class _ControlFlowRewriter:
             raise PTODSLAstRewriteError("ast_rewrite=True does not support for-else on runtime loops")
         if not isinstance(stmt.target, ast.Name):
             raise PTODSLAstRewriteError("ast_rewrite=True runtime for-loops require a simple name target")
-        _reject_control_flow_exits(stmt.body, "for-loop bodies")
+        _reject_control_flow_exits(
+            stmt.body,
+            "for-loop bodies",
+            reject_bare_returns=self._reject_bare_returns,
+        )
         if stmt.target.id in live_after:
             raise PTODSLAstRewriteError(
                 "ast_rewrite=True runtime for-loops cannot expose the loop induction variable outside the loop yet; "
