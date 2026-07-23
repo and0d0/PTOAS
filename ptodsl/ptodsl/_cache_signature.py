@@ -17,7 +17,7 @@ def function_cache_signature(fn):
         "python-function",
         code.co_filename,
         code.co_firstlineno,
-        code.co_qualname,
+        getattr(code, "co_qualname", fn.__qualname__),
         code.co_argcount,
         code.co_posonlyargcount,
         code.co_kwonlyargcount,
