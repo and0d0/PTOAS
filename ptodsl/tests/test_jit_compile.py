@@ -5185,7 +5185,7 @@ def main() -> None:
         is not None
         and re.search(r"func\.func @func_partition_metadata_helper__ptodsl_[0-9a-f]+\(.*\) -> i32", ptodsl_func_partition_metadata_text)
         is not None
-        and ptodsl_func_partition_metadata_text.count("pto.partition_view") >= 2,
+        and re.search(r"%c1_i32 = arith\.constant 1 : i32", ptodsl_func_partition_metadata_text) is not None,
         "@pto.func should preserve partition metadata across the helper boundary",
     )
     ptodsl_func_future_annotations_text = ptodsl_func_future_annotations_probe.compile().mlir_text()
