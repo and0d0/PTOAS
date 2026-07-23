@@ -85,7 +85,7 @@ class RuntimeEntryTests(unittest.TestCase):
         self.assertEqual(env["LD_LIBRARY_PATH"], str(layout.runtime_root / "lib") + os.pathsep + "/tmp/external-lib")
         self.assertEqual(env["DYLD_LIBRARY_PATH"], str(layout.runtime_root / "lib") + os.pathsep + "/tmp/external-dylib")
 
-    def test_launch_isolates_runtime_environment_for_wheel_layout(self):
+    def test_launch_prioritizes_runtime_environment_for_wheel_layout(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             wrapper = temp_root / "bin" / "ptoas"
@@ -132,9 +132,18 @@ class RuntimeEntryTests(unittest.TestCase):
             layout.runtime_root / "lib",
             preload_runtime_libraries=False,
         )
-        self.assertEqual(env["PYTHONPATH"], str(layout.python_root))
-        self.assertEqual(env["LD_LIBRARY_PATH"], str(layout.runtime_root / "lib"))
-        self.assertEqual(env["DYLD_LIBRARY_PATH"], str(layout.runtime_root / "lib"))
+        self.assertEqual(
+            env["PYTHONPATH"],
+            str(layout.python_root) + os.pathsep + "/tmp/external-python",
+        )
+        self.assertEqual(
+            env["LD_LIBRARY_PATH"],
+            str(layout.runtime_root / "lib") + os.pathsep + "/tmp/external-lib",
+        )
+        self.assertEqual(
+            env["DYLD_LIBRARY_PATH"],
+            str(layout.runtime_root / "lib") + os.pathsep + "/tmp/external-dylib",
+        )
 
     def test_load_shared_entrypoint_configures_in_process_ctypes_call(self):
         with tempfile.TemporaryDirectory() as temp_dir:

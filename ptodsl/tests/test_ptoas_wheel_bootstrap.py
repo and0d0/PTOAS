@@ -39,7 +39,7 @@ class WheelBootstrapTests(unittest.TestCase):
         wrapper.write_text("", encoding="utf-8")
         return bootstrap, wrapper
 
-    def test_stage1_reexecs_with_isolated_python_and_library_paths(self):
+    def test_stage1_reexecs_with_prioritized_python_and_library_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             bootstrap, wrapper = self._make_runtime_tree(temp_root)
@@ -49,6 +49,7 @@ class WheelBootstrapTests(unittest.TestCase):
                 {
                     "PYTHONPATH": "/tmp/external-python",
                     "LD_LIBRARY_PATH": "/tmp/external-lib",
+                    "DYLD_LIBRARY_PATH": "/tmp/external-dylib",
                 },
                 clear=True,
             ), mock.patch.object(
@@ -73,14 +74,21 @@ class WheelBootstrapTests(unittest.TestCase):
         self.assertEqual(invoked_path, str(wrapper.resolve()))
         self.assertEqual(invoked_argv, [str(wrapper.resolve()), "--version"])
         self.assertEqual(invoked_env["PTOAS_WHEEL_STAGE2"], "1")
-        self.assertEqual(invoked_env["PYTHONPATH"], str(bootstrap.parent.resolve()))
+        self.assertEqual(
+            invoked_env["PYTHONPATH"],
+            str(bootstrap.parent.resolve()) + os.pathsep + "/tmp/external-python",
+        )
         self.assertEqual(
             invoked_env["LD_LIBRARY_PATH"],
-            str((bootstrap.parent / "ptoas" / "_runtime" / "lib").resolve()),
+            str((bootstrap.parent / "ptoas" / "_runtime" / "lib").resolve())
+            + os.pathsep
+            + "/tmp/external-lib",
         )
         self.assertEqual(
             invoked_env["DYLD_LIBRARY_PATH"],
-            str((bootstrap.parent / "ptoas" / "_runtime" / "lib").resolve()),
+            str((bootstrap.parent / "ptoas" / "_runtime" / "lib").resolve())
+            + os.pathsep
+            + "/tmp/external-dylib",
         )
 
     def test_stage2_loads_runtime_entry_without_reexec(self):
@@ -166,7 +174,7 @@ class WheelBootstrapTests(unittest.TestCase):
         self.assertEqual(python_root, package_root.parent.resolve())
         self.assertEqual(resolved_package_root, package_root.resolve())
 
-    def test_console_entry_reexec_ignores_shadowed_ptoas_and_polluted_library_paths(self):
+    def test_console_entry_reexec_prioritizes_wheel_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             wheel_root = temp_root / "wheel-site"
@@ -282,12 +290,18 @@ class WheelBootstrapTests(unittest.TestCase):
 
         self.assertEqual(result["user_args"], ["--version"])
         self.assertEqual(result["env"]["PTOAS_WHEEL_STAGE2"], "1")
-        self.assertEqual(result["env"]["PYTHONPATH"], str(wheel_root.resolve()))
-        self.assertEqual(result["env"]["LD_LIBRARY_PATH"], str(runtime_lib_dir.resolve()))
-        self.assertEqual(result["env"]["DYLD_LIBRARY_PATH"], str(runtime_lib_dir.resolve()))
-        self.assertNotIn(str(shadow_root), result["env"]["PYTHONPATH"])
-        self.assertNotIn("/tmp/polluted-llvm", result["env"]["LD_LIBRARY_PATH"])
-        self.assertNotIn("/tmp/polluted-dylib", result["env"]["DYLD_LIBRARY_PATH"])
+        self.assertEqual(
+            result["env"]["PYTHONPATH"],
+            str(wheel_root.resolve()) + os.pathsep + str(shadow_root),
+        )
+        self.assertEqual(
+            result["env"]["LD_LIBRARY_PATH"],
+            str(runtime_lib_dir.resolve()) + os.pathsep + "/tmp/polluted-llvm",
+        )
+        self.assertEqual(
+            result["env"]["DYLD_LIBRARY_PATH"],
+            str(runtime_lib_dir.resolve()) + os.pathsep + "/tmp/polluted-dylib",
+        )
         self.assertEqual(
             result["layout"],
             {

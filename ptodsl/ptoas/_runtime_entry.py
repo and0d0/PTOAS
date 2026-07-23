@@ -119,14 +119,11 @@ def launch(layout: PTOASRuntimeLayout, user_args: Sequence[str]) -> int:
 
     _prepend_env_path(env, "PATH", layout.wrapper.parent)
     runtime_lib_dir = layout.runtime_root / "lib"
-    if layout.isolated_env:
-        env["PYTHONPATH"] = str(layout.python_root)
-        env["LD_LIBRARY_PATH"] = str(runtime_lib_dir)
-        env["DYLD_LIBRARY_PATH"] = str(runtime_lib_dir)
-    else:
-        _prepend_env_path(env, "PYTHONPATH", layout.python_root)
-        _prepend_env_path(env, "LD_LIBRARY_PATH", runtime_lib_dir)
-        _prepend_env_path(env, "DYLD_LIBRARY_PATH", runtime_lib_dir)
+    # Keep the wheel-owned packages and libraries first, while preserving
+    # host paths needed by injected runtimes such as CANN/MSProf.
+    _prepend_env_path(env, "PYTHONPATH", layout.python_root)
+    _prepend_env_path(env, "LD_LIBRARY_PATH", runtime_lib_dir)
+    _prepend_env_path(env, "DYLD_LIBRARY_PATH", runtime_lib_dir)
 
     argv = [str(layout.wrapper)]
     if not _has_cli_option(user_args, "--tilelang-path"):

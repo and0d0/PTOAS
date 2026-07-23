@@ -52,6 +52,17 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
     return unique
 
 
+def _prepend_env_path(env: dict[str, str], name: str, value: Path) -> None:
+    if not value.exists():
+        return
+    rendered = str(value.resolve())
+    parts = [part for part in env.get(name, "").split(os.pathsep) if part]
+    if rendered in parts:
+        parts.remove(rendered)
+    parts.insert(0, rendered)
+    env[name] = os.pathsep.join(parts)
+
+
 def _candidate_wheel_python_roots(wrapper: Path, module_file: str | None = None) -> list[Path]:
     candidates: list[Path] = []
 
@@ -151,9 +162,11 @@ def _prepare_stage2_env(python_root: Path, package_root: Path) -> dict[str, str]
     runtime_lib_dir = package_root / "_runtime" / "lib"
     env = os.environ.copy()
     env["PTOAS_WHEEL_STAGE2"] = "1"
-    env["PYTHONPATH"] = str(python_root)
-    env["LD_LIBRARY_PATH"] = str(runtime_lib_dir)
-    env["DYLD_LIBRARY_PATH"] = str(runtime_lib_dir)
+    # Put wheel paths first without discarding host paths required by native
+    # integrations such as CANN/MSProf.
+    _prepend_env_path(env, "PYTHONPATH", python_root)
+    _prepend_env_path(env, "LD_LIBRARY_PATH", runtime_lib_dir)
+    _prepend_env_path(env, "DYLD_LIBRARY_PATH", runtime_lib_dir)
     return env
 
 
