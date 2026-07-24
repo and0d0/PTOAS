@@ -1408,6 +1408,19 @@ s_shifted = pto.vsubs(s_row, m_next, col_mask)
 
 **Description**: Leaky ReLU â€” `vec[i] >= 0 ? vec[i] : alpha * vec[i]`.
 
+#### `pto.vshls(vec: VRegType, scalar: ScalarType, mask: MaskType) -> VRegType`
+#### `pto.vshrs(vec: VRegType, scalar: ScalarType, mask: MaskType) -> VRegType`
+
+**Description**: Uniform integer shift by a scalar amount. PTODSL coerces
+`scalar` to signless `i16`, matching the VPTO `vshls`/`vshrs` requirement.
+
+#### `pto.vands(vec: VRegType, scalar: ScalarType, mask: MaskType) -> VRegType`
+#### `pto.vors(vec: VRegType, scalar: ScalarType, mask: MaskType) -> VRegType`
+#### `pto.vxors(vec: VRegType, scalar: ScalarType, mask: MaskType) -> VRegType`
+
+**Description**: Vector/scalar bitwise ops. PTODSL lowers these surface helpers
+as `vbr(scalar)` followed by `vand(...)`, `vor(...)`, or `vxor(...)`.
+
 ---
 
 ### 8.2.3.1 Vector duplication: `pto.vdup`
@@ -1539,6 +1552,11 @@ These combine an arithmetic operation with a math function or activation in a si
 #### `pto.vaxpy(alpha: ScalarType, x: VRegType, y: VRegType, mask: MaskType) -> VRegType`
 
 **Description**: Fused multiply-add: `alpha * x[i] + y[i]`.
+
+#### `pto.vmula(acc: VRegType, lhs: VRegType, rhs: VRegType, mask: MaskType) -> VRegType`
+
+**Description**: Fused multiply-add with an explicit accumulator:
+`acc[i] + lhs[i] * rhs[i]`.
 
 ---
 
@@ -1676,7 +1694,7 @@ These ops change the element type or layout of vector registers. They are distin
 
 **Constraints**:
 - Source and result dtype pair must be a legal hardware conversion. Illegal pairs (e.g., unsupported narrowing/widening combinations) are rejected at frontend time.
-- `f32 -> f8e4m3/f8e5m2` requires `rnd=R`, `sat`, and `part=P0/P1/P2/P3`.
+- `f32 -> f8e4m3/f8e5m2` requires `rnd=R/A/H/Z`, `sat`, and `part=P0/P1/P2/P3`.
 - `f32 -> hif8` requires `rnd=A/H`, `sat`, and `part=P0/P1/P2/P3`.
 - `f16/bf16 -> f8e4m3/f8e5m2` requires `rnd=R/A/F/Z/C`, `sat`, and `part=EVEN/ODD`.
 - `f16 -> hif8` requires `rnd=A/H`, `sat`, and `part=EVEN/ODD`.
@@ -1749,13 +1767,112 @@ packed_high = pto.vpack(vec_i32, pto.VPackPart.HIGHER)  # upper 64 lanes -> 128Ã
 
 ---
 
-### 8.2.8 Vector compute quick reference
+### 8.2.7.1 Index generation
+
+#### `pto.vci(base: ScalarType | int, order: OrderMode | None = None) -> VRegType`
+
+**Description**: Generate a lane-index vector starting from `base`. When the
+base is a Python `int`, PTODSL defaults it to `i32`. To control the result
+dtype, materialize a typed scalar explicitly before calling `vci`.
+
+**Examples**:
+
+```python
+idx_i32 = pto.vci(0)
+idx_i8 = pto.vci(pto.i8(0), pto.OrderMode.ASC)
+typed_idx = pto.vci(pto.i32(16), order=pto.OrderMode.ASC)
+```
+
+---
+
+### 8.2.8 Vector rearrangement
+
+These ops rearrange data between vector registers without touching UB memory.
+They are useful for switching between interleaved layouts (`x0, y0, x1, y1,
+...`) and split layouts (`x...`, `y...`) inside `@pto.simd`.
+
+#### `pto.vintlv(lhs: VRegType, rhs: VRegType) -> tuple[VRegType, VRegType]`
+
+**Description**: Interleave two vectors lane-by-lane and return the result as a
+pair of vector registers. The first result contains the interleaved lower half
+of the logical output stream; the second result contains the upper half.
+
+For a vector with `N` lanes:
+
+- `low = [lhs[0], rhs[0], lhs[1], rhs[1], ..., lhs[N/2 - 1], rhs[N/2 - 1]]`
+- `high = [lhs[N/2], rhs[N/2], lhs[N/2 + 1], rhs[N/2 + 1], ..., lhs[N - 1], rhs[N - 1]]`
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lhs` | `VRegType` | First source vector |
+| `rhs` | `VRegType` | Second source vector |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `low` | `VRegType` | Interleaved lower half |
+| `high` | `VRegType` | Interleaved upper half |
+
+**Constraints**:
+- `lhs` and `rhs` must have exactly the same `VRegType`.
+- The two returned vectors form one logical interleaved result pair; preserve
+  their ordering when passing them to later ops such as `vdintlv`.
+
+---
+
+#### `pto.vdintlv(lhs: VRegType, rhs: VRegType) -> tuple[VRegType, VRegType]`
+
+**Description**: Deinterleave a previously interleaved vector pair. This is the
+inverse of `vintlv`: it separates the even-position and odd-position lanes of
+the logical input stream into two output vectors.
+
+For a vector with `N` lanes:
+
+- `low = [lhs[0], lhs[2], lhs[4], ..., rhs[0], rhs[2], rhs[4], ...]`
+- `high = [lhs[1], lhs[3], lhs[5], ..., rhs[1], rhs[3], rhs[5], ...]`
+
+If `(packed_low, packed_high) = pto.vintlv(a, b)`, then
+`pto.vdintlv(packed_low, packed_high)` reconstructs `(a, b)`.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lhs` | `VRegType` | Lower half of the interleaved input stream |
+| `rhs` | `VRegType` | Upper half of the interleaved input stream |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `low` | `VRegType` | Lanes from even interleaved positions |
+| `high` | `VRegType` | Lanes from odd interleaved positions |
+
+**Constraints**:
+- `lhs` and `rhs` must have exactly the same `VRegType`.
+- `lhs` and `rhs` are interpreted as an ordered pair. Swapping them changes the
+  reconstructed lane order.
+
+**Example** â€” interleave two channels and recover them later:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"compute_ops.vector_compute","symbol":"compute_ops_vector_probe","compile":{"BLOCK":128}} -->
+```python
+packed_low, packed_high = pto.vintlv(vec_f32, vec_f32)
+even_lanes, odd_lanes = pto.vdintlv(packed_low, packed_high)
+```
+
+---
+
+### 8.2.9 Vector compute quick reference
 
 | Category | Operations |
 |----------|------------|
 | Unary | `vexp`, `vln`, `vsqrt`, `vabs`, `vneg`, `vrec`, `vrsqrt`, `vrelu`, `vnot` |
 | Binary | `vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, `vmin`, `vand`, `vor`, `vxor`, `vshl`, `vshr` |
-| Vector-scalar | `vadds`, `vsubs`, `vmuls`, `vmaxs`, `vmins`, `vlrelu` |
+| Vector-scalar | `vadds`, `vsubs`, `vmuls`, `vmaxs`, `vmins`, `vlrelu`, `vands`, `vors`, `vxors`, `vshls`, `vshrs` |
 | Broadcast | `vbr`, `vdup` |
 | Full reduction | `vcadd`, `vcmax`, `vcmin` |
 | Group reduction | `vcgadd`, `vcgmax`, `vcgmin` |
@@ -1763,6 +1880,8 @@ packed_high = pto.vpack(vec_i32, pto.VPackPart.HIGHER)  # upper 64 lanes -> 128Ã
 | Fused | `vexpdif`, `vaxpy`, `vmula`, `vmadd`, `vaddrelu`, `vsubrelu`, `vmulscvt` |
 | Compare/select | `vcmp`, `vcmps`, `vsel` |
 | Conversion | `vcvt`, `vpack`, `vbitcast`, `pbitcast` |
+| Index generation | `vci` |
+| Rearrangement | `vintlv`, `vdintlv` |
 
 ---
 
