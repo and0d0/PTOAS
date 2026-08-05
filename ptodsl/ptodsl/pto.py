@@ -119,7 +119,7 @@ from ._ops import (             # noqa: F401
     vmula, vmadd,
     vsel,
     make_tensor_view, partition_view,
-    alloc_buffer, alloc_tile,
+    alloc_buffer, alloc_tile, alloc_multi_tile, multi_tile_get,
     tsort32, tmrgsort, tgather, tscatter,
     mte_load, mte_store, mte_gm_ub, mte_ub_gm, mte_ub_ub, mte_ub_l1,
     mte_gm_l1, mte_l1_ub, mte_gm_l1_frac, mte_l1_bt, mte_l1_fb, mem_bar,
