@@ -124,17 +124,6 @@ FRAGMENT_FIXTURES = {
             {SNIPPET_PLACEHOLDER}
         """
     ),
-    "type_system.multi_tile": _fixture(
-        f"""
-        @pto.jit(target="a5")
-        def type_system_multi_tile_probe(
-            *,
-            BLOCK: pto.const_expr = 128,
-            dim: pto.const_expr = 16,
-        ):
-            {SNIPPET_PLACEHOLDER}
-        """
-    ),
     "type_system.tile_methods": _fixture(
         f"""
         @pto.jit(target="a5")

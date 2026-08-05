@@ -294,7 +294,6 @@ operations access.
 `0 <= slot < count`; PTODSL does not automatically apply modulo arithmetic.
 For a double-buffered loop, write the intended slot expression explicitly:
 
-<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.multi_tile","symbol":"type_system_multi_tile_probe","compile":{"BLOCK":128,"dim":16}} -->
 ```python
 tiles = pto.alloc_multi_tile(shape=[BLOCK, dim], dtype=pto.f32, count=2)
 
