@@ -3046,7 +3046,7 @@ def alloc_multi_tile(
         fractal_size=fractal_size,
         pad=pad,
     )
-    multi_type = _pto.MultiTileBufType.get(slot_type, count)
+    multi_type = Type.parse(f"!pto.multi_tile_buf<{slot_type}, count={count}>")
     value = _pto.AllocMultiTileOp(
         multi_type,
         addr=_coerce_i64(addr, context="alloc_multi_tile(addr)") if addr is not None else None,
@@ -3062,6 +3062,7 @@ def alloc_multi_tile(
         "valid_shape": surface_valid_shape,
         "count": count,
     }
+    result._multi_tile_slot_type = slot_type
     return result
 
 
@@ -3069,7 +3070,13 @@ def multi_tile_get(multi_tile, slot):
     """Return the tile handle for one selected multi-buffer slot."""
     source = unwrap_surface_value(multi_tile)
     slot_value = _coerce_index(slot, context="multi_tile_get(slot)")
-    value = _pto.MultiTileGetOp(source, slot_value).result
+    result_type = getattr(multi_tile, "_multi_tile_slot_type", None)
+    if result_type is None:
+        raise TypeError(
+            "multi_tile_get(multi_tile, slot) expects a value returned by "
+            "alloc_multi_tile()"
+        )
+    value = _pto.MultiTileGetOp(result_type, source, slot_value).result
     metadata = dict(getattr(multi_tile, "tile_metadata", {}))
     metadata.pop("count", None)
     return wrap_surface_value(value, tile_metadata=metadata)
