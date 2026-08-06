@@ -595,6 +595,14 @@ def dynamic_addr_tile_surface_probe(
 
 
 @pto.jit(target="a5")
+def multi_tile_surface_probe(*, BLOCK: pto.const_expr = 128, dim: pto.const_expr = 16):
+    tiles = pto.alloc_multi_tile(shape=[BLOCK, dim], dtype=pto.f32, count=2)
+    with pto.for_(0, BLOCK, step=1) as iv:
+        tile = pto.multi_tile_get(tiles, iv % 2)
+        tile.fill(0.0)
+
+
+@pto.jit(target="a5")
 def tile_sort_gather_surface_probe():
     src = pto.alloc_tile(shape=[1, 32], dtype=pto.f32)
     idx = pto.alloc_tile(shape=[1, 32], dtype=pto.ui32)
@@ -3785,6 +3793,8 @@ def main() -> None:
         "mad_mx_acc",
         "mad_mx_bias",
         "empty_like",
+        "alloc_multi_tile",
+        "multi_tile_get",
     ]
     for name in expected_public_exports:
         expect(hasattr(pto, name), f"pto.{name} should be exported from the public namespace")
@@ -5120,6 +5130,21 @@ def main() -> None:
             dynamic_addr_tile_text,
         ) is not None,
         "alloc_tile(shape=..., dtype=..., addr=runtime value, valid_shape=...) should accept dynamic i64-like operands",
+    )
+
+    multi_tile_text = multi_tile_surface_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(multi_tile_text, "multi-tile surface specialization")
+    expect(
+        "pto.alloc_multi_tile" in multi_tile_text,
+        "alloc_multi_tile(...) should lower to pto.alloc_multi_tile",
+    )
+    expect(
+        "pto.multi_tile_get" in multi_tile_text,
+        "multi_tile_get(...) should lower to pto.multi_tile_get",
+    )
+    expect(
+        "count=2" in multi_tile_text,
+        "alloc_multi_tile(count=2) should preserve the slot count in MLIR",
     )
 
     tile_valid_shape_text = tile_valid_shape_update_probe.compile().mlir_text()

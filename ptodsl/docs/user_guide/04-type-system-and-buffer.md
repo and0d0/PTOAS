@@ -270,6 +270,46 @@ physical row-alignment rule.
 
 For packed types (`pto.f4e1m2x2`, `pto.f4e2m1x2`), `shape` dimensions refer to the number of **packed** elements, each containing 2 f4 values. For example, `alloc_tile(shape=[128, 64], dtype=pto.f4e1m2x2)` allocates a 128×64 tile of packed elements, holding 128×64×2 individual 4-bit floats. The same applies to TensorView shapes when the tensor spec uses a packed dtype.
 
+### Multi-buffer tiles
+
+Use `pto.alloc_multi_tile` to allocate several independent physical slots with
+the same tile shape, element type, layout, and memory space. It is useful for
+double buffering and deeper software pipelines: one slot can hold the tile
+currently consumed by an operation while another slot is prepared for a later
+iteration.
+
+#### `pto.alloc_multi_tile(*, shape, dtype, memory_space="ub", count, valid_shape=None, blayout="RowMajor", slayout="NoneBox", fractal_size=512, pad="Null", addr=None) -> MultiTile`
+
+`shape`, `dtype`, `memory_space`, `valid_shape`, and layout arguments have the
+same meaning and constraints as for `pto.alloc_tile`. `count` is a compile-time
+Python integer and must be at least `2`. The allocation owns `count` distinct
+tile slots, so its total storage requirement is `count` times the footprint of
+one slot.
+
+#### `pto.multi_tile_get(multi_tile, slot) -> Tile`
+
+Selects one slot and returns it as a normal `Tile`. The returned tile can be
+passed directly to existing tile data-movement and compute APIs. Selection does
+not copy, move, or transform data; it only chooses which physical slot later
+operations access.
+
+`slot` may be a constant or a device-side `index` expression. It must satisfy
+`0 <= slot < count`; PTODSL does not automatically apply modulo arithmetic.
+For a double-buffered loop, write the intended slot expression explicitly:
+
+```python
+tiles = pto.alloc_multi_tile(shape=[BLOCK, dim], dtype=pto.f32, count=2)
+
+with pto.for_(0, BLOCK, step=1) as iv:
+    slot = iv % 2
+    current_tile = pto.multi_tile_get(tiles, slot)
+    current_tile.fill(0.0)
+```
+
+In this example, even iterations select slot `0` and odd iterations select slot
+`1`. Coordinate data movement and computation with the synchronization needed
+by the surrounding pipeline before reusing a slot.
+
 ### Tile attributes
 
 | Attribute | Type | Description |

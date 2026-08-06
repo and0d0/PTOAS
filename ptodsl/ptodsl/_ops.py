@@ -68,6 +68,7 @@ from ._types import (
     part_tensor_view_type,
     part_tensor_view_type_from_dims,
     ptr,
+    tile_buf_type,
     tensor_view_type,
     tensor_view_type_from_dims,
     vreg_type,
@@ -3001,6 +3002,84 @@ def alloc_tile(
             "valid_shape": surface_valid_shape,
         },
     )
+
+
+def alloc_multi_tile(
+    *,
+    shape,
+    dtype,
+    memory_space="ub",
+    count,
+    valid_shape=None,
+    blayout: str = "RowMajor",
+    slayout: str = "NoneBox",
+    fractal_size: int = 512,
+    pad: str = "Null",
+    addr=None,
+):
+    """Allocate a logical tile with ``count`` independently planned slots.
+
+    A slot is selected with :func:`multi_tile_get` before it is passed to a
+    DMA or compute operation.  The slot selector remains visible in PTOIR so
+    memory planning and synchronization can distinguish pipeline versions.
+    """
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise TypeError("alloc_multi_tile(count=...) expects a positive Python int")
+    if count < 2:
+        raise ValueError("alloc_multi_tile(count=...) requires at least two slots")
+
+    logical_shape = _normalize_static_tile_shape(shape)
+    physical_shape = _authored_tile_physical_shape(logical_shape)
+    _validate_authored_tile_row_alignment(
+        physical_shape, dtype, blayout=blayout, slayout=slayout
+    )
+    type_valid_shape, valid_row, valid_col, surface_valid_shape = _split_valid_shape(
+        logical_shape, valid_shape
+    )
+    slot_type = tile_buf_type(
+        physical_shape,
+        dtype,
+        type_valid_shape,
+        blayout=blayout,
+        address_space=memory_space,
+        slayout=slayout,
+        fractal_size=fractal_size,
+        pad=pad,
+    )
+    multi_type = Type.parse(f"!pto.multi_tile_buf<{slot_type}, count={count}>")
+    value = _pto.AllocMultiTileOp(
+        multi_type,
+        addr=_coerce_i64(addr, context="alloc_multi_tile(addr)") if addr is not None else None,
+        valid_row=_coerce_index(valid_row, context="alloc_multi_tile(valid_row)") if valid_row is not None else None,
+        valid_col=_coerce_index(valid_col, context="alloc_multi_tile(valid_col)") if valid_col is not None else None,
+    ).result
+    result = wrap_surface_value(value)
+    result.tile_metadata = {
+        "shape": logical_shape,
+        "physical_shape": physical_shape,
+        "dtype": dtype,
+        "memory_space": memory_space,
+        "valid_shape": surface_valid_shape,
+        "count": count,
+    }
+    result._multi_tile_slot_type = slot_type
+    return result
+
+
+def multi_tile_get(multi_tile, slot):
+    """Return the tile handle for one selected multi-buffer slot."""
+    source = unwrap_surface_value(multi_tile)
+    slot_value = _coerce_index(slot, context="multi_tile_get(slot)")
+    result_type = getattr(multi_tile, "_multi_tile_slot_type", None)
+    if result_type is None:
+        raise TypeError(
+            "multi_tile_get(multi_tile, slot) expects a value returned by "
+            "alloc_multi_tile()"
+        )
+    value = _pto.MultiTileGetOp(result_type, source, slot_value).result
+    metadata = dict(getattr(multi_tile, "tile_metadata", {}))
+    metadata.pop("count", None)
+    return wrap_surface_value(value, tile_metadata=metadata)
 
 
 def set_tile_valid_shape(tile, valid_shape):
@@ -6537,7 +6616,7 @@ __all__ = [
     "vaxpy", "vmula", "vci", "vaddrelu", "vsubrelu",
     "vsel",
     "make_tensor_view", "partition_view",
-    "alloc_buffer", "alloc_tile",
+    "alloc_buffer", "alloc_tile", "alloc_multi_tile", "multi_tile_get",
     "tload", "tstore", "tmov", "tinsert", "tconcat",
     "tmatmul", "tmatmul_acc", "tmatmul_mx", "tmatmul_mx_acc", "tmatmul_mx_bias",
     "tgemv_mx", "tgemv_mx_acc", "tgemv_mx_bias",
