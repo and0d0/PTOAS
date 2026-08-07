@@ -16,6 +16,7 @@ Public API
 ``vecscope()``            – ``pto.vecscope { … }``
 ``for_(lo, hi, step)``
                           – ``scf.for`` with optional named carry state via ``.carry(...)``
+``while_()``              – explicit ``scf.while`` before/after region builder
 ``if_(cond)``             – ``scf.if`` via explicit branch handle + automatic named merge
 ``yield_(*vals)``         – ``scf.yield``
 ``static_range(...)``     – trace-time ``range(...)`` escape hatch for AST rewrite
@@ -320,6 +321,62 @@ def _coerce_index(value):
     raw_value = unwrap_surface_value(value)
     return coerce_runtime_index(raw_value, context="pto.for_(...) loop bound")
 
+
+# ── while_ ───────────────────────────────────────────────────────────────────
+
+class _WhileRegionCM:
+    """Context manager for one region of an explicit ``scf.while`` op."""
+
+    def __init__(self, block):
+        self._block = block
+        self._ip = None
+
+    def __enter__(self):
+        self._ip = InsertionPoint(self._block)
+        self._ip.__enter__()
+        return None
+
+    def __exit__(self, *exc):
+        return self._ip.__exit__(*exc)
+
+
+class WhileHandle:
+    """
+    Handle for explicit zero-state ``scf.while`` construction.
+
+    Usage::
+
+        loop = pto.while_()
+        with loop.before:
+            loop.condition(cond)
+        with loop.after:
+            ...
+            loop.yield_()
+    """
+
+    def __init__(self):
+        self._op = scf.WhileOp([], [])
+        self.before = _WhileRegionCM(self._op.before.blocks.append())
+        self.after = _WhileRegionCM(self._op.after.blocks.append())
+        self._condition_emitted = False
+        self._yield_emitted = False
+
+    def condition(self, cond):
+        if self._condition_emitted:
+            raise RuntimeError("pto.while_().condition(...) may only be called once")
+        scf.condition(unwrap_surface_value(cond), [])
+        self._condition_emitted = True
+
+    def yield_(self):
+        if self._yield_emitted:
+            raise RuntimeError("pto.while_().yield_() may only be called once")
+        scf.YieldOp([])
+        self._yield_emitted = True
+
+
+def while_() -> WhileHandle:
+    """Return a handle that emits a zero-state ``scf.while`` with explicit regions."""
+    return WhileHandle()
 
 # ── if_ ───────────────────────────────────────────────────────────────────────
 
@@ -682,6 +739,6 @@ def yield_(*vals):
 
 
 __all__ = [
-    "section", "vecscope", "static_range", "const_expr", "LoopHandle", "BranchHandle",
-    "for_", "if_", "yield_",
+    "section", "vecscope", "static_range", "const_expr", "LoopHandle", "WhileHandle", "BranchHandle",
+    "for_", "while_", "if_", "yield_",
 ]

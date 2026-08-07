@@ -1554,6 +1554,17 @@ def ast_nested_helper_name_store_liveness_probe():
     _ = y
 
 
+@pto.jit(target="a5")
+def explicit_while_probe():
+    cond = pto.const(1, dtype=pto.i1)
+    loop = pto.while_()
+    with loop.before:
+        loop.condition(cond)
+    with loop.after:
+        pto.pipe_barrier(pto.Pipe.ALL)
+        loop.yield_()
+
+
 @pto.jit(target="a5", name="ast_control_flow_equiv_explicit")
 def ast_control_flow_equiv_explicit_probe(rows: pto.i32):
     one = pto.const(1, dtype=pto.i32)
@@ -3850,6 +3861,7 @@ def main() -> None:
     expect(not hasattr(pto, "rls_buf_dyn"), "pto.rls_buf_dyn should not remain on the public pto namespace")
     expect(not hasattr(pto, "tile_buf_type"), "pto.tile_buf_type should not remain on the public pto namespace")
     expect(hasattr(pto, "vecscope"), "pto.vecscope should be exported from the public pto namespace")
+    expect(hasattr(pto, "while_"), "pto.while_ should be exported from the public pto namespace")
     expect(not hasattr(pto, "as_ptr"), "pto.as_ptr should not remain on the public pto namespace")
     expect(not hasattr(pto, "vbrc_load"), "pto.vbrc_load should not remain on the public pto namespace")
     expect(not hasattr(pto, "vsts_1pt"), "pto.vsts_1pt should not remain on the public pto namespace")
@@ -5650,6 +5662,13 @@ def main() -> None:
     expect("pto.barrier <PIPE_ALL>" in branch_side_effect_text, "br.then_ side effects should lower into the then branch")
     expect("pto.mem_bar" in branch_side_effect_text, "br.else_ side effects should lower into the else branch")
     expect("} else {" in branch_side_effect_text, "side-effect branch handle should materialize an explicit else region")
+
+    explicit_while_text = explicit_while_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(explicit_while_text, "explicit while specialization")
+    expect(explicit_while_text.count("scf.while") == 1, "pto.while_() should lower to one scf.while")
+    expect("scf.condition" in explicit_while_text, "pto.while_().condition(...) should lower to scf.condition")
+    expect("scf.yield" in explicit_while_text, "pto.while_().yield_() should lower to scf.yield")
+    expect("pto.barrier <PIPE_ALL>" in explicit_while_text, "pto.while_() after region should preserve body operations")
 
     branch_merge_text = branch_handle_merge_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(branch_merge_text, "branch handle merge specialization")
