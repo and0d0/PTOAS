@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 import os
 import re
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from importlib.util import module_from_spec, spec_from_file_location
@@ -23,6 +24,7 @@ from ptodsl import _types as pto_types
 import ptodsl._vmi_namespace as vmi_namespace
 from ptodsl._ast_rewrite import PTODSLAstRewriteError
 from ptodsl._context import make_context
+from ptodsl._cache_signature import cache_signature_atom
 from ptodsl._kernel_signature import DeviceParameterSpec, HelperMarkerParameterSpec, RuntimeScalarParameterSpec
 from ptodsl._tracing.runtime import SignatureTracingRuntime
 from ptodsl._runtime import native_build as native_build_runtime
@@ -73,6 +75,43 @@ def mlir_op_sequence(text: str) -> list[str]:
         if match is not None:
             ops.append(match.group(1))
     return ops
+
+
+def run_python_snippet(source: str) -> str:
+    env = dict(os.environ)
+    if "PYTHONPYCACHEPREFIX" not in env:
+        env["PYTHONPYCACHEPREFIX"] = "/tmp/ptoas-pycache"
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def ptodsl_func_stable_symbol_from_subprocess() -> str:
+    source = r'''
+import re
+from ptodsl import pto
+
+@pto.func(returns=pto.i32)
+def stable_dtype_return_helper(x: pto.i32):
+    return x
+
+@pto.jit(target="a5")
+def stable_dtype_symbol_probe(x: pto.i32):
+    _ = stable_dtype_return_helper(x)
+
+text = stable_dtype_symbol_probe.compile().mlir_text()
+match = re.search(r"func\.func @(stable_dtype_return_helper__ptodsl_[0-9a-f]+)\(", text)
+if match is None:
+    raise RuntimeError(text)
+print(match.group(1))
+'''
+    return run_python_snippet(source)
 
 
 expect_raises(
@@ -6453,6 +6492,25 @@ def main() -> None:
         )
         is not None,
         "@pto.func should resolve PEP 563 -> None annotations as void helpers",
+    )
+    i32_cache_signature = cache_signature_atom(pto.i32)
+    i64_cache_signature = cache_signature_atom(pto.i64)
+    ptr_cache_signature = cache_signature_atom(pto.ptr(pto.f32, "gm"))
+    expect(
+        i32_cache_signature != i64_cache_signature,
+        "dtype cache signatures should distinguish different MLIR scalar types",
+    )
+    expect(
+        "0x" not in repr(i32_cache_signature)
+        and "0x" not in repr(ptr_cache_signature)
+        and "function" not in repr(i32_cache_signature),
+        "dtype cache signatures should not include Python factory reprs or memory addresses",
+    )
+    first_stable_symbol = ptodsl_func_stable_symbol_from_subprocess()
+    second_stable_symbol = ptodsl_func_stable_symbol_from_subprocess()
+    expect(
+        first_stable_symbol == second_stable_symbol,
+        "@pto.func helper symbols should stay stable across Python processes",
     )
     ptodsl_func_constexpr_text = ptodsl_func_constexpr_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(

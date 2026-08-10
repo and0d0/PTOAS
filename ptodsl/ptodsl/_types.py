@@ -79,6 +79,10 @@ class _DType:
             return _materialize_integer_literal(target_type, value)
         raise TypeError(f"unsupported eager constructor target type {target_type}")
 
+    def __ptodsl_cache_signature__(self):
+        with make_context():
+            return ("dtype", str(self.resolve()))
+
     def __repr__(self):
         return f"<pto.dtype {self._factory}>"
 
