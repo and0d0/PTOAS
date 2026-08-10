@@ -16,6 +16,7 @@ import typing
 
 from ._ast_rewrite import rewrite_jit_function
 from ._cache_signature import cache_signature_atom, closure_cache_signature, function_cache_signature
+from ._surface_values import unwrap_surface_value
 from ._tracing import current_runtime
 
 _RETURNS_UNSET = object()
@@ -67,12 +68,22 @@ class FuncTemplate:
         )
         return py_fn(*args, **kwargs)
 
+    def _validate_closure_captures(self):
+        for name, value in inspect.getclosurevars(self.py_fn).nonlocals.items():
+            captured = _find_runtime_value(value)
+            if captured is not None:
+                raise TypeError(
+                    f"@pto.func {self.spec.symbol_name!r} captures runtime value {name!r} "
+                    f"of type {captured.type}; pass it as an explicit parameter"
+                )
+
     def __call__(self, *args, **kwargs):
         runtime = current_runtime()
         if runtime is None:
             raise RuntimeError(
                 "@pto.func helpers may only be called while tracing a compatible PTODSL kernel"
             )
+        self._validate_closure_captures()
         return runtime.dispatch_ptodsl_func_call(self, *args, **kwargs)
 
     def __ptodsl_cache_signature__(self):
@@ -109,6 +120,21 @@ def _has_annotations(signature: inspect.Signature) -> bool:
         param.annotation is not inspect.Parameter.empty
         for param in signature.parameters.values()
     )
+
+
+def _find_runtime_value(value):
+    if isinstance(value, dict):
+        values = value.items()
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        values = value
+    else:
+        raw_value = unwrap_surface_value(value)
+        return raw_value if hasattr(raw_value, "type") else None
+    for item in values:
+        captured = _find_runtime_value(item)
+        if captured is not None:
+            return captured
+    return None
 
 
 __all__ = [

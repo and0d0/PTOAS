@@ -1639,6 +1639,11 @@ def func_void_helper():
     pto.pipe_barrier(pto.Pipe.ALL)
 
 
+@pto.func(returns=None)
+def func_i32_argument_helper(value: pto.i32):
+    _ = value
+
+
 @pto.func(returns=pto.i32)
 def func_partition_metadata_helper(part: pto.PartitionTensorView, cols: pto.i32):
     return part.sizes[0] + cols
@@ -1727,6 +1732,25 @@ def ptodsl_func_constexpr_probe(rows: pto.i32):
 @pto.jit(target="a5")
 def ptodsl_func_constexpr_runtime_value_probe(rows: pto.i32):
     _ = func_constexpr_static_helper(rows, BLOCK=rows)
+
+
+@pto.jit(target="a5")
+def ptodsl_func_traced_argument_coercion_probe(value: pto.i64):
+    func_i32_argument_helper(value)
+
+
+@pto.jit(target="a5")
+def ptodsl_func_traced_argument_type_error_probe(value: pto.f32):
+    func_i32_argument_helper(value)
+
+
+@pto.jit(target="a5")
+def ptodsl_func_runtime_closure_capture_probe(value: pto.i32):
+    @pto.func(returns=None)
+    def helper():
+        _ = value
+
+    helper()
 
 
 @pto.jit(target="a5")
@@ -6452,6 +6476,32 @@ def main() -> None:
         TypeError,
         lambda: ptodsl_func_constexpr_runtime_value_probe.compile().mlir_text(),
         "const_expr parameter 'BLOCK' expects a compile-time Python value",
+    )
+    ptodsl_func_traced_argument_coercion_text = (
+        ptodsl_func_traced_argument_coercion_probe.compile().mlir_text()
+    )
+    expect_parse_roundtrip_and_verify(
+        ptodsl_func_traced_argument_coercion_text,
+        "@pto.func traced argument annotation coercion",
+    )
+    expect(
+        "arith.trunci" in ptodsl_func_traced_argument_coercion_text
+        and re.search(
+            r"func\.func @func_i32_argument_helper__ptodsl_[0-9a-f]+\(%arg0: i32\)",
+            ptodsl_func_traced_argument_coercion_text,
+        )
+        is not None,
+        "@pto.func should adapt traced SSA arguments to their declared parameter type",
+    )
+    expect_raises(
+        TypeError,
+        lambda: ptodsl_func_traced_argument_type_error_probe.compile().mlir_text(),
+        "@pto.func parameter 'value' cannot coerce",
+    )
+    expect_raises(
+        TypeError,
+        lambda: ptodsl_func_runtime_closure_capture_probe.compile().mlir_text(),
+        "captures runtime value 'value'",
     )
     expect_raises(
         PTODSLAstRewriteError,

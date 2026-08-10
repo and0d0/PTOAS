@@ -53,6 +53,7 @@ from ptoas.mlir.ir import (
     IntegerType,
     Operation,
     StringAttr,
+    Type,
     UnitAttr,
 )
 
@@ -1011,13 +1012,21 @@ class TraceSession:
 
     def _normalize_ptodsl_func_argument(self, name: str, annotation, value):
         raw_value = unwrap_surface_value(value)
-        if hasattr(raw_value, "type"):
-            return raw_value
+        target_type = None
         if annotation is not inspect.Parameter.empty:
             try:
                 target_type = _resolve(annotation)
             except Exception:
                 target_type = annotation
+        if hasattr(raw_value, "type"):
+            if not isinstance(target_type, Type):
+                return raw_value
+            return coerce_scalar_to_type(
+                raw_value,
+                target_type,
+                context=f"@pto.func parameter {name!r}",
+            )
+        if target_type is not None:
             try:
                 return coerce_scalar_to_type(
                     raw_value,
