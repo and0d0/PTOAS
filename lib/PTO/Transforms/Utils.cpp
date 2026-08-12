@@ -6,14 +6,17 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-#include "PTO/IR/PTO.h"
 #include "Utils.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/Support/ErrorHandling.h"
+#include "PTO/IR/PTO.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/IR/Matchers.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #define DEBUG_TYPE "pto-utils"
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
@@ -26,11 +29,102 @@ namespace pto {
 static constexpr llvm::StringLiteral kFrontendPipeIdAttrName =
     "__pto.frontend_id";
 
+FailureOr<bool> hasTFillPadExpandedPhysicalShape(TFillPadOp op) {
+  auto srcType = dyn_cast<TileBufType>(op.getSrc().getType());
+  auto dstType = dyn_cast<TileBufType>(op.getDst().getType());
+  if (!srcType || !dstType || srcType.getRank() != dstType.getRank())
+    return failure();
+
+  bool expanded = false;
+  for (auto [srcDim, dstDim] :
+       llvm::zip_equal(srcType.getShape(), dstType.getShape())) {
+    if (srcDim == dstDim)
+      continue;
+    if (ShapedType::isDynamic(srcDim) || ShapedType::isDynamic(dstDim) ||
+        dstDim < srcDim)
+      return failure();
+    expanded = true;
+  }
+  return expanded;
+}
+
+static Value peelTFillPadStorageAlias(Value value) {
+  constexpr unsigned kMaxDepth = 32;
+  for (unsigned depth = 0; value && depth < kMaxDepth; ++depth) {
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      break;
+    if (auto cast = dyn_cast<UnrealizedConversionCastOp>(def)) {
+      if (cast.getNumOperands() != 1 || cast.getNumResults() != 1)
+        break;
+      value = cast.getOperand(0);
+      continue;
+    }
+    if (auto bitcast = dyn_cast<BitcastOp>(def)) {
+      value = bitcast.getSrc();
+      continue;
+    }
+    if (auto reshape = dyn_cast<TReshapeOp>(def)) {
+      value = reshape.getSrc();
+      continue;
+    }
+    break;
+  }
+  return value;
+}
+
+static bool haveSameKnownTFillPadStartAddress(Value src, Value dst) {
+  src = peelTFillPadStorageAlias(src);
+  dst = peelTFillPadStorageAlias(dst);
+  if (src == dst)
+    return true;
+
+  auto srcAlloc = src.getDefiningOp<AllocTileOp>();
+  auto dstAlloc = dst.getDefiningOp<AllocTileOp>();
+  if (!srcAlloc || !dstAlloc || !srcAlloc.getAddr() || !dstAlloc.getAddr())
+    return false;
+
+  Value srcAddr = srcAlloc.getAddr();
+  Value dstAddr = dstAlloc.getAddr();
+  if (srcAddr == dstAddr)
+    return true;
+
+  IntegerAttr srcConst;
+  IntegerAttr dstConst;
+  return matchPattern(srcAddr, m_Constant(&srcConst)) &&
+         matchPattern(dstAddr, m_Constant(&dstConst)) &&
+         srcConst.getValue() == dstConst.getValue();
+}
+
+FailureOr<TFillPadLoweringKind>
+inferTFillPadLoweringKindAfterMemoryPlanning(TFillPadOp op) {
+  FailureOr<bool> expanded = hasTFillPadExpandedPhysicalShape(op);
+  if (failed(expanded))
+    return failure();
+
+  auto srcSpace = GetBufferSpaceAttr(op.getSrc());
+  auto dstSpace = GetBufferSpaceAttr(op.getDst());
+  bool isVec = srcSpace && dstSpace &&
+               srcSpace->getAddressSpace() == AddressSpace::VEC &&
+               dstSpace->getAddressSpace() == AddressSpace::VEC;
+
+  if (*expanded) {
+    if (!isVec)
+      return failure();
+    return TFillPadLoweringKind::Expand;
+  }
+  if (isVec &&
+      haveSameKnownTFillPadStartAddress(op.getSrc(), op.getDst()))
+    return TFillPadLoweringKind::InPlace;
+  return TFillPadLoweringKind::Normal;
+}
+
 std::optional<PhysicalSectionKind>
 inferPhysicalSectionKindFromPipe(Operation *op) {
   auto pipeOp = dyn_cast_or_null<OpPipeInterface>(op);
-  if (!pipeOp)
+  if (!pipeOp) {
     return std::nullopt;
+  }
 
   switch (pipeOp.getPipe()) {
   case PIPE::PIPE_M:
@@ -49,8 +143,9 @@ func::ReturnOp getAssumedUniqueReturnOp(func::FuncOp funcOp) {
   func::ReturnOp returnOp;
   for (Block &b : funcOp.getBody()) {
     if (auto candidateOp = dyn_cast<func::ReturnOp>(b.getTerminator())) {
-      if (returnOp)
+      if (returnOp) {
         return nullptr;
+      }
       returnOp = candidateOp;
     }
   }
@@ -137,8 +232,9 @@ void setBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope) {
 
   if (auto curMemScope = dyn_cast_if_present<AddressSpaceAttr>(
           dyn_cast<BaseMemRefType>(type).getMemorySpace())) {
-    if (curMemScope != targetMemScope)
+    if (curMemScope != targetMemScope) {
       llvm::report_fatal_error("memref scope mismatch while propagating PTO address space");
+    }
     return;
   }
 
@@ -232,7 +328,7 @@ std::optional<std::pair<Value, Value>> getOperationAliasInfo(Operation *op) {
   return std::nullopt;
 }
 
-Value tracebackImpl(Value memrefVal) {
+static Value tracebackImpl(Value memrefVal) {
   // case 1: v is the iter_arg of a scf.for
   if (auto arg = dyn_cast<BlockArgument>(memrefVal)) {
     if (auto forOp =
@@ -296,13 +392,14 @@ Value tracebackImpl(Value memrefVal) {
   return result;
 }
 
-bool isAllocLikeOp(Operation *op) {
-  if (!op)
+static bool isAllocLikeOp(Operation *op) {
+  if (!op) {
     return false;
+  }
   return isa<memref::AllocOp>(op) || isa<memref::AllocaOp>(op);
 }
 
-bool isAllocLikeOp(Value val) {
+static bool isAllocLikeOp(Value val) {
   return isAllocLikeOp(val.getDefiningOp());
 }
 
@@ -318,8 +415,9 @@ std::optional<int64_t> getStaticTotalSize(const ArrayRef<int64_t> &shapes) {
 }
 
 uint64_t AlignUp(uint64_t lhs, uint64_t rhs) {
-  if (rhs == 0)
+  if (rhs == 0) {
     return lhs;
+  }
   if (lhs % rhs != 0) {
     lhs += rhs - (lhs % rhs);
   }
@@ -373,7 +471,7 @@ bool isLocalBuffer(std::optional<AddressSpaceAttr> memorySpaceAttr) {
   llvm_unreachable("Currently only support (UB | L1 | L0C) allocation");
 }
 
-SmallVector<Value> getOpTouchBuffer(Operation *op) {
+static SmallVector<Value> getOpTouchBuffer(Operation *op) {
   SmallVector<Value> touchBuffer;
   touchBuffer.insert(touchBuffer.end(), op->getResults().begin(),
                      op->getResults().end());
@@ -403,7 +501,7 @@ ModuleOp getTopLevelModuleOp(Operation *op) {
 }
 
 /// Index of yielded value where is alias of targetVal.
-std::optional<int> getYieldValueIdx(Value targetVal, ValueRange yieldedValues) {
+static std::optional<int> getYieldValueIdx(Value targetVal, ValueRange yieldedValues) {
   auto it = std::find(yieldedValues.begin(), yieldedValues.end(), targetVal);
   if (it != yieldedValues.end()) {
     return it - yieldedValues.begin();
@@ -413,8 +511,9 @@ std::optional<int> getYieldValueIdx(Value targetVal, ValueRange yieldedValues) {
 }
 
 LoopLikeOpInterface getParentLoop(Value val) {
-  if (!val.getDefiningOp())
+  if (!val.getDefiningOp()) {
     return nullptr;
+  }
 
   // Firstly, get parent loop
   LoopLikeOpInterface parentLoop =
@@ -425,8 +524,9 @@ LoopLikeOpInterface getParentLoop(Value val) {
 
   // Need to determine whether val is yielded by the loop.
   auto yieldedValues = parentLoop.getYieldedValues();
-  if (yieldedValues.empty())
+  if (yieldedValues.empty()) {
     return parentLoop;
+  }
 
   auto idxLoopRes = getYieldValueIdx(val, yieldedValues);
   if (idxLoopRes.has_value()) {
@@ -437,8 +537,9 @@ LoopLikeOpInterface getParentLoop(Value val) {
 
   // Need to determine whether val is yielded by if/else.
   auto parentIf = val.getDefiningOp()->getParentOfType<scf::IfOp>();
-  if (!parentIf || parentIf.getResults().empty())
+  if (!parentIf || parentIf.getResults().empty()) {
     return parentLoop;
+  }
 
   auto thenYieldOp = parentIf.thenYield();
   auto thenYieldOpers = thenYieldOp.getOperands();

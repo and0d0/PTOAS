@@ -20,7 +20,7 @@ All user-facing symbols live here.  Low-level MLIR bindings are accessed
 internally as ``_pto`` (``from ptoas.mlir.dialects import pto as _pto``).
 """
 
-from ._diagnostics import unsupported_public_surface_error
+from ._diagnostics import deprecated, unsupported_public_surface_error
 
 # ── Types ─────────────────────────────────────────────────────────────────────
 from ._types import (           # noqa: F401
@@ -169,6 +169,7 @@ from ._allreduce import simt_allreduce_max, simt_allreduce_min, simt_allreduce_s
 
 # ── Decorator ─────────────────────────────────────────────────────────────────
 from ._jit import jit, KernelHandle, merge_jit_modules      # noqa: F401
+from ._func import func  # noqa: F401
 from ._subkernels import cube, simd, simt, tileop     # noqa: F401
 from ._pipe_namespace import pipe  # noqa: F401
 
