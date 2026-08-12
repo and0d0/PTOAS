@@ -36,6 +36,8 @@ from ptoas.mlir.ir import (
     VectorType,
 )
 
+from ._context import make_context
+
 # ── Address-space name → AddressSpace enum ───────────────────────────────────
 _ADDR_SPACE = {
     "ub":  _pto.AddressSpace.VEC,  # UB == unified buffer == VEC in PTO

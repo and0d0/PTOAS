@@ -34,9 +34,9 @@ def rewrite_jit_function(
     the optional control-flow rewrite is disabled.  This keeps Python's
     function-local assignment rules from leaking a section-local SSA value into
     a sibling physical section.
-    ``reject_bare_returns`` controls whether a bare ``return`` inside
-    rewritten control flow is rejected, while value returns are always
-    rejected because rewritten branches must communicate through locals.
+    ``reject_bare_returns`` controls whether ``return`` inside rewritten
+    control flow is rejected. ``@pto.jit`` keeps the historical behavior, while
+    ``@pto.func`` enables this because helper bodies must keep one helper ABI.
     """
     try:
         source = inspect.getsource(fn)
@@ -1023,7 +1023,7 @@ class _ControlFlowExitVisitor(ast.NodeVisitor):
         self._reject_bare_returns = reject_bare_returns
 
     def visit_Return(self, node):
-        if self._reject_bare_returns or node.value is not None:
+        if self._reject_bare_returns:
             self.exit_node = node
 
     def visit_Yield(self, node):
