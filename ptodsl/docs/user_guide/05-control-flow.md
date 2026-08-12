@@ -255,7 +255,7 @@ This lets you write a single kernel that specializes into different strategies b
 
 ## 5.5 Native Python control-flow rewrite
 
-`@pto.jit`, `@pto.func`, and named `@pto.cube` / `@pto.simd` / `@pto.simt`
+`@pto.jit`, `@pto.func`, and named `@pto.tileop` / `@pto.simt`
 callables rewrite supported native Python control flow before tracing their
 bodies. In the default mode, plain Python `if` and `for range(...)` in the
 rewritten scope become device-side control flow. Use `pto.const_expr(...)` and
