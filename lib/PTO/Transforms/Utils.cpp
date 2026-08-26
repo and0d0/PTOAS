@@ -278,6 +278,13 @@ std::optional<AddressSpaceAttr> GetBufferSpaceAttr(Value operand) {
     }
     return std::nullopt;
   }
+  if (auto convTy = dyn_cast<pto::ConvTileType>(operand.getType())) {
+    if (auto memorySpaceAttr = dyn_cast_or_null<AddressSpaceAttr>(
+            convTy.getMemorySpace())) {
+      return memorySpaceAttr;
+    }
+    return std::nullopt;
+  }
 
   if (!llvm::isa<MemRefType>(operand.getType())) {
     return std::nullopt;
@@ -500,6 +507,21 @@ static std::optional<uint64_t> getStaticTileBytes(TileBufType type) {
   return *elements * elemBytes;
 }
 
+static std::optional<uint64_t> getStaticConvTileBytes(ConvTileType type) {
+  unsigned elemBytes = getPTOStorageElemByteSize(type.getElementType());
+  const bool invalidCapacity = elemBytes == 0 || type.getBufferSize() <= 0;
+  if (invalidCapacity) {
+    return std::nullopt;
+  }
+  uint64_t bufferSize = static_cast<uint64_t>(type.getBufferSize());
+  const bool overflows =
+      bufferSize > std::numeric_limits<uint64_t>::max() / elemBytes;
+  if (overflows) {
+    return std::nullopt;
+  }
+  return bufferSize * elemBytes;
+}
+
 static std::optional<uint64_t> getConstantAddress(Value value) {
   IntegerAttr attr;
   bool isInvalid =
@@ -561,6 +583,14 @@ getStaticTileStrides(TileBufType type) {
 }
 
 static std::optional<AddressSpace> getTileAddressSpace(TileBufType type) {
+  auto attr = dyn_cast_or_null<AddressSpaceAttr>(type.getMemorySpace());
+  if (!attr) {
+    return std::nullopt;
+  }
+  return attr.getAddressSpace();
+}
+
+static std::optional<AddressSpace> getConvTileAddressSpace(ConvTileType type) {
   auto attr = dyn_cast_or_null<AddressSpaceAttr>(type.getMemorySpace());
   if (!attr) {
     return std::nullopt;
@@ -667,13 +697,27 @@ static std::optional<SemanticRange> makeTileRange(Value root, TileBufType type,
 
 static std::optional<SemanticRange> resolveAllocTileRange(AllocTileOp alloc) {
   auto tileType = dyn_cast<TileBufType>(alloc.getResult().getType());
-  std::optional<uint64_t> bytes =
-      tileType ? getStaticTileBytes(tileType) : std::nullopt;
-  if (!tileType || !bytes) {
+  if (tileType) {
+    std::optional<uint64_t> bytes = getStaticTileBytes(tileType);
+    if (!bytes) {
+      return std::nullopt;
+    }
+    return makeTileRange(alloc.getResult(), tileType, *bytes,
+                         getConstantAddress(alloc.getAddr()));
+  }
+
+  auto convType = dyn_cast<ConvTileType>(alloc.getResult().getType());
+  if (!convType) {
     return std::nullopt;
   }
-  return makeTileRange(alloc.getResult(), tileType, *bytes,
-                       getConstantAddress(alloc.getAddr()));
+
+  std::optional<uint64_t> bytes = getStaticConvTileBytes(convType);
+  if (!bytes) {
+    return std::nullopt;
+  }
+  return SemanticRange{
+      alloc.getResult(), 0, *bytes, getConstantAddress(alloc.getAddr()),
+      getConvTileAddressSpace(convType), std::nullopt, std::nullopt, 0};
 }
 
 static FailureOr<std::optional<uint64_t>> getMultiTileSlotBase(
