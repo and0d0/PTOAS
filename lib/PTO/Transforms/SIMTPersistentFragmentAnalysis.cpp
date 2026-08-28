@@ -224,7 +224,8 @@ getPersistentAccessLaneCount(Operation *access, Type accessType,
       return failure();
     }
     int64_t vectorLaneCount = vectorType.getDimSize(0);
-    if (vectorLaneCount != mlir::pto::kValue2 && vectorLaneCount != 4) {
+    if (vectorLaneCount != mlir::pto::kValue2 &&
+        vectorLaneCount != mlir::pto::kValue4) {
       access->emitOpError()
           << "persistent SIMT fragment currently supports only 2- or 4-lane "
              "vector accesses, got "
@@ -516,10 +517,11 @@ analyzeResidentElements(DominanceInfo &dominance,
 
 static FailureOr<int64_t> getPersistentSlotWidth(Type type, Operation *anchor) {
   if (auto intType = dyn_cast<IntegerType>(type)) {
-    if (intType.getWidth() <= mlir::pto::kValue32) {
+    const unsigned intWidth = intType.getWidth();
+    if (intWidth <= mlir::pto::kValue32) {
       return 1;
     }
-    if (intType.getWidth() <= 64) {
+    if (intWidth <= mlir::pto::kValue64) {
       return kWideValueSlotWidth;
     }
   } else if (type.isF16() || type.isBF16() || type.isF32()) {
