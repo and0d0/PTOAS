@@ -57,6 +57,7 @@
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/LoopUnrollUtils.h"
+#include "PTO/Support/CodeConstants.h"
 #include "PTO/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -227,8 +228,8 @@ struct PTOUnrollLoopsImpl {
 
     // Drop the factor attribute up front so neither the unrolled main loop
     // nor the epilogue clone keeps it.  The attribute is restored on failure.
-    IntegerAttr factorAttr =
-        IntegerAttr::get(IntegerType::get(forOp.getContext(), 32), factor);
+    IntegerAttr factorAttr = IntegerAttr::get(
+        IntegerType::get(forOp.getContext(), mlir::pto::kValue32), factor);
     forOp->removeAttr(pto::kUnrollFactorAttrName);
 
     if (failed(loopUnrollByFactor(forOp, static_cast<uint64_t>(factor)))) {
@@ -363,7 +364,7 @@ struct PTOUnrollLoopsImpl {
     // round consumes the annotation of at least one loop, so the loop
     // terminates.
     while (true) {
-      SmallVector<scf::ForOp, 8> annotated;
+      SmallVector<scf::ForOp, mlir::pto::kValue8> annotated;
       func.walk<WalkOrder::PostOrder>([&](scf::ForOp forOp) {
         if (forOp->hasAttr(pto::kUnrollAttrName) ||
             forOp->hasAttr(pto::kUnrollFactorAttrName))
