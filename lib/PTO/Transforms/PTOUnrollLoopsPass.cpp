@@ -101,11 +101,13 @@ static std::optional<int64_t> getStaticTripCount(scf::ForOp forOp) {
   std::optional<int64_t> lb = getConstantIntValue(forOp.getLowerBound());
   std::optional<int64_t> ub = getConstantIntValue(forOp.getUpperBound());
   std::optional<int64_t> step = getConstantIntValue(forOp.getStep());
-  if (!lb || !ub || !step || *step <= 0 || *ub <= *lb)
+  if (!lb || !ub || !step || *step <= 0 || *ub <= *lb) {
     return std::nullopt;
+  }
   int64_t tripCount = (*ub - *lb + *step - 1) / *step;
-  if (tripCount <= 0)
+  if (tripCount <= 0) {
     return std::nullopt;
+  }
   return tripCount;
 }
 
@@ -149,14 +151,16 @@ struct PTOUnrollLoopsImpl {
     // warning beforehand.
     Location loc = forOp.getLoc();
     if (failed(
-            loopUnrollByFactor(forOp, static_cast<uint64_t>(*tripCount))))
+            loopUnrollByFactor(forOp, static_cast<uint64_t>(*tripCount)))) {
       return UnrollOutcome::Unchanged;
+    }
 
-    if (maxFullUnrollTripCount >= 0 && *tripCount > maxFullUnrollTripCount)
+    if (maxFullUnrollTripCount >= 0 && *tripCount > maxFullUnrollTripCount) {
       mlir::emitWarning(loc)
           << "fully unrolled a loop with trip count " << *tripCount
           << ", which exceeds max-full-unroll-trip-count="
           << maxFullUnrollTripCount;
+    }
 
     return UnrollOutcome::Changed;
   }
@@ -376,12 +380,15 @@ struct PTOUnrollLoopsImpl {
     bool valid = true;
     func.walk([&](scf::ForOp forOp) {
       if (forOp->hasAttr(pto::kUnrollAttrName) ||
-          forOp->hasAttr(pto::kUnrollFactorAttrName))
-        if (failed(validateHint(forOp)))
+          forOp->hasAttr(pto::kUnrollFactorAttrName)) {
+        if (failed(validateHint(forOp))) {
           valid = false;
+        }
+      }
     });
-    if (!valid)
+    if (!valid) {
       return failure();
+    }
 
     // Phase 2: unroll.  Only annotated loops are ever touched: unannotated
     // IR must come out byte-identical.  Unrolling an outer loop clones
@@ -402,11 +409,13 @@ struct PTOUnrollLoopsImpl {
       SmallVector<scf::ForOp, mlir::pto::kValue8> annotated;
       func.walk<WalkOrder::PostOrder>([&](scf::ForOp forOp) {
         if (forOp->hasAttr(pto::kUnrollAttrName) ||
-            forOp->hasAttr(pto::kUnrollFactorAttrName))
+            forOp->hasAttr(pto::kUnrollFactorAttrName)) {
           annotated.push_back(forOp);
+        }
       });
-      if (annotated.empty())
+      if (annotated.empty()) {
         return success();
+      }
 
       bool changed = false;
       for (scf::ForOp forOp : annotated) {
@@ -418,8 +427,9 @@ struct PTOUnrollLoopsImpl {
           changed = true;
         }
       }
-      if (!changed)
+      if (!changed) {
         return success();
+      }
     }
   }
 };
@@ -430,8 +440,9 @@ struct PTOUnrollLoops
 
   void runOnOperation() override {
     PTOUnrollLoopsImpl impl(maxFullUnrollTripCount, maxUnrollFactor);
-    if (failed(impl.run(getOperation())))
+    if (failed(impl.run(getOperation()))) {
       signalPassFailure();
+    }
   }
 };
 
@@ -443,8 +454,9 @@ struct PTOUnrollSIMTFor
 
   void runOnOperation() override {
     PTOUnrollLoopsImpl impl(maxFullUnrollTripCount, maxUnrollFactor);
-    if (failed(impl.run(getOperation())))
+    if (failed(impl.run(getOperation()))) {
       signalPassFailure();
+    }
   }
 };
 
