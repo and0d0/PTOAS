@@ -860,7 +860,7 @@ static std::optional<std::string> getEmitCTileTypeString(pto::TileBufType type) 
   int64_t rows = shape[0];
   int64_t cols = shape[1];
 
-  auto render = [&](int64_t dim, int dimIdx) {
+  auto render = [elemTy, blayout](int64_t dim, int dimIdx) {
     return renderTileTemplateDim(dim, elemTy, blayout, dimIdx);
   };
 
@@ -1369,7 +1369,8 @@ static FailureOr<Operation *> findPeerFixpipeConsumerInit(Operation *producerIni
 
   Operation *matchedInit = nullptr;
   unsigned matchedInitCount = 0;
-  peerFunc.walk([&](Operation *candidate) {
+  peerFunc.walk([&matchedInit, &matchedInitCount, ownerFuncAttr,
+                 reserveNameAttr, dirMaskAttr, peerFunc](Operation *candidate) {
     if (!isa<InitializeL2LPipeOp, InitializeL2G2LPipeOp>(candidate)) {
       return WalkResult::advance();
     }
@@ -1419,9 +1420,9 @@ static FailureOr<TileBufType> resolveFixpipeConsumerTileType(Value pipeHandle) {
   Type resolvedType;
   bool hasMismatch = false;
 
-  auto collectFromFunc = [&](func::FuncOp funcOp,
-                             llvm::function_ref<bool(pto::TPopOp)> matchesPop) {
-    funcOp.walk([&](pto::TPopOp pop) {
+  auto collectFromFunc = [&resolvedType, &hasMismatch](
+      func::FuncOp funcOp, llvm::function_ref<bool(pto::TPopOp)> matchesPop) {
+    funcOp.walk([&resolvedType, &hasMismatch, &matchesPop](pto::TPopOp pop) {
       if (!matchesPop(pop)) {
         return WalkResult::advance();
       }
@@ -1461,7 +1462,7 @@ static FailureOr<TileBufType> resolveFixpipeConsumerTileType(Value pipeHandle) {
 static LogicalResult rematerializeFixpipeQuantBindings(ModuleOp mop) {
   SmallVector<Operation *> eraseList;
   auto processBlock =
-      [&](auto &&self, Block &block) -> LogicalResult {
+      [&eraseList](auto &&self, Block &block) -> LogicalResult {
     llvm::DenseMap<int32_t, SetQuantScalarOp> activeScalarById;
     llvm::DenseMap<int32_t, SetQuantVectorOp> activeVectorById;
     SmallVector<Operation *> originalOps;
