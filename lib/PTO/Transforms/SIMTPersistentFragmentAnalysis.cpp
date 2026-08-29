@@ -254,11 +254,15 @@ getPersistentAccessLaneCount(Operation *access, Type accessType,
   return laneCount;
 }
 
-static LogicalResult recordAccess(Operation *access, Type accessType,
-                                  int64_t byteOffset, func::FuncOp parentFunc,
-                                  LLVM::AllocaOp allocaOp,
-                                  const FragmentShape &shape,
-                                  PersistentAccessDiscovery &discovery) {
+struct PersistentAccessRange {
+  unsigned laneCount;
+  int64_t firstElementOffset;
+};
+
+static FailureOr<PersistentAccessRange> validatePersistentAccessRange(
+    Operation *access, Type accessType, int64_t byteOffset,
+    func::FuncOp parentFunc, LLVM::AllocaOp allocaOp,
+    const FragmentShape &shape) {
   pto::SectionSimtOp section = access->getParentOfType<pto::SectionSimtOp>();
   if (!section) {
     return access->emitOpError(
@@ -309,18 +313,33 @@ static LogicalResult recordAccess(Operation *access, Type accessType,
            << "size " << shape.totalByteSize;
   }
 
+  return PersistentAccessRange{*laneCount,
+                               byteOffset / shape.elementByteSize};
+}
+
+static LogicalResult recordAccess(Operation *access, Type accessType,
+                                  int64_t byteOffset, func::FuncOp parentFunc,
+                                  LLVM::AllocaOp allocaOp,
+                                  const FragmentShape &shape,
+                                  PersistentAccessDiscovery &discovery) {
+  pto::SectionSimtOp section = access->getParentOfType<pto::SectionSimtOp>();
+  FailureOr<PersistentAccessRange> accessRange = validatePersistentAccessRange(
+      access, accessType, byteOffset, parentFunc, allocaOp, shape);
+  if (failed(accessRange)) {
+    return failure();
+  }
+
   if (discovery.accessIndices.count(access)) {
     return access->emitOpError(
         "persistent SIMT fragment access was visited more than once");
   }
 
-  int64_t firstElementOffset = byteOffset / shape.elementByteSize;
   SmallVector<unsigned> accessIndices;
-  accessIndices.reserve(*laneCount);
-  for (unsigned laneIndex = 0; laneIndex < *laneCount; ++laneIndex) {
+  accessIndices.reserve(accessRange->laneCount);
+  for (unsigned laneIndex = 0; laneIndex < accessRange->laneCount; ++laneIndex) {
     int64_t elementOffset;
-    if (llvm::AddOverflow(firstElementOffset, static_cast<int64_t>(laneIndex),
-                          elementOffset)) {
+    if (llvm::AddOverflow(accessRange->firstElementOffset,
+                          static_cast<int64_t>(laneIndex), elementOffset)) {
       return access->emitOpError(
           "persistent SIMT fragment lane element offset overflows signed "
           "i64");
