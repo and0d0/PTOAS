@@ -333,7 +333,10 @@ def AllocTileOp : PTO_Op<"alloc_tile", [AttrSizedOperandSegments]> {
     Optional<Index>:$valid_col
   );
 
-  let results = (outs AnyTypeOf<[TileBufType, ConvTileType]>:$result);
+  // ConvTile values reuse the same allocation surface but carry a different
+  // type/metadata payload. The lowering selects the emitted C++ type from the
+  // result type.
+  let results = (outs AnyTypeOf<[TileBufType, ConvTileType], "TileBuf or ConvTile">:$result);
 
   let assemblyFormat = [{
     (`addr` `=` $addr^)?
@@ -1362,6 +1365,12 @@ def TMovOp  : PTO_TOp<"tmov", [
             return as.getAddressSpace();
           return std::nullopt;
         }
+        if (auto ct = llvm::dyn_cast<::mlir::pto::ConvTileType>(ty)) {
+          if (auto as = llvm::dyn_cast_or_null<::mlir::pto::AddressSpaceAttr>(
+                  ct.getMemorySpace()))
+            return as.getAddressSpace();
+          return std::nullopt;
+        }
         return std::nullopt;
       };
 
@@ -1881,6 +1890,57 @@ def SetQuantVectorOp : PTO_Op<"set_quant_vector", [
   let assemblyFormat = [{
     `(` $scaling_tile `:` qualified(type($scaling_tile)) `)`
     `{` `id` `=` $id `}` attr-dict
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// ConvTile / IMG2COL config ops
+//===----------------------------------------------------------------------===//
+
+def SetFmatrixOp : PTO_Op<"set_fmatrix", [MemoryEffects<[MemWrite]>]> {
+  let summary = "Set FMATRIX registers from a ConvTile config";
+  let arguments = (ins ConvTileType:$src);
+  let results = (outs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $src attr-dict `:` qualified(type($src))
+  }];
+}
+
+def SetImg2colRptOp : PTO_Op<"set_img2col_rpt", [MemoryEffects<[MemWrite]>]> {
+  let summary = "Set IMG2COL repeat control from a ConvTile config";
+  let arguments = (ins ConvTileType:$src);
+  let results = (outs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $src attr-dict `:` qualified(type($src))
+  }];
+}
+
+def SetImg2colPaddingOp : PTO_Op<"set_img2col_padding", [MemoryEffects<[MemWrite]>]> {
+  let summary = "Set IMG2COL padding control from a ConvTile config";
+  let arguments = (ins ConvTileType:$src);
+  let results = (outs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $src attr-dict `:` qualified(type($src))
+  }];
+}
+
+def TImg2colOp : PTO_Op<"timg2col", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Image-to-column transform from ConvTile to TileBuf";
+  let arguments = (ins
+    TileBufType:$dst,
+    ConvTileType:$src,
+    DefaultValuedOptionalAttr<I32Attr, "0">:$posM,
+    DefaultValuedOptionalAttr<I32Attr, "0">:$posK
+  );
+  let results = (outs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $dst `,` $src attr-dict `:` qualified(type($dst)) `,` qualified(type($src))
   }];
 }
 
@@ -6241,7 +6301,6 @@ def TDeInterleaveOp: PTO_TOp<"tdeinterleave", [
     ::mlir::Value getDst1() { return getDsts()[1]; }
   }];
 }
-
 def TRowProdOp: PTO_TOp<"trowprod", [
   PTO_DpsInitOpInterface,
   OpPipeInterface,

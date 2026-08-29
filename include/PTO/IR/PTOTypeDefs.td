@@ -230,19 +230,13 @@ def TileBufType : TypeDef<PTO_Dialect, "TileBuf"> {
 
 def ConvTileType : TypeDef<PTO_Dialect, "ConvTile"> {
   let mnemonic = "conv_tile";
-  let summary = "A convolution tile buffer with an explicit physical capacity";
-  let description = [{
-    Represents the PTO-ISA ConvTile object. Shape describes the logical
-    convolution dimensions, while bufferSize is the number of storage elements
-    reserved by the hardware tile object.
-  }];
-
   let parameters = (ins
     ArrayRefParameter<"int64_t">:$shape,
     "mlir::Type":$elementType,
-    "mlir::Attribute":$memorySpace,
-    "int64_t":$bufferSize,
-    "mlir::pto::ConvLayoutAttr":$layout
+    "mlir::IntegerAttr":$bufferSize,
+    "mlir::pto::AddressSpaceAttr":$memorySpace,
+    "mlir::pto::LayoutAttr":$layout,
+    "mlir::pto::ConvTileConfigAttr":$config
   );
 
   let hasCustomAssemblyFormat = 1;
@@ -250,11 +244,16 @@ def ConvTileType : TypeDef<PTO_Dialect, "ConvTile"> {
   let extraClassDeclaration = [{
     int64_t getRank() const { return getShape().size(); }
     int64_t getDimSize(unsigned idx) const { return getShape()[idx]; }
-    bool hasDynamicShape() const {
-      return llvm::any_of(getShape(), [](int64_t dim) {
-        return dim == mlir::ShapedType::kDynamic;
-      });
+    int64_t getNumElements() const {
+      int64_t num = 1;
+      for (int64_t dim : getShape()) num *= dim;
+      return num;
     }
+
+    int64_t getBufferSizeValue() const { return getBufferSize().getInt(); }
+
+    mlir::pto::ConvTileConfigAttr getConfigAttr() const;
+    bool hasNonDefaultConfig() const;
   }];
 }
 

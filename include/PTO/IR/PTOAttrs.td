@@ -1278,6 +1278,78 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
   }];
 }
 
+// ---------- conv_tile_config ----------
+def ConvTileConfigAttr : AttrDef<PTO_Dialect, "ConvTileConfig"> {
+  let mnemonic = "conv_tile_config";
+  let parameters = (ins
+    "mlir::IntegerAttr":$fmapH,
+    "mlir::IntegerAttr":$fmapW,
+    ArrayRefParameter<"int64_t">:$padList,
+    "mlir::IntegerAttr":$filterH,
+    "mlir::IntegerAttr":$filterW,
+    "mlir::IntegerAttr":$dilationH,
+    "mlir::IntegerAttr":$dilationW,
+    "mlir::IntegerAttr":$strideH,
+    "mlir::IntegerAttr":$strideW,
+    "mlir::Attribute":$padValue,
+    "mlir::IntegerAttr":$channelSize,
+    "mlir::IntegerAttr":$repeatStride,
+    "mlir::IntegerAttr":$repeatTime,
+    "mlir::IntegerAttr":$repeatMode,
+    "mlir::IntegerAttr":$dstStride,
+    "mlir::IntegerAttr":$dstMposition,
+    "mlir::BoolAttr":$transpose
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let builders = [
+    AttrBuilder<(ins
+      "mlir::IntegerAttr":$fmapH,
+      "mlir::IntegerAttr":$fmapW,
+      ArrayRefParameter<"int64_t">:$padList,
+      "mlir::IntegerAttr":$filterH,
+      "mlir::IntegerAttr":$filterW,
+      "mlir::IntegerAttr":$dilationH,
+      "mlir::IntegerAttr":$dilationW,
+      "mlir::IntegerAttr":$strideH,
+      "mlir::IntegerAttr":$strideW,
+      "mlir::Attribute":$padValue,
+      "mlir::IntegerAttr":$channelSize,
+      "mlir::IntegerAttr":$repeatStride,
+      "mlir::IntegerAttr":$repeatTime,
+      "mlir::IntegerAttr":$repeatMode,
+      "mlir::IntegerAttr":$dstStride,
+      "mlir::IntegerAttr":$dstMposition,
+      "mlir::BoolAttr":$transpose
+    )>
+  ];
+
+  let extraClassDeclaration = [{
+    static ConvTileConfigAttr getDefault(MLIRContext *ctx);
+    bool isDefault() const;
+
+    static LogicalResult verify(function_ref<InFlightDiagnostic()> emitError,
+                                mlir::IntegerAttr fmapH,
+                                mlir::IntegerAttr fmapW,
+                                ArrayRef<int64_t> padList,
+                                mlir::IntegerAttr filterH,
+                                mlir::IntegerAttr filterW,
+                                mlir::IntegerAttr dilationH,
+                                mlir::IntegerAttr dilationW,
+                                mlir::IntegerAttr strideH,
+                                mlir::IntegerAttr strideW,
+                                mlir::Attribute padValue,
+                                mlir::IntegerAttr channelSize,
+                                mlir::IntegerAttr repeatStride,
+                                mlir::IntegerAttr repeatTime,
+                                mlir::IntegerAttr repeatMode,
+                                mlir::IntegerAttr dstStride,
+                                mlir::IntegerAttr dstMposition,
+                                mlir::BoolAttr transpose);
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // QuantType
 //===----------------------------------------------------------------------===//
