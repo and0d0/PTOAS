@@ -209,21 +209,18 @@ LogicalResult emitLayoutSupportContract(Operation *op,
   return emitLayoutContract(op, diagOS, text);
 }
 
-LogicalResult
-emitHelperMaterializationContract(Operation *helper, Type sourceType,
-                                  Type resultType, StringRef helperName,
-                                  StringRef reason, llvm::raw_ostream *diagOS) {
-  auto emitFallback = [diagOS, helper, helperName, reason]() {
-    return emitLayoutContract(
-        helper, diagOS,
-        Twine(helperName) +
-            " has no registered materialization support: " + reason);
-  };
+static LogicalResult emitHelperMaterializationFallback(
+    Operation *helper, StringRef helperName, StringRef reason,
+    llvm::raw_ostream *diagOS) {
+  return emitLayoutContract(
+      helper, diagOS,
+      Twine(helperName) +
+          " has no registered materialization support: " + reason);
+}
 
-  if (helper->getNumResults() != 1 || !helper->getResult(0).hasOneUse()) {
-    return emitFallback();
-  }
-
+static LogicalResult emitHelperMaterializationDiagnostic(
+    Operation *helper, Type sourceType, Type resultType, StringRef helperName,
+    StringRef reason, llvm::raw_ostream *diagOS) {
   OpOperand &use = *helper->getResult(0).use_begin();
   Operation *requester = use.getOwner();
   std::string message;
@@ -240,6 +237,21 @@ emitHelperMaterializationContract(Operation *helper, Type sourceType,
       << " (" << reason << ")";
   mirrorDiagnostic(diagOS, Twine(kVMIDiagLayoutContractPrefix) + message);
   return failure();
+}
+
+LogicalResult
+emitHelperMaterializationContract(Operation *helper, Type sourceType,
+                                  Type resultType, StringRef helperName,
+                                  StringRef reason, llvm::raw_ostream *diagOS) {
+  const bool invalidMaterialization =
+      helper->getNumResults() != 1 || !helper->getResult(0).hasOneUse();
+  if (invalidMaterialization) {
+    return emitHelperMaterializationFallback(helper, helperName, reason,
+                                             diagOS);
+  }
+
+  return emitHelperMaterializationDiagnostic(helper, sourceType, resultType,
+                                             helperName, reason, diagOS);
 }
 
 LogicalResult verifyBoundaryType(Operation *owner, Type type,
