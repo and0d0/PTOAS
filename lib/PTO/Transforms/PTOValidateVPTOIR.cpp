@@ -424,6 +424,97 @@ private:
   ModuleOp module;
 };
 
+static LogicalResult validateKeepResumeSurface(ModuleOp module) {
+  WalkResult keepResumeWalk = module.walk([&](Operation *op) {
+    if (!isa<KeepOp, ResumeOp, SyncthreadsOp>(op)) {
+      return WalkResult::advance();
+    }
+    func::FuncOp func = op->getParentOfType<func::FuncOp>();
+    if (!func || !func->hasAttr(pto::kPTOSimtEntryAttrName)) {
+      op->emitOpError()
+          << "must appear inside a function marked with '"
+          << pto::kPTOSimtEntryAttrName << "'";
+      return WalkResult::interrupt();
+    }
+    Block *block = op->getBlock();
+    if (auto resume = dyn_cast<ResumeOp>(op)) {
+      if (failed(verifySimtKeepResumeSlotRange(resume))) {
+        return WalkResult::interrupt();
+      }
+      Operation *first = getFirstNonConstantLikeOp(block);
+      if (!first || !isa<ResumeOp>(first)) {
+        op->emitOpError()
+            << "must be in the contiguous SIMT resume prologue group after "
+               "constant-like operations";
+        return WalkResult::interrupt();
+      }
+      bool found = false;
+      for (Operation *cur = first; cur; cur = cur->getNextNode()) {
+        if (!isa<ResumeOp>(cur)) {
+          break;
+        }
+        if (cur == op) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        op->emitOpError()
+            << "must be in the contiguous SIMT resume prologue group after "
+               "constant-like operations";
+        return WalkResult::interrupt();
+      }
+      if (failed(verifyUniqueResumeGroupSlots(resume, first))) {
+        return WalkResult::interrupt();
+      }
+    }
+    if (auto keep = dyn_cast<KeepOp>(op)) {
+      if (failed(verifySimtKeepResumeSlotRange(keep))) {
+        return WalkResult::interrupt();
+      }
+      Operation *terminator = block ? block->getTerminator() : nullptr;
+      if (!terminator || !isa<func::ReturnOp>(terminator)) {
+        op->emitOpError()
+            << "must be placed in the SIMT epilogue before func.return";
+        return WalkResult::interrupt();
+      }
+
+      Operation *cur = terminator->getPrevNode();
+      while (cur && isa<SyncthreadsOp>(cur)) {
+        cur = cur->getPrevNode();
+      }
+      Operation *lastKeep = cur;
+      if (!lastKeep || !isa<KeepOp>(lastKeep)) {
+        op->emitOpError()
+            << "must be placed in the SIMT epilogue before func.return; "
+               "only 'pto.syncthreads' may appear between the final "
+               "'pto.keep' group and func.return";
+        return WalkResult::interrupt();
+      }
+
+      Operation *firstKeep = lastKeep;
+      while (Operation *prev = firstKeep->getPrevNode()) {
+        if (!isa<KeepOp>(prev)) {
+          break;
+        }
+        firstKeep = prev;
+      }
+      if (!isOpInRange(op, firstKeep, lastKeep)) {
+        op->emitOpError()
+            << "must be in the contiguous SIMT keep epilogue group "
+               "immediately before optional 'pto.syncthreads' and "
+               "func.return";
+        return WalkResult::interrupt();
+      }
+      if (failed(verifyUniqueKeepGroupSlots(keep, firstKeep, lastKeep))) {
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+  return keepResumeWalk.wasInterrupted() ? failure() : success();
+}
+
 class VPTOLegalityValidator {
 public:
   VPTOLegalityValidator(ModuleOp module, VPTOLegalityStage stage,
@@ -494,6 +585,49 @@ private:
            << formatExpectedMaskType(*expected);
   }
 
+  static std::optional<unsigned> getVstsValueWidth(Type elementType) {
+    if (auto elementIntType = dyn_cast<IntegerType>(elementType)) {
+      return elementIntType.getWidth();
+    }
+    const bool isHalfWidth = elementType.isF16() || elementType.isBF16();
+    if (isHalfWidth) {
+      return mlir::pto::kValue16;
+    }
+    if (elementType.isF32()) {
+      return mlir::pto::kValue32;
+    }
+    if (elementType.isF64()) {
+      return mlir::pto::kValue64;
+    }
+    return std::nullopt;
+  }
+
+  static std::optional<VPTOMaskGranularity>
+  getVstsMaskGranularityForDistribution(StringRef dist, unsigned width) {
+    if (dist == "PK_B16" && width == mlir::pto::kValue8) {
+      return VPTOMaskGranularity::B16;
+    }
+    if (dist == "PK_B32" && width == mlir::pto::kValue16) {
+      return VPTOMaskGranularity::B32;
+    }
+    if (dist == "PK_B64" && width == mlir::pto::kValue32) {
+      return VPTOMaskGranularity::B32;
+    }
+    if (dist == "PK4_B32" && width == mlir::pto::kValue8) {
+      return VPTOMaskGranularity::B32;
+    }
+    if (dist == "MRG4CHN_B8" && width == mlir::pto::kValue8) {
+      return VPTOMaskGranularity::B32;
+    }
+    if (dist == "MRG2CHN_B8" && width == mlir::pto::kValue8) {
+      return VPTOMaskGranularity::B16;
+    }
+    if (dist == "MRG2CHN_B16" && width == mlir::pto::kValue16) {
+      return VPTOMaskGranularity::B32;
+    }
+    return std::nullopt;
+  }
+
   static std::optional<VPTOMaskGranularity>
   inferVstsMaskGranularityOverride(Operation *op) {
     Value value;
@@ -514,62 +648,12 @@ private:
     }
 
     StringRef dist = distAttr.getValue();
-    auto elementType = valueType.getElementType();
-    unsigned width = 0;
-    if (auto elementIntType = dyn_cast<IntegerType>(elementType)) {
-      width = elementIntType.getWidth();
-    } else if (elementType.isF16() || elementType.isBF16()) {
-      width = mlir::pto::kValue16;
-    } else if (elementType.isF32()) {
-      width = mlir::pto::kValue32;
-    } else if (elementType.isF64()) {
-      width = mlir::pto::kValue64;
-    } else {
+    std::optional<unsigned> width =
+        getVstsValueWidth(valueType.getElementType());
+    if (!width) {
       return std::nullopt;
     }
-
-    if (dist == "PK_B16") {
-      if (width == mlir::pto::kValue8) {
-        return VPTOMaskGranularity::B16;
-      }
-      return std::nullopt;
-    }
-    if (dist == "PK_B32") {
-      if (width == mlir::pto::kValue16) {
-        return VPTOMaskGranularity::B32;
-      }
-      return std::nullopt;
-    }
-    if (dist == "PK_B64") {
-      if (width == mlir::pto::kValue32) {
-        return VPTOMaskGranularity::B32;
-      }
-      return std::nullopt;
-    }
-    if (dist == "PK4_B32") {
-      if (width == mlir::pto::kValue8) {
-        return VPTOMaskGranularity::B32;
-      }
-      return std::nullopt;
-    }
-    if (dist == "MRG4CHN_B8") {
-      if (width == mlir::pto::kValue8) {
-        return VPTOMaskGranularity::B32;
-      }
-      return std::nullopt;
-    }
-    if (dist == "MRG2CHN_B8") {
-      if (width == mlir::pto::kValue8) {
-        return VPTOMaskGranularity::B16;
-      }
-      return std::nullopt;
-    }
-    if (dist == "MRG2CHN_B16") {
-      if (width == mlir::pto::kValue16) {
-        return VPTOMaskGranularity::B32;
-      }
-    }
-    return std::nullopt;
+    return getVstsMaskGranularityForDistribution(dist, *width);
   }
 
   static LogicalResult validateSameMaskGranularity(Operation *op, Type lhsType,
@@ -998,94 +1082,7 @@ private:
       }
     }
 
-    WalkResult keepResumeWalk = helper.getModule().walk([&](Operation *op) {
-      if (!isa<KeepOp, ResumeOp, SyncthreadsOp>(op)) {
-        return WalkResult::advance();
-      }
-      func::FuncOp func = op->getParentOfType<func::FuncOp>();
-      if (!func || !func->hasAttr(pto::kPTOSimtEntryAttrName)) {
-        op->emitOpError()
-            << "must appear inside a function marked with '"
-            << pto::kPTOSimtEntryAttrName << "'";
-        return WalkResult::interrupt();
-      }
-      Block *block = op->getBlock();
-      if (auto resume = dyn_cast<ResumeOp>(op)) {
-        if (failed(verifySimtKeepResumeSlotRange(resume))) {
-          return WalkResult::interrupt();
-        }
-        Operation *first = getFirstNonConstantLikeOp(block);
-        if (!first || !isa<ResumeOp>(first)) {
-          op->emitOpError()
-              << "must be in the contiguous SIMT resume prologue group after "
-                 "constant-like operations";
-          return WalkResult::interrupt();
-        }
-        bool found = false;
-        for (Operation *cur = first; cur; cur = cur->getNextNode()) {
-          if (!isa<ResumeOp>(cur)) {
-            break;
-          }
-          if (cur == op) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          op->emitOpError()
-              << "must be in the contiguous SIMT resume prologue group after "
-                 "constant-like operations";
-          return WalkResult::interrupt();
-        }
-        if (failed(verifyUniqueResumeGroupSlots(resume, first))) {
-          return WalkResult::interrupt();
-        }
-      }
-      if (auto keep = dyn_cast<KeepOp>(op)) {
-        if (failed(verifySimtKeepResumeSlotRange(keep))) {
-          return WalkResult::interrupt();
-        }
-        Operation *terminator = block ? block->getTerminator() : nullptr;
-        if (!terminator || !isa<func::ReturnOp>(terminator)) {
-          op->emitOpError()
-              << "must be placed in the SIMT epilogue before func.return";
-          return WalkResult::interrupt();
-        }
-
-        Operation *cur = terminator->getPrevNode();
-        while (cur && isa<SyncthreadsOp>(cur)) {
-          cur = cur->getPrevNode();
-        }
-        Operation *lastKeep = cur;
-        if (!lastKeep || !isa<KeepOp>(lastKeep)) {
-          op->emitOpError()
-              << "must be placed in the SIMT epilogue before func.return; "
-                 "only 'pto.syncthreads' may appear between the final "
-                 "'pto.keep' group and func.return";
-          return WalkResult::interrupt();
-        }
-
-        Operation *firstKeep = lastKeep;
-        while (Operation *prev = firstKeep->getPrevNode()) {
-          if (!isa<KeepOp>(prev)) {
-            break;
-          }
-          firstKeep = prev;
-        }
-        if (!isOpInRange(op, firstKeep, lastKeep)) {
-          op->emitOpError()
-              << "must be in the contiguous SIMT keep epilogue group "
-                 "immediately before optional 'pto.syncthreads' and "
-                 "func.return";
-          return WalkResult::interrupt();
-        }
-        if (failed(verifyUniqueKeepGroupSlots(keep, firstKeep, lastKeep))) {
-          return WalkResult::interrupt();
-        }
-      }
-      return WalkResult::advance();
-    });
-    if (keepResumeWalk.wasInterrupted()) {
+    if (failed(validateKeepResumeSurface(helper.getModule()))) {
       return failure();
     }
     return success();

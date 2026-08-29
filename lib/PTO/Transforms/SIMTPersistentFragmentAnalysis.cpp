@@ -642,35 +642,10 @@ materializeResidentAccessLanes(const PersistentMaterializationPlan &plan,
   return success();
 }
 
-static LogicalResult
-analyzePersistentFragment(LLVM::AllocaOp allocaOp, DominanceInfo &dominance,
-                          const PersistentMaterializationPlan &plan,
-                          PersistentFragmentAnalysis &fragment,
-                          PersistentAccessDiscovery &discovery) {
-  func::FuncOp parentFunc = allocaOp->getParentOfType<func::FuncOp>();
-  if (!parentFunc) {
-    return allocaOp.emitOpError("must be nested in a func.func");
-  }
-
-  if (!isa<UnitAttr>(allocaOp->getAttr(kPersistentAttrName))) {
-    return allocaOp.emitOpError()
-           << "expects '" << kPersistentAttrName << "' to be a unit attribute";
-  }
-  if (allocaOp->getParentOfType<pto::SectionSimtOp>()) {
-    return allocaOp.emitOpError(
-        "persistent SIMT fragment must be defined outside pto.section.simt");
-  }
-  if (parentFunc->hasAttr(pto::kPTOSimtEntryAttrName)) {
-    return allocaOp.emitOpError(
-        "persistent SIMT fragment must be defined before SIMT outlining");
-  }
-
+static LogicalResult discoverPersistentFragmentAccesses(
+    LLVM::AllocaOp allocaOp, func::FuncOp parentFunc, DominanceInfo &dominance,
+    const FragmentShape &shape, PersistentAccessDiscovery &discovery) {
   DataLayout dataLayout = DataLayout::closest(allocaOp);
-  FailureOr<FragmentShape> shape = getFragmentShape(allocaOp, dataLayout);
-  if (failed(shape)) {
-    return failure();
-  }
-
   SmallVector<PointerWorkItem> pointerWorklist{{allocaOp.getRes(), 0}};
   llvm::DenseMap<Value, int64_t> pointerOffsets;
 
@@ -723,7 +698,7 @@ analyzePersistentFragment(LLVM::AllocaOp allocaOp, DominanceInfo &dominance,
 
       if (auto load = dyn_cast<LLVM::LoadOp>(user)) {
         if (failed(recordAccess(load, load.getRes().getType(), item.byteOffset,
-                                parentFunc, allocaOp, *shape, discovery))) {
+                                parentFunc, allocaOp, shape, discovery))) {
           return failure();
         }
         continue;
@@ -736,7 +711,7 @@ analyzePersistentFragment(LLVM::AllocaOp allocaOp, DominanceInfo &dominance,
               "value");
         }
         if (failed(recordAccess(store, store.getValue().getType(),
-                                item.byteOffset, parentFunc, allocaOp, *shape,
+                                item.byteOffset, parentFunc, allocaOp, shape,
                                 discovery))) {
           return failure();
         }
@@ -753,6 +728,42 @@ analyzePersistentFragment(LLVM::AllocaOp allocaOp, DominanceInfo &dominance,
     return allocaOp.emitOpError(
         "persistent SIMT fragment requires at least one llvm.load or "
         "llvm.store inside pto.section.simt");
+  }
+  return success();
+}
+
+static LogicalResult
+analyzePersistentFragment(LLVM::AllocaOp allocaOp, DominanceInfo &dominance,
+                          const PersistentMaterializationPlan &plan,
+                          PersistentFragmentAnalysis &fragment,
+                          PersistentAccessDiscovery &discovery) {
+  func::FuncOp parentFunc = allocaOp->getParentOfType<func::FuncOp>();
+  if (!parentFunc) {
+    return allocaOp.emitOpError("must be nested in a func.func");
+  }
+
+  if (!isa<UnitAttr>(allocaOp->getAttr(kPersistentAttrName))) {
+    return allocaOp.emitOpError()
+           << "expects '" << kPersistentAttrName << "' to be a unit attribute";
+  }
+  if (allocaOp->getParentOfType<pto::SectionSimtOp>()) {
+    return allocaOp.emitOpError(
+        "persistent SIMT fragment must be defined outside pto.section.simt");
+  }
+  if (parentFunc->hasAttr(pto::kPTOSimtEntryAttrName)) {
+    return allocaOp.emitOpError(
+        "persistent SIMT fragment must be defined before SIMT outlining");
+  }
+
+  DataLayout dataLayout = DataLayout::closest(allocaOp);
+  FailureOr<FragmentShape> shape = getFragmentShape(allocaOp, dataLayout);
+  if (failed(shape)) {
+    return failure();
+  }
+
+  if (failed(discoverPersistentFragmentAccesses(allocaOp, parentFunc,
+                                                dominance, *shape, discovery))) {
+    return failure();
   }
 
   return analyzeResidentElements(dominance, plan, fragment, discovery);

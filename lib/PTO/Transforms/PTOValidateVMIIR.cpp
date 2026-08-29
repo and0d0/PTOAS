@@ -573,10 +573,8 @@ LogicalResult verifyLayoutHelperSupport(Operation *op,
   return success();
 }
 
-LogicalResult verifyLayoutSemanticSupport(Operation *op,
-                                          llvm::raw_ostream *diagOS) {
-  VMILayoutSupport supports;
-
+static LogicalResult verifyVMIGroupSemanticSupport(
+    Operation *op, llvm::raw_ostream *diagOS, VMILayoutSupport &supports) {
   if (auto store = dyn_cast<VMIStoreOp>(op)) {
     auto valueType = cast<VMIVRegType>(store.getValue().getType());
     VMILayoutAttr layout = valueType.getLayoutAttr();
@@ -775,6 +773,11 @@ LogicalResult verifyLayoutSemanticSupport(Operation *op,
     return success();
   }
 
+  return success();
+}
+
+static LogicalResult verifyVMIScalarSemanticSupport(
+    Operation *op, llvm::raw_ostream *diagOS, VMILayoutSupport &supports) {
   if (auto hist = dyn_cast<VMIVdhistOp>(op)) {
     std::string reason;
     if (failed(supports.getVdhistSupport(hist, &reason))) {
@@ -824,6 +827,23 @@ LogicalResult verifyLayoutSemanticSupport(Operation *op,
     return success();
   }
 
+  return success();
+}
+
+LogicalResult verifyLayoutSemanticSupport(Operation *op,
+                                          llvm::raw_ostream *diagOS) {
+  VMILayoutSupport supports;
+  if (isa<VMIStoreOp, VMIGroupLoadOp, VMIGroupSlotLoadOp,
+          VMIGroupBroadcastLoadOp, VMIGroupStoreOp, VMIGroupReduceAddFOp,
+          VMIGroupReduceMaxFOp, VMIGroupReduceMinFOp, VMIGroupReduceAddIOp,
+          VMIGroupReduceMaxIOp, VMIGroupReduceMinIOp, VMIGroupBroadcastOp>(
+          op)) {
+    return verifyVMIGroupSemanticSupport(op, diagOS, supports);
+  }
+  if (isa<VMIVdhistOp, VMIVchistOp, VMITruncFOp, VMIExtFOp, VMIBitcastOp>(
+          op)) {
+    return verifyVMIScalarSemanticSupport(op, diagOS, supports);
+  }
   return success();
 }
 
