@@ -262,6 +262,92 @@ struct PTOVPTOPtrBoundaryPass
 
 } // namespace
 
+static void rewriteVPTOFunctionMemrefBoundary(
+    ModuleOp module, func::FuncOp func, llvm::raw_ostream *diagOS,
+    bool &sawFailure) {
+  FunctionType functionType = func.getFunctionType();
+  SmallVector<Type> newInputs(functionType.getInputs().begin(),
+                              functionType.getInputs().end());
+  bool changed = false;
+
+  for (auto [idx, inputType] : llvm::enumerate(functionType.getInputs())) {
+    auto memrefType = dyn_cast<BaseMemRefType>(inputType);
+    if (!memrefType) {
+      continue;
+    }
+
+    Type newType = convertVPTOBoundaryMemRefType(inputType);
+    if (!newType) {
+      if (diagOS) {
+        *diagOS << "VPTO emission-boundary ptr rewrite failed: unsupported "
+                   "memref argument type in "
+                << func.getName() << ": " << inputType << "\n";
+      }
+      sawFailure = true;
+      continue;
+    }
+
+    BlockArgument arg = func.getArgument(idx);
+    SmallVector<Operation *> users(arg.getUsers().begin(), arg.getUsers().end());
+    arg.setType(newType);
+    newInputs[idx] = newType;
+    changed = true;
+
+    for (Operation *user : users) {
+      if (auto cast = dyn_cast<pto::CastPtrOp>(user)) {
+        const bool isUnrelatedCast = cast.getInput() != arg;
+        if (isUnrelatedCast) {
+          continue;
+        }
+        const bool hasMatchingCastType = cast.getResult().getType() == newType;
+        if (hasMatchingCastType) {
+          cast.getResult().replaceAllUsesWith(arg);
+          cast.erase();
+        }
+        continue;
+      }
+
+      if (isa<memref::ReinterpretCastOp, memref::SubViewOp,
+              memref::MemorySpaceCastOp>(user) &&
+          user->use_empty()) {
+        user->erase();
+        continue;
+      }
+
+      if (isSupportedVPTOBufferLikeBoundaryOp(user)) {
+        continue;
+      }
+
+      if (diagOS) {
+        *diagOS << "VPTO emission-boundary ptr rewrite failed: argument "
+                << idx << " of " << func.getName()
+                << " still feeds a memref-dependent user after ptr rewrite:\n";
+        user->print(*diagOS);
+        *diagOS << "\n";
+      }
+      sawFailure = true;
+    }
+  }
+
+  for (Type resultType : functionType.getResults()) {
+    if (!isa<BaseMemRefType>(resultType)) {
+      continue;
+    }
+    if (diagOS) {
+      *diagOS << "VPTO emission-boundary ptr rewrite failed: memref result "
+                 "is unsupported for "
+              << func.getName() << ": " << resultType << "\n";
+    }
+    sawFailure = true;
+  }
+
+  if (changed) {
+    func.setFunctionType(
+        FunctionType::get(module.getContext(), newInputs,
+                          functionType.getResults()));
+  }
+}
+
 LogicalResult mlir::pto::convertVPTOEmissionBoundaryToPtr(
     ModuleOp module, llvm::raw_ostream *diagOS) {
   // VPTO kernels use ptr-only entry semantics at the emission boundary: the
@@ -277,85 +363,7 @@ LogicalResult mlir::pto::convertVPTOEmissionBoundaryToPtr(
     if (func.isExternal()) {
       continue;
     }
-
-    FunctionType functionType = func.getFunctionType();
-    SmallVector<Type> newInputs(functionType.getInputs().begin(),
-                                functionType.getInputs().end());
-    bool changed = false;
-
-    for (auto [idx, inputType] : llvm::enumerate(functionType.getInputs())) {
-      auto memrefType = dyn_cast<BaseMemRefType>(inputType);
-      if (!memrefType) {
-        continue;
-      }
-
-      Type newType = convertVPTOBoundaryMemRefType(inputType);
-      if (!newType) {
-        if (diagOS) {
-          *diagOS << "VPTO emission-boundary ptr rewrite failed: unsupported "
-                     "memref argument type in "
-                  << func.getName() << ": " << inputType << "\n";
-        }
-        sawFailure = true;
-        continue;
-      }
-
-      BlockArgument arg = func.getArgument(idx);
-      SmallVector<Operation *> users(arg.getUsers().begin(), arg.getUsers().end());
-      arg.setType(newType);
-      newInputs[idx] = newType;
-      changed = true;
-
-      for (Operation *user : users) {
-        if (auto cast = dyn_cast<CastPtrOp>(user)) {
-          if (cast.getInput() != arg) {
-            continue;
-          }
-          if (cast.getResult().getType() == newType) {
-            cast.getResult().replaceAllUsesWith(arg);
-            cast.erase();
-          }
-          continue;
-        }
-
-        if (isa<memref::ReinterpretCastOp, memref::SubViewOp,
-                memref::MemorySpaceCastOp>(user) &&
-            user->use_empty()) {
-          user->erase();
-          continue;
-        }
-
-        if (isSupportedVPTOBufferLikeBoundaryOp(user)) {
-          continue;
-        }
-
-        if (diagOS) {
-          *diagOS << "VPTO emission-boundary ptr rewrite failed: argument "
-                  << idx << " of " << func.getName()
-                  << " still feeds a memref-dependent user after ptr rewrite:\n";
-          user->print(*diagOS);
-          *diagOS << "\n";
-        }
-        sawFailure = true;
-      }
-    }
-
-    for (Type resultType : functionType.getResults()) {
-      if (!isa<BaseMemRefType>(resultType)) {
-        continue;
-      }
-      if (diagOS) {
-        *diagOS << "VPTO emission-boundary ptr rewrite failed: memref result "
-                   "is unsupported for "
-                << func.getName() << ": " << resultType << "\n";
-      }
-      sawFailure = true;
-    }
-
-    if (changed) {
-      func.setFunctionType(
-          FunctionType::get(module.getContext(), newInputs, functionType.getResults()));
-    }
+    rewriteVPTOFunctionMemrefBoundary(module, func, diagOS, sawFailure);
   }
 
   if (sawFailure) {

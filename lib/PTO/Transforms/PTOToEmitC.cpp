@@ -1466,68 +1466,69 @@ static FailureOr<TileBufType> resolveFixpipeConsumerTileType(Value pipeHandle) {
   return tileTy;
 }
 
+static LogicalResult rematerializeFixpipeQuantBindingsInBlock(
+    Block &block, SmallVectorImpl<Operation *> &eraseList) {
+  llvm::DenseMap<int32_t, SetQuantScalarOp> activeScalarById;
+  llvm::DenseMap<int32_t, SetQuantVectorOp> activeVectorById;
+  SmallVector<Operation *> originalOps;
+  for (Operation &op : block) {
+    originalOps.push_back(&op);
+  }
+
+  for (Operation *op : originalOps) {
+    if (auto setQuantScalar = dyn_cast<SetQuantScalarOp>(op)) {
+      activeScalarById[setQuantScalar.getId()] = setQuantScalar;
+      eraseList.push_back(op);
+    } else if (auto setQuantVector = dyn_cast<SetQuantVectorOp>(op)) {
+      activeVectorById[setQuantVector.getId()] = setQuantVector;
+      eraseList.push_back(op);
+    } else if (auto tpush = dyn_cast<TPushOp>(op)) {
+      auto accPushEpilogue =
+          getPipeInitAccPushEpilogue(getPipeInitDef(tpush.getPipeHandle()));
+      auto pipeId = getFrontendPipeIdFromHandle(tpush.getPipeHandle());
+      if (accPushEpilogue && pipeId) {
+        OpBuilder builder(tpush);
+        if (isScalarFixpipeQuant(accPushEpilogue.getQuant())) {
+          auto it = activeScalarById.find(*pipeId);
+          if (it != activeScalarById.end()) {
+            auto consumerTileTy =
+                resolveFixpipeConsumerTileType(tpush.getPipeHandle());
+            if (failed(consumerTileTy)) {
+              tpush.emitOpError("failed to resolve peer consumer tile type "
+                                "for fixpipe quant rematerialization");
+              return failure();
+            }
+            Operation *cloned = builder.clone(*it->second.getOperation());
+            cloned->setAttr(kEmitCScalarOutTypeAttrName,
+                            builder.getStringAttr(getEmitCScalarTypeToken(
+                                (*consumerTileTy).getElementType())));
+          }
+        } else if (isVectorFixpipeQuant(accPushEpilogue.getQuant())) {
+          auto it = activeVectorById.find(*pipeId);
+          if (it != activeVectorById.end()) {
+            builder.clone(*it->second.getOperation());
+          }
+        }
+      }
+    }
+
+    for (Region &region : op->getRegions()) {
+      for (Block &nestedBlock : region) {
+        if (failed(rematerializeFixpipeQuantBindingsInBlock(nestedBlock,
+                                                           eraseList))) {
+          return failure();
+        }
+      }
+    }
+  }
+  return success();
+}
+
 static LogicalResult rematerializeFixpipeQuantBindings(ModuleOp mop) {
   SmallVector<Operation *> eraseList;
-  auto processBlock =
-      [&eraseList](auto &&self, Block &block) -> LogicalResult {
-    llvm::DenseMap<int32_t, SetQuantScalarOp> activeScalarById;
-    llvm::DenseMap<int32_t, SetQuantVectorOp> activeVectorById;
-    SmallVector<Operation *> originalOps;
-    for (Operation &op : block) {
-      originalOps.push_back(&op);
-    }
-
-    for (Operation *op : originalOps) {
-      if (auto setQuantScalar = dyn_cast<SetQuantScalarOp>(op)) {
-        activeScalarById[setQuantScalar.getId()] = setQuantScalar;
-        eraseList.push_back(op);
-      } else if (auto setQuantVector = dyn_cast<SetQuantVectorOp>(op)) {
-        activeVectorById[setQuantVector.getId()] = setQuantVector;
-        eraseList.push_back(op);
-      } else if (auto tpush = dyn_cast<TPushOp>(op)) {
-        auto accPushEpilogue =
-            getPipeInitAccPushEpilogue(getPipeInitDef(tpush.getPipeHandle()));
-        auto pipeId = getFrontendPipeIdFromHandle(tpush.getPipeHandle());
-        if (accPushEpilogue && pipeId) {
-          OpBuilder builder(tpush);
-          if (isScalarFixpipeQuant(accPushEpilogue.getQuant())) {
-            auto it = activeScalarById.find(*pipeId);
-            if (it != activeScalarById.end()) {
-              auto consumerTileTy =
-                  resolveFixpipeConsumerTileType(tpush.getPipeHandle());
-              if (failed(consumerTileTy)) {
-                tpush.emitOpError("failed to resolve peer consumer tile type "
-                                  "for fixpipe quant rematerialization");
-                return failure();
-              }
-              Operation *cloned = builder.clone(*it->second.getOperation());
-              cloned->setAttr(kEmitCScalarOutTypeAttrName,
-                              builder.getStringAttr(getEmitCScalarTypeToken(
-                                  (*consumerTileTy).getElementType())));
-            }
-          } else if (isVectorFixpipeQuant(accPushEpilogue.getQuant())) {
-            auto it = activeVectorById.find(*pipeId);
-            if (it != activeVectorById.end()) {
-              builder.clone(*it->second.getOperation());
-            }
-          }
-        }
-      }
-
-      for (Region &region : op->getRegions()) {
-        for (Block &nestedBlock : region) {
-          if (failed(self(self, nestedBlock))) {
-            return failure();
-          }
-        }
-      }
-    }
-    return success();
-  };
-
   for (auto funcOp : mop.getOps<func::FuncOp>()) {
     for (Block &block : funcOp.getBlocks()) {
-      if (failed(processBlock(processBlock, block))) {
+      if (failed(rematerializeFixpipeQuantBindingsInBlock(block, eraseList))) {
         return failure();
       }
     }
@@ -8143,7 +8144,12 @@ struct PTODeclareStructToEmitC
   LogicalResult matchAndRewrite(mlir::pto::DeclareStructOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     (void)adaptor;
-    Type structTy = getTypeConverter()->convertType(op.getS().getType());
+    const bool hasUnexpectedResultCount = op->getNumResults() != 1;
+    if (hasUnexpectedResultCount) {
+      return rewriter.notifyMatchFailure(op, "expected one !pto.struct result");
+    }
+    Type structTy =
+        getTypeConverter()->convertType(op->getResult(0).getType());
     if (!structTy) {
       return rewriter.notifyMatchFailure(op, "failed to map !pto.struct type");
     }
@@ -8189,6 +8195,13 @@ static FailureOr<Type> getStructMemberFieldType(mlir::pto::StructType structTy,
   }
   return getStructFieldValueType(
       tc, structTy.getFieldType(static_cast<unsigned>(index)));
+}
+
+static FailureOr<Value> getStructAdaptorValue(ValueRange operands) {
+  if (operands.empty()) {
+    return failure();
+  }
+  return operands.front();
 }
 
 // Build the `s.fA.fB...` member-access chain for a constant struct path and
@@ -8271,9 +8284,20 @@ struct PTOStructGetToEmitC
       return rewriter.notifyMatchFailure(op, "failed to map struct field type");
     }
 
+    FailureOr<Value> structValue = getStructAdaptorValue(adaptor.getOperands());
+    const bool hasInvalidStructOperand =
+        failed(structValue) || op->getNumOperands() == 0;
+    if (hasInvalidStructOperand) {
+      return rewriter.notifyMatchFailure(op, "expected struct operand");
+    }
+    auto structTy = dyn_cast<mlir::pto::StructType>(
+        op->getOperand(0).getType());
+    if (!structTy) {
+      return rewriter.notifyMatchFailure(op, "expected !pto.struct operand");
+    }
     FailureOr<Value> member = buildStructMemberChain(
-        rewriter, op.getLoc(), getTypeConverter(), adaptor.getS(),
-        op.getS().getType(), op.getPath());
+        rewriter, op.getLoc(), getTypeConverter(), *structValue,
+        structTy, op.getPath());
     if (failed(member)) {
       return rewriter.notifyMatchFailure(op, "failed to map struct field type");
     }
@@ -8297,9 +8321,20 @@ struct PTOStructSetToEmitC
 
   LogicalResult matchAndRewrite(mlir::pto::StructSetOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    FailureOr<Value> structValue = getStructAdaptorValue(adaptor.getOperands());
+    const bool hasInvalidStructOperand =
+        failed(structValue) || op->getNumOperands() == 0;
+    if (hasInvalidStructOperand) {
+      return rewriter.notifyMatchFailure(op, "expected struct operand");
+    }
+    auto structTy = dyn_cast<mlir::pto::StructType>(
+        op->getOperand(0).getType());
+    if (!structTy) {
+      return rewriter.notifyMatchFailure(op, "expected !pto.struct operand");
+    }
     FailureOr<Value> member = buildStructMemberChain(
-        rewriter, op.getLoc(), getTypeConverter(), adaptor.getS(),
-        op.getS().getType(), op.getPath());
+        rewriter, op.getLoc(), getTypeConverter(), *structValue,
+        structTy, op.getPath());
     if (failed(member)) {
       return rewriter.notifyMatchFailure(op, "failed to map struct field type");
     }
@@ -14094,10 +14129,9 @@ struct CFSwitchToCondBr : public OpRewritePattern<cf::SwitchOp> {
 
 } // namespace
 
-static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
-                                       TypeConverter &typeConverter,
-                                       MLIRContext *ctx,
-                                       PTOArch targetArch) {
+static void populatePTOToEmitCSyncAndVectorPatterns(
+    RewritePatternSet &patterns, TypeConverter &typeConverter, MLIRContext *ctx,
+    PTOArch targetArch) {
   patterns.add<ArithCmpIToEmitC>(typeConverter, ctx);
   patterns.add<PTOAllocTileToEmitC>(typeConverter, ctx);
   patterns.add<PTODeclareTileToEmitC>(typeConverter, ctx);
@@ -14161,6 +14195,11 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTORowSumToEmitC>(typeConverter, ctx);
   patterns.add<PTORowMinToEmitC>(typeConverter, ctx);
   patterns.add<PTORowArgMinToEmitC>(typeConverter, ctx);
+}
+
+static void populatePTOToEmitCScalarAndArithmeticPatterns(
+    RewritePatternSet &patterns, TypeConverter &typeConverter, MLIRContext *ctx,
+    PTOArch targetArch) {
   patterns.add<PTODivSToEmitC>(typeConverter, ctx);
   patterns.add<PTOTDivSToEmitC>(typeConverter, ctx);
   patterns.add<PTOFModToEmitC>(typeConverter, ctx);
@@ -14222,6 +14261,11 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTODivToTDIV>(typeConverter, ctx);
   patterns.add<PTOMaxToEmitC>(typeConverter, ctx);
   patterns.add<PTOMaxSToEmitC>(typeConverter, ctx);
+}
+
+static void populatePTOToEmitCIntegerAndFloatPatterns(
+    RewritePatternSet &patterns, TypeConverter &typeConverter, MLIRContext *ctx,
+    PTOArch targetArch) {
   patterns.add<ArithMulIToEmitC>(typeConverter, ctx);
   patterns.add<ArithAddIToEmitC>(typeConverter, ctx);
   patterns.add<ArithSubIToEmitC>(typeConverter, ctx);
@@ -14275,6 +14319,11 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOColMaxToEmitC>(typeConverter, ctx);
   patterns.add<PTOColArgMinToEmitC>(typeConverter, ctx);
   patterns.add<PTOMinToEmitC>(typeConverter, ctx);
+}
+
+static void populatePTOToEmitCMemoryAndCommunicationPatterns(
+    RewritePatternSet &patterns, TypeConverter &typeConverter, MLIRContext *ctx,
+    PTOArch targetArch) {
   patterns.add<PTOTLoadToTLOAD>(typeConverter, ctx);
   patterns.add<PTOTPrefetchToTPREFETCH>(typeConverter, ctx);
   patterns.add<PTOMakePrefetchAsyncContextToEmitC>(typeConverter, ctx);
@@ -14392,6 +14441,20 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   // Keep CFG-style branches type-consistent when block argument types are
   // converted (e.g. after lowering scf.while to cf.br/cf.cond_br).
   populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
+}
+
+static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
+                                       TypeConverter &typeConverter,
+                                       MLIRContext *ctx,
+                                       PTOArch targetArch) {
+  populatePTOToEmitCSyncAndVectorPatterns(patterns, typeConverter, ctx,
+                                          targetArch);
+  populatePTOToEmitCScalarAndArithmeticPatterns(patterns, typeConverter, ctx,
+                                                targetArch);
+  populatePTOToEmitCIntegerAndFloatPatterns(patterns, typeConverter, ctx,
+                                            targetArch);
+  populatePTOToEmitCMemoryAndCommunicationPatterns(patterns, typeConverter, ctx,
+                                                   targetArch);
 }
 
 //===----------------------------------------------------------------------===//
