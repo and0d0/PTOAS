@@ -916,6 +916,15 @@ static std::optional<std::string> getEmitCTileTypeString(pto::TileBufType type) 
 class PTOToEmitCTypeConverter : public TypeConverter {
 public:
   PTOToEmitCTypeConverter(MLIRContext *Ctx, PTOArch targetArch) {
+    (void)targetArch;
+    registerScalarConversions(Ctx);
+    registerPTOConversions(Ctx);
+    registerMemRefConversions(Ctx);
+    registerFunctionConversions();
+  }
+
+private:
+  void registerScalarConversions(MLIRContext *Ctx) {
     // ---------------------------------------------------------
     // 1. 基本类型 (f32, i32, index)
     // ---------------------------------------------------------
@@ -997,7 +1006,9 @@ public:
       }
       return Type{};
     });
+  }
 
+  void registerPTOConversions(MLIRContext *Ctx) {
     // ---------------------------------------------------------
     // 2. PTO 特殊类型 (透传或转换)
     // ---------------------------------------------------------
@@ -1095,7 +1106,9 @@ public:
       }
       return emitc::OpaqueType::get(Ctx, *typeString);
     });
+  }
 
+  void registerMemRefConversions(MLIRContext *Ctx) {
     // ---------------------------------------------------------
     // 3. MemRef 转换 (Debug 重点)
     // ---------------------------------------------------------
@@ -1137,7 +1150,9 @@ public:
       
       return getEmitCPointerType(Ctx, finalTypeStr);
     });
+  }
 
+  void registerFunctionConversions() {
     // ---------------------------------------------------------
     // 4. Function & Materialization
     // ---------------------------------------------------------
