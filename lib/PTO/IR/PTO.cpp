@@ -3927,18 +3927,42 @@ LogicalResult TLoadOp::verify() {
 }
 
 LogicalResult mlir::pto::SetFmatrixOp::verify() {
-  return verifyConvTileCommon(*this, getSrc().getType(), "src",
-                              /*allowLowPrecision=*/true);
+  if (failed(verifyConvTileCommon(*this, getSrc().getType(), "src",
+                                  /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be a_manual or b_manual");
+  }
+  return success();
 }
 
 LogicalResult mlir::pto::SetImg2colRptOp::verify() {
-  return verifyConvTileCommon(*this, getSrc().getType(), "src",
-                              /*allowLowPrecision=*/true);
+  if (failed(verifyConvTileCommon(*this, getSrc().getType(), "src",
+                                  /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be a_manual or b_manual");
+  }
+  return success();
 }
 
 LogicalResult mlir::pto::SetImg2colPaddingOp::verify() {
-  return verifyConvTileCommon(*this, getSrc().getType(), "src",
-                              /*allowLowPrecision=*/true);
+  if (failed(verifyConvTileCommon(*this, getSrc().getType(), "src",
+                                  /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be a_manual or b_manual");
+  }
+  return success();
 }
 
 LogicalResult mlir::pto::TImg2colOp::verify() {
@@ -3954,6 +3978,35 @@ LogicalResult mlir::pto::TImg2colOp::verify() {
     return emitOpError() << "expects src and dst to have the same element type";
   }
 
+  auto srcCT = dyn_cast<pto::ConvTileType>(getSrc().getType());
+  if (!srcCT) {
+    return emitOpError("expects src to be a !pto.conv_tile");
+  }
+  auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+  if (!srcLayout ||
+      (srcLayout.getLayout() != pto::Layout::NC1HWC0 &&
+       srcLayout.getLayout() != pto::Layout::NDC1HWC0)) {
+    return emitOpError(
+        "expects src layout to be NC1HWC0 or NDC1HWC0");
+  }
+
+  auto dstTile = dyn_cast<pto::TileBufType>(getDst().getType());
+  if (!dstTile) {
+    return emitOpError("expects dst to be a !pto.tile_buf");
+  }
+  if (failed(verifyTileBufLayoutConstraints(*this, dstTile, "dst"))) {
+    return failure();
+  }
+  if (dstTile.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::ColMajor) ||
+      dstTile.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::RowMajor)) {
+    return emitOpError(
+        "expects dst layout to be BLayout=col_major and SLayout=row_major");
+  }
+  auto dstSpace = getPTOMemorySpaceEnum(dstTile);
+  if (!dstSpace || *dstSpace != pto::AddressSpace::LEFT) {
+    return emitOpError("expects dst to use loc=left");
+  }
+
   auto checkPos = [&](IntegerAttr posAttr, StringRef name) -> LogicalResult {
     if (!posAttr || !posAttr.getType().isSignlessInteger(32)) {
       return emitOpError() << "expects " << name << " to be an i32 attr";
@@ -3967,6 +4020,14 @@ LogicalResult mlir::pto::TImg2colOp::verify() {
   };
   if (failed(checkPos(getPosM(), "posM")) || failed(checkPos(getPosK(), "posK"))) {
     return failure();
+  }
+
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_AUTO &&
+      mode != pto::FmatrixMode::FMATRIX_B_AUTO &&
+      mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be one of a_auto, b_auto, a_manual, or b_manual");
   }
 
   return success();

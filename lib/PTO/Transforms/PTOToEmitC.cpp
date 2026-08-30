@@ -336,6 +336,30 @@ static void createLastUseAwareOpaqueCall(
                                        operands);
 }
 
+static StringRef getFmatrixModeToken(pto::FmatrixMode mode) {
+  switch (mode) {
+  case pto::FmatrixMode::FMATRIX_A_AUTO:
+    return "pto::SetFmatrixMode::FMATRIX_A_AUTO";
+  case pto::FmatrixMode::FMATRIX_B_AUTO:
+    return "pto::SetFmatrixMode::FMATRIX_B_AUTO";
+  case pto::FmatrixMode::FMATRIX_A_MANUAL:
+    return "pto::SetFmatrixMode::FMATRIX_A_MANUAL";
+  case pto::FmatrixMode::FMATRIX_B_MANUAL:
+    return "pto::SetFmatrixMode::FMATRIX_B_MANUAL";
+  }
+  llvm_unreachable("unknown FmatrixMode");
+}
+
+static ArrayAttr getFmatrixModeTemplateArgs(ConversionPatternRewriter &rewriter,
+                                            pto::FmatrixMode mode) {
+  if (mode == pto::FmatrixMode::FMATRIX_A_MANUAL) {
+    return ArrayAttr{};
+  }
+  auto *ctx = rewriter.getContext();
+  return rewriter.getArrayAttr(
+      {emitc::OpaqueAttr::get(ctx, getFmatrixModeToken(mode))});
+}
+
 static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
                                          Location loc, Value basePtr,
                                          MemRefType mrTy, Operation *anchor,
@@ -12384,9 +12408,11 @@ struct PTOSetFmatrixToEmitC : public OpConversionPattern<pto::SetFmatrixOp> {
 
   LogicalResult matchAndRewrite(pto::SetFmatrixOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
     createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
                                  "SETFMATRIX",
-                                 ValueRange{peelUnrealized(adaptor.getSrc())});
+                                 ValueRange{peelUnrealized(adaptor.getSrc())},
+                                 ArrayAttr{}, templateArgs);
     rewriter.eraseOp(op);
     return success();
   }
@@ -12398,9 +12424,11 @@ struct PTOSetImg2colRptToEmitC
 
   LogicalResult matchAndRewrite(pto::SetImg2colRptOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
     createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
                                  "SET_IMG2COL_RPT",
-                                 ValueRange{peelUnrealized(adaptor.getSrc())});
+                                 ValueRange{peelUnrealized(adaptor.getSrc())},
+                                 ArrayAttr{}, templateArgs);
     rewriter.eraseOp(op);
     return success();
   }
@@ -12412,9 +12440,11 @@ struct PTOSetImg2colPaddingToEmitC
 
   LogicalResult matchAndRewrite(pto::SetImg2colPaddingOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
     createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
                                  "SET_IMG2COL_PADDING",
-                                 ValueRange{peelUnrealized(adaptor.getSrc())});
+                                 ValueRange{peelUnrealized(adaptor.getSrc())},
+                                 ArrayAttr{}, templateArgs);
     rewriter.eraseOp(op);
     return success();
   }
@@ -12435,10 +12465,12 @@ struct PTOTImg2colToEmitC : public OpConversionPattern<pto::TImg2colOp> {
                                       static_cast<int64_t>(op.getPosM().getInt()));
     Value posK = makeEmitCIntConstant(rewriter, loc, u16Ty,
                                       static_cast<int64_t>(op.getPosK().getInt()));
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
 
     createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
                                  "TIMG2COL",
-                                 ValueRange{dst, src, posM, posK});
+                                 ValueRange{dst, src, posM, posK}, ArrayAttr{},
+                                 templateArgs);
     rewriter.eraseOp(op);
     return success();
   }

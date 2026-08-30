@@ -95,6 +95,29 @@ def PTO_SignednessAttr : PTO_Attr<"Signedness", "signedness"> {
 }
 
 //===----------------------------------------------------------------------===//
+// FMATRIX mode
+//===----------------------------------------------------------------------===//
+
+def PTO_FmatrixMode_AutoA : I32EnumAttrCase<"FMATRIX_A_AUTO", 0, "a_auto">;
+def PTO_FmatrixMode_AutoB : I32EnumAttrCase<"FMATRIX_B_AUTO", 1, "b_auto">;
+def PTO_FmatrixMode_ManualA : I32EnumAttrCase<"FMATRIX_A_MANUAL", 2, "a_manual">;
+def PTO_FmatrixMode_ManualB : I32EnumAttrCase<"FMATRIX_B_MANUAL", 3, "b_manual">;
+
+def PTO_FmatrixModeEnum : PTO_I32Enum<
+  "FmatrixMode", "PTO FMATRIX selector", [
+    PTO_FmatrixMode_AutoA,
+    PTO_FmatrixMode_AutoB,
+    PTO_FmatrixMode_ManualA,
+    PTO_FmatrixMode_ManualB
+  ]>;
+
+def PTO_FmatrixModeAttr : PTO_Attr<"FmatrixMode", "fmatrix_mode"> {
+  let parameters = (ins EnumParameter<PTO_FmatrixModeEnum>:$value);
+  let assemblyFormat = "`<` params `>`";
+  let summary = "A/B selector for FMATRIX-related ops";
+}
+
+//===----------------------------------------------------------------------===//
 // SIMT GM load/store L1 and L2 cache controls
 //===----------------------------------------------------------------------===//
 

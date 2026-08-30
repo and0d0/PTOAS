@@ -1899,7 +1899,10 @@ def SetQuantVectorOp : PTO_Op<"set_quant_vector", [
 
 def SetFmatrixOp : PTO_Op<"set_fmatrix", [MemoryEffects<[MemWrite]>]> {
   let summary = "Set FMATRIX registers from a ConvTile config";
-  let arguments = (ins ConvTileType:$src);
+  let arguments = (ins
+    ConvTileType:$src,
+    DefaultValuedAttr<PTO_FmatrixModeAttr, "::mlir::pto::FmatrixMode::FMATRIX_A_MANUAL">:$fmatrixMode
+  );
   let results = (outs);
   let hasVerifier = 1;
   let assemblyFormat = [{
@@ -1909,7 +1912,10 @@ def SetFmatrixOp : PTO_Op<"set_fmatrix", [MemoryEffects<[MemWrite]>]> {
 
 def SetImg2colRptOp : PTO_Op<"set_img2col_rpt", [MemoryEffects<[MemWrite]>]> {
   let summary = "Set IMG2COL repeat control from a ConvTile config";
-  let arguments = (ins ConvTileType:$src);
+  let arguments = (ins
+    ConvTileType:$src,
+    DefaultValuedAttr<PTO_FmatrixModeAttr, "::mlir::pto::FmatrixMode::FMATRIX_A_MANUAL">:$fmatrixMode
+  );
   let results = (outs);
   let hasVerifier = 1;
   let assemblyFormat = [{
@@ -1919,7 +1925,10 @@ def SetImg2colRptOp : PTO_Op<"set_img2col_rpt", [MemoryEffects<[MemWrite]>]> {
 
 def SetImg2colPaddingOp : PTO_Op<"set_img2col_padding", [MemoryEffects<[MemWrite]>]> {
   let summary = "Set IMG2COL padding control from a ConvTile config";
-  let arguments = (ins ConvTileType:$src);
+  let arguments = (ins
+    ConvTileType:$src,
+    DefaultValuedAttr<PTO_FmatrixModeAttr, "::mlir::pto::FmatrixMode::FMATRIX_A_MANUAL">:$fmatrixMode
+  );
   let results = (outs);
   let hasVerifier = 1;
   let assemblyFormat = [{
@@ -1935,7 +1944,8 @@ def TImg2colOp : PTO_Op<"timg2col", [
     TileBufType:$dst,
     ConvTileType:$src,
     DefaultValuedOptionalAttr<I32Attr, "0">:$posM,
-    DefaultValuedOptionalAttr<I32Attr, "0">:$posK
+    DefaultValuedOptionalAttr<I32Attr, "0">:$posK,
+    DefaultValuedAttr<PTO_FmatrixModeAttr, "::mlir::pto::FmatrixMode::FMATRIX_A_MANUAL">:$fmatrixMode
   );
   let results = (outs);
   let hasVerifier = 1;
