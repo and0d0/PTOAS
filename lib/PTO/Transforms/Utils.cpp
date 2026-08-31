@@ -509,11 +509,11 @@ static std::optional<uint64_t> getStaticTileBytes(TileBufType type) {
 
 static std::optional<uint64_t> getStaticConvTileBytes(ConvTileType type) {
   unsigned elemBytes = getPTOStorageElemByteSize(type.getElementType());
-  const bool invalidCapacity = elemBytes == 0 || type.getBufferSize() <= 0;
+  const bool invalidCapacity = elemBytes == 0 || type.getBufferSizeValue() <= 0;
   if (invalidCapacity) {
     return std::nullopt;
   }
-  uint64_t bufferSize = static_cast<uint64_t>(type.getBufferSize());
+  uint64_t bufferSize = static_cast<uint64_t>(type.getBufferSizeValue());
   const bool overflows =
       bufferSize > std::numeric_limits<uint64_t>::max() / elemBytes;
   if (overflows) {

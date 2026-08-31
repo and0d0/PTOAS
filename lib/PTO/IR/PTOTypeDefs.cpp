@@ -884,7 +884,7 @@ static Type buildConvTileType(AsmParser &parser,
     return Type();
   }
 
-  auto layoutAttr = dyn_cast_or_null<LayoutAttr>(fields.layoutAttr);
+  auto layoutAttr = llvm::dyn_cast_or_null<LayoutAttr>(fields.layoutAttr);
   if (!layoutAttr) {
     emitError() << "layout must be a pto.layout attr";
     return Type();
@@ -951,7 +951,7 @@ Type ConvTileType::parse(AsmParser &parser) {
       if (failed(parser.parseAttribute(attr))) {
         return Type();
       }
-      layoutAttr = dyn_cast<LayoutAttr>(attr);
+      layoutAttr = llvm::dyn_cast<LayoutAttr>(attr);
       if (!layoutAttr || seenLayout) {
         return Type();
       }
@@ -964,7 +964,7 @@ Type ConvTileType::parse(AsmParser &parser) {
       if (failed(parser.parseAttribute(attr))) {
         return Type();
       }
-      bufferSizeAttr = dyn_cast_or_null<IntegerAttr>(attr);
+      bufferSizeAttr = llvm::dyn_cast_or_null<IntegerAttr>(attr);
       if (!bufferSizeAttr || seenBufferSize) {
         return Type();
       }
@@ -977,7 +977,7 @@ Type ConvTileType::parse(AsmParser &parser) {
       if (failed(parser.parseAttribute(attr))) {
         return Type();
       }
-      configAttr = dyn_cast_or_null<ConvTileConfigAttr>(attr);
+      configAttr = llvm::dyn_cast_or_null<ConvTileConfigAttr>(attr);
       if (!configAttr || seenConfig) {
         return Type();
       }

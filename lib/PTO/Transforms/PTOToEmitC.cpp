@@ -424,6 +424,24 @@ static std::string layoutToEmitCString(mlir::pto::Layout layout) {
     return "pto::Layout::MX_A_ZZ";
   case mlir::pto::Layout::MX_B_NN:
     return "pto::Layout::MX_B_NN";
+  case mlir::pto::Layout::NCHW:
+    return "pto::Layout::NCHW";
+  case mlir::pto::Layout::NC1HWC0:
+    return "pto::Layout::NC1HWC0";
+  case mlir::pto::Layout::NCDHW:
+    return "pto::Layout::NCDHW";
+  case mlir::pto::Layout::NDC1HWC0:
+    return "pto::Layout::NDC1HWC0";
+  case mlir::pto::Layout::GNCHW:
+    return "pto::Layout::GNCHW";
+  case mlir::pto::Layout::GNC1HWC0:
+    return "pto::Layout::GNC1HWC0";
+  case mlir::pto::Layout::NHWC:
+    return "pto::Layout::NHWC";
+  case mlir::pto::Layout::FRACTAL_Z:
+    return "pto::Layout::FRACTAL_Z";
+  case mlir::pto::Layout::FRACTAL_Z_3D:
+    return "pto::Layout::FRACTAL_Z_3D";
   }
   return "pto::Layout::ND";
 }
@@ -12462,9 +12480,9 @@ struct PTOTImg2colToEmitC : public OpConversionPattern<pto::TImg2colOp> {
     Value src = peelUnrealized(adaptor.getSrc());
     Type u16Ty = emitc::OpaqueType::get(ctx, "uint16_t");
     Value posM = makeEmitCIntConstant(rewriter, loc, u16Ty,
-                                      static_cast<int64_t>(op.getPosM().getInt()));
+                                      static_cast<int64_t>(op.getPosM()));
     Value posK = makeEmitCIntConstant(rewriter, loc, u16Ty,
-                                      static_cast<int64_t>(op.getPosK().getInt()));
+                                      static_cast<int64_t>(op.getPosK()));
     auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
 
     createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},

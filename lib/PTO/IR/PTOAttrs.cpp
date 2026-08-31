@@ -271,6 +271,8 @@ constexpr unsigned kConvTilePadListSize = 4;
 constexpr int32_t kConvTileDefaultZero = 0;
 constexpr int32_t kConvTileDefaultOne = 1;
 
+static LogicalResult parseTileBufKeyEq(AsmParser &parser, StringRef expectedKey);
+
 static LogicalResult parseConvTileIntField(AsmParser &parser, StringRef key,
                                            IntegerAttr &value) {
   if (failed(parseTileBufKeyEq(parser, key))) {
@@ -364,7 +366,7 @@ ConvTileConfigAttr ConvTileConfigAttr::getDefault(MLIRContext *ctx) {
   auto transpose = BoolAttr::get(ctx, false);
   return ConvTileConfigAttr::get(ctx, zero, zero, padList, one, one, one, one,
                                  one, one, padValue, zero, zero, one, zero,
-                                 zero, transpose);
+                                 zero, zero, transpose);
 }
 
 bool ConvTileConfigAttr::isDefault() const {
@@ -395,7 +397,7 @@ LogicalResult ConvTileConfigAttr::verify(function_ref<InFlightDiagnostic()> emit
                                          IntegerAttr dilationW,
                                          IntegerAttr strideH,
                                          IntegerAttr strideW,
-                                         Attribute padValue,
+                                         Attribute padValueAttr,
                                          IntegerAttr channelSize,
                                          IntegerAttr repeatStride,
                                          IntegerAttr repeatTime,
@@ -463,7 +465,9 @@ LogicalResult ConvTileConfigAttr::verify(function_ref<InFlightDiagnostic()> emit
     return failure();
   }
 
-  if (!padValue || (!isa<IntegerAttr>(padValue) && !isa<FloatAttr>(padValue))) {
+  if (!padValueAttr ||
+      (!llvm::isa<IntegerAttr>(padValueAttr) &&
+       !llvm::isa<FloatAttr>(padValueAttr))) {
     return emitError() << "pad_value must be an integer or float attr", failure();
   }
 

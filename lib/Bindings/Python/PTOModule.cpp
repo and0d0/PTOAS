@@ -258,7 +258,14 @@ void mlir::pto::python::populatePTODialectBindings(pybind11::module_ &m) {
       .value("DN", mlir::pto::Layout::DN)
       .value("NZ", mlir::pto::Layout::NZ)
       .value("MX_A_ZZ", mlir::pto::Layout::MX_A_ZZ)
-      .value("MX_B_NN", mlir::pto::Layout::MX_B_NN);
+      .value("MX_B_NN", mlir::pto::Layout::MX_B_NN)
+      .value("NCHW", mlir::pto::Layout::NCHW)
+      .value("NC1HWC0", mlir::pto::Layout::NC1HWC0)
+      .value("NCDHW", mlir::pto::Layout::NCDHW)
+      .value("NDC1HWC0", mlir::pto::Layout::NDC1HWC0)
+      .value("GNCHW", mlir::pto::Layout::GNCHW)
+      .value("GNC1HWC0", mlir::pto::Layout::GNC1HWC0)
+      .value("NHWC", mlir::pto::Layout::NHWC);
 
     py::enum_<mlir::pto::AccToVecMode>(m, "AccToVecMode")
       .value("SingleModeVec0", mlir::pto::AccToVecMode::SingleModeVec0)

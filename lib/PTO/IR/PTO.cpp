@@ -126,6 +126,10 @@ static bool isKnownZeroOrUnitExtent(int64_t value);
 static bool isByteIntegerType(Type ty);
 static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name,
                                          bool allowLowPrecision = false);
+static LogicalResult verifyConvTileCommon(Operation *op, Type ty, StringRef name,
+                                          bool allowLowPrecision = false);
+static LogicalResult verifyTileLikeCommon(Operation *op, Type ty, StringRef name,
+                                          bool allowLowPrecision = false);
 static LogicalResult verifyTmpCapacityAtLeast(Operation *op, Type tmpTy,
                                               uint64_t requiredBytes,
                                               StringRef tmpName = "tmp");
@@ -1956,9 +1960,12 @@ static unsigned getElemByteSize(Type ty) {
   return getPTOStorageElemByteSize(ty);
 }
 
-static LogicalResult verifyTileBufLayoutConstraints(Operation *op,
-                                                    pto::TileBufType tb,
+static LogicalResult verifyTileBufLayoutConstraints(Operation *op, Type ty,
                                                     StringRef name) {
+  auto tb = dyn_cast<pto::TileBufType>(ty);
+  if (!tb) {
+    return op->emitOpError() << "expects " << name << " to be a !pto.tile_buf";
+  }
   auto shape = tb.getShape();
   if (shape.size() != 2) {
     return op->emitOpError() << "expects " << name << " to be rank-2";
@@ -3585,7 +3592,10 @@ static LogicalResult verifyConstantLocalAddress(Operation *op, Value addr,
 }
 
 LogicalResult AllocTileOp::verify() {
-  auto ty = getResult().getType(); // TileBufType
+  auto ty = dyn_cast<pto::TileBufType>(getResult().getType());
+  if (!ty) {
+    return emitOpError("result must be `!pto.tile_buf`");
+  }
 
   if (failed(verifyTileBufLayoutConstraints(*this, ty, "result"))) {
     return failure();
@@ -3894,10 +3904,12 @@ LogicalResult TLoadOp::verify() {
     }
 
     if (dstElem.isInteger(64)) {
-      auto pad = dstTile.getPadValueI32();
-      if (pad != static_cast<int32_t>(pto::PadValue::Null) &&
-          pad != static_cast<int32_t>(pto::PadValue::Zero)) {
-        return emitOpError("expects A5 i64/u64 tload dst pad to be null or zero");
+      if (auto dstTB = dyn_cast<pto::TileBufType>(dstTile)) {
+        auto pad = dstTB.getPadValueI32();
+        if (pad != static_cast<int32_t>(pto::PadValue::Null) &&
+            pad != static_cast<int32_t>(pto::PadValue::Zero)) {
+          return emitOpError("expects A5 i64/u64 tload dst pad to be null or zero");
+        }
       }
     }
 
@@ -4007,12 +4019,8 @@ LogicalResult mlir::pto::TImg2colOp::verify() {
     return emitOpError("expects dst to use loc=left");
   }
 
-  auto checkPos = [&](IntegerAttr posAttr, StringRef name) -> LogicalResult {
-    if (!posAttr || !posAttr.getType().isSignlessInteger(32)) {
-      return emitOpError() << "expects " << name << " to be an i32 attr";
-    }
-    int64_t value = posAttr.getInt();
-    if (value < 0 || value > std::numeric_limits<uint16_t>::max()) {
+  auto checkPos = [&](uint32_t value, StringRef name) -> LogicalResult {
+    if (value > std::numeric_limits<uint16_t>::max()) {
       return emitOpError() << "expects " << name
                            << " to fit in an unsigned 16-bit integer";
     }
@@ -5415,7 +5423,7 @@ static bool isA5SupportedTCvtPair(Type srcElem, Type dstElem) {
 }
 
 static LogicalResult verifyConvTileCommon(Operation *op, Type ty, StringRef name,
-                                          bool allowLowPrecision = false) {
+                                          bool allowLowPrecision) {
   auto ct = dyn_cast<pto::ConvTileType>(ty);
   if (!ct) {
     return op->emitOpError() << "expects " << name << " to be a !pto.conv_tile";
@@ -5472,7 +5480,7 @@ static LogicalResult verifyConvTileCommon(Operation *op, Type ty, StringRef name
 }
 
 static LogicalResult verifyTileLikeCommon(Operation *op, Type ty, StringRef name,
-                                          bool allowLowPrecision = false) {
+                                          bool allowLowPrecision) {
   if (isa<pto::TileBufType>(ty)) {
     return verifyTileBufCommon(op, ty, name, allowLowPrecision);
   }
@@ -8277,6 +8285,60 @@ static LogicalResult verifyTExtractA2A3Mat(TExtractOp op,
 }
 
 static LogicalResult verifyTExtractA2A3(TExtractOp op) {
+  if (isa<pto::ConvTileType>(op.getSrc().getType())) {
+    Type srcTy = op.getSrc().getType();
+    Type dstTy = op.getDst().getType();
+    const bool hasFp = static_cast<bool>(op.getFp());
+    if (failed(verifyTileLikeCommon(op, srcTy, "src",
+                                    /*allowLowPrecision=*/false)) ||
+        failed(verifyTileBufCommon(op, dstTy, "dst",
+                                   /*allowLowPrecision=*/false)) ||
+        failed(verifyNonNegativeIndexRowCol(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(),
+            /*includeIndexAndIntOpsInConstFold=*/hasFp)) ||
+        failed(verifyExtractStaticBoundsCommon(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(), srcTy,
+            dstTy, /*includeIndexAndIntOpsInConstFold=*/hasFp))) {
+      return failure();
+    }
+    if (hasFp || op.getPreQuantScalar() ||
+        op.getReluPreMode() != pto::ReluPreMode::NoRelu ||
+        op.getAccToVecModeAttr()) {
+      return op.emitOpError("expects convtile textract to use the base form");
+    }
+    auto srcCT = dyn_cast<pto::ConvTileType>(srcTy);
+    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
+    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
+    if (!srcSpace || *srcSpace != pto::AddressSpace::MAT) {
+      return op.emitOpError("expects convtile textract src to use loc=mat");
+    }
+    if (!dstSpace || *dstSpace != pto::AddressSpace::RIGHT) {
+      return op.emitOpError("expects convtile textract dst to use loc=right");
+    }
+    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+    if (!srcLayout ||
+        (srcLayout.getLayout() != pto::Layout::FRACTAL_Z &&
+         srcLayout.getLayout() != pto::Layout::FRACTAL_Z_3D)) {
+      return op.emitOpError(
+          "expects convtile textract src to use layout=FRACTAL_Z or FRACTAL_Z_3D");
+    }
+    auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
+    if (!dstTb ||
+        dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
+        dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor)) {
+      return op.emitOpError(
+          "expects convtile textract dst to use blayout=row_major and slayout=col_major");
+    }
+    Type srcElem = getElemTy(srcTy);
+    Type dstElem = getElemTy(dstTy);
+    if (!srcElem || !dstElem || srcElem != dstElem) {
+      return op.emitOpError("expects convtile textract src and dst to have the same element type");
+    }
+    if (!isConvTileExtractElem(srcElem)) {
+      return op.emitOpError("expects convtile textract element type to be i8/i16/i32/f16/bf16/f32");
+    }
+    return success();
+  }
   auto common = verifyTExtractCommon(op, /*allowLowPrecision=*/false);
   if (failed(common)) {
     return failure();
@@ -8285,54 +8347,6 @@ static LogicalResult verifyTExtractA2A3(TExtractOp op) {
   const bool hasFp = static_cast<bool>(op.getFp());
   const bool hasPreQuantScalar = static_cast<bool>(op.getPreQuantScalar());
   const bool hasRelu = op.getReluPreMode() != pto::ReluPreMode::NoRelu;
-  if (isa<pto::ConvTileType>(getSrc().getType())) {
-    Type srcTy = getSrc().getType();
-    Type dstTy = getDst().getType();
-    if (failed(verifyTileLikeCommon(*this, srcTy, "src",
-                                    /*allowLowPrecision=*/false)) ||
-        failed(verifyTileBufCommon(*this, dstTy, "dst",
-                                   /*allowLowPrecision=*/false)) ||
-        failed(verifyNonNegativeIndexRowCol(
-            *getOperation(), getIndexRow(), getIndexCol(),
-            /*includeIndexAndIntOpsInConstFold=*/hasFp))) {
-      return failure();
-    }
-    if (hasFp || hasPreQuantScalar || hasRelu || op.getAccToVecModeAttr()) {
-      return emitOpError("expects convtile textract to use the base form");
-    }
-    auto srcCT = dyn_cast<pto::ConvTileType>(srcTy);
-    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
-    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
-    if (!srcSpace || *srcSpace != pto::AddressSpace::MAT) {
-      return emitOpError("expects convtile textract src to use loc=mat");
-    }
-    if (!dstSpace || *dstSpace != pto::AddressSpace::RIGHT) {
-      return emitOpError("expects convtile textract dst to use loc=right");
-    }
-    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
-    if (!srcLayout ||
-        (srcLayout.getLayout() != pto::Layout::FRACTAL_Z &&
-         srcLayout.getLayout() != pto::Layout::FRACTAL_Z_3D)) {
-      return emitOpError(
-          "expects convtile textract src to use layout=FRACTAL_Z or FRACTAL_Z_3D");
-    }
-    auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
-    if (!dstTb ||
-        dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
-        dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor)) {
-      return emitOpError(
-          "expects convtile textract dst to use blayout=row_major and slayout=col_major");
-    }
-    Type srcElem = getElemTy(srcTy);
-    Type dstElem = getElemTy(dstTy);
-    if (!srcElem || !dstElem || srcElem != dstElem) {
-      return emitOpError("expects convtile textract src and dst to have the same element type");
-    }
-    if (!isConvTileExtractElem(srcElem)) {
-      return emitOpError("expects convtile textract element type to be i8/i16/i32/f16/bf16/f32");
-    }
-    return success();
-  }
   if (!isA2A3ExtractElemType(c.dstElem) && !(hasFp && c.dstElem.isInteger(16))) {
     return op.emitOpError("expects A2/A3 textract element type to be i8/f16/bf16/f32");
   }
@@ -8429,6 +8443,60 @@ static LogicalResult verifyTExtractA5Acc(TExtractOp op,
 }
 
 static LogicalResult verifyTExtractA5(TExtractOp op) {
+  if (isa<pto::ConvTileType>(op.getSrc().getType())) {
+    Type srcTy = op.getSrc().getType();
+    Type dstTy = op.getDst().getType();
+    const bool hasFp = static_cast<bool>(op.getFp());
+    const bool hasPreQuantScalar = static_cast<bool>(op.getPreQuantScalar());
+    const bool hasRelu = op.getReluPreMode() != pto::ReluPreMode::NoRelu;
+    if (failed(verifyTileLikeCommon(op, srcTy, "src",
+                                    /*allowLowPrecision=*/true)) ||
+        failed(verifyTileBufCommon(op, dstTy, "dst",
+                                   /*allowLowPrecision=*/true)) ||
+        failed(verifyNonNegativeIndexRowCol(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(),
+            /*includeIndexAndIntOpsInConstFold=*/hasFp)) ||
+        failed(verifyExtractStaticBoundsCommon(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(), srcTy,
+            dstTy, /*includeIndexAndIntOpsInConstFold=*/hasFp))) {
+      return failure();
+    }
+    if (hasFp || hasPreQuantScalar || hasRelu || op.getAccToVecModeAttr()) {
+      return op.emitOpError("expects convtile textract to use the base form");
+    }
+    auto srcCT = dyn_cast<pto::ConvTileType>(srcTy);
+    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
+    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
+    if (!srcSpace || *srcSpace != pto::AddressSpace::MAT) {
+      return op.emitOpError("expects convtile textract src to use loc=mat");
+    }
+    if (!dstSpace || *dstSpace != pto::AddressSpace::RIGHT) {
+      return op.emitOpError("expects convtile textract dst to use loc=right");
+    }
+    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+    if (!srcLayout ||
+        (srcLayout.getLayout() != pto::Layout::FRACTAL_Z &&
+         srcLayout.getLayout() != pto::Layout::FRACTAL_Z_3D)) {
+      return op.emitOpError(
+          "expects convtile textract src to use layout=FRACTAL_Z or FRACTAL_Z_3D");
+    }
+    auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
+    if (!dstTb ||
+        dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
+        dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor)) {
+      return op.emitOpError(
+          "expects convtile textract dst to use blayout=row_major and slayout=col_major");
+    }
+    Type srcElem = getElemTy(srcTy);
+    Type dstElem = getElemTy(dstTy);
+    if (!srcElem || !dstElem || srcElem != dstElem) {
+      return op.emitOpError("expects convtile textract src and dst to have the same element type");
+    }
+    if (!isConvTileExtractElem(srcElem)) {
+      return op.emitOpError("expects convtile textract element type to be i8/i16/i32/f16/bf16/f32");
+    }
+    return success();
+  }
   auto common = verifyTExtractCommon(op, /*allowLowPrecision=*/true);
   if (failed(common)) {
     return failure();
@@ -8436,54 +8504,6 @@ static LogicalResult verifyTExtractA5(TExtractOp op) {
   const TExtractCommon &c = *common;
   const bool hasPreQuantScalar = static_cast<bool>(op.getPreQuantScalar());
   const bool hasRelu = op.getReluPreMode() != pto::ReluPreMode::NoRelu;
-  if (isa<pto::ConvTileType>(getSrc().getType())) {
-    Type srcTy = getSrc().getType();
-    Type dstTy = getDst().getType();
-    if (failed(verifyTileLikeCommon(*this, srcTy, "src",
-                                    /*allowLowPrecision=*/true)) ||
-        failed(verifyTileBufCommon(*this, dstTy, "dst",
-                                   /*allowLowPrecision=*/true)) ||
-        failed(verifyNonNegativeIndexRowCol(
-            *getOperation(), getIndexRow(), getIndexCol(),
-            /*includeIndexAndIntOpsInConstFold=*/hasFp))) {
-      return failure();
-    }
-    if (hasFp || hasPreQuantScalar || hasRelu || op.getAccToVecModeAttr()) {
-      return emitOpError("expects convtile textract to use the base form");
-    }
-    auto srcCT = dyn_cast<pto::ConvTileType>(srcTy);
-    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
-    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
-    if (!srcSpace || *srcSpace != pto::AddressSpace::MAT) {
-      return emitOpError("expects convtile textract src to use loc=mat");
-    }
-    if (!dstSpace || *dstSpace != pto::AddressSpace::RIGHT) {
-      return emitOpError("expects convtile textract dst to use loc=right");
-    }
-    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
-    if (!srcLayout ||
-        (srcLayout.getLayout() != pto::Layout::FRACTAL_Z &&
-         srcLayout.getLayout() != pto::Layout::FRACTAL_Z_3D)) {
-      return emitOpError(
-          "expects convtile textract src to use layout=FRACTAL_Z or FRACTAL_Z_3D");
-    }
-    auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
-    if (!dstTb ||
-        dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
-        dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor)) {
-      return emitOpError(
-          "expects convtile textract dst to use blayout=row_major and slayout=col_major");
-    }
-    Type srcElem = getElemTy(srcTy);
-    Type dstElem = getElemTy(dstTy);
-    if (!srcElem || !dstElem || srcElem != dstElem) {
-      return emitOpError("expects convtile textract src and dst to have the same element type");
-    }
-    if (!isConvTileExtractElem(srcElem)) {
-      return emitOpError("expects convtile textract element type to be i8/i16/i32/f16/bf16/f32");
-    }
-    return success();
-  }
   if (!isA5ExtractElemType(c.dstElem)) {
     return op.emitOpError("expects A5 textract element type to be an fp8/f16/bf16/f32 or int8 family type");
   }

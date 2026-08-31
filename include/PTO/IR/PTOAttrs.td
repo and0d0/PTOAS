@@ -111,8 +111,7 @@ def PTO_FmatrixModeEnum : PTO_I32Enum<
     PTO_FmatrixMode_ManualB
   ]>;
 
-def PTO_FmatrixModeAttr : PTO_Attr<"FmatrixMode", "fmatrix_mode"> {
-  let parameters = (ins EnumParameter<PTO_FmatrixModeEnum>:$value);
+def PTO_FmatrixModeAttr : EnumAttr<PTO_Dialect, PTO_FmatrixModeEnum, "fmatrix_mode"> {
   let assemblyFormat = "`<` params `>`";
   let summary = "A/B selector for FMATRIX-related ops";
 }
@@ -507,6 +506,16 @@ def PTO_Layout_DN : I32EnumAttrCase<"DN", 1, "dn">;
 def PTO_Layout_NZ : I32EnumAttrCase<"NZ", 2, "nz">;
 def PTO_Layout_MX_A_ZZ : I32EnumAttrCase<"MX_A_ZZ", 3, "mx_a_zz">;
 def PTO_Layout_MX_B_NN : I32EnumAttrCase<"MX_B_NN", 4, "mx_b_nn">;
+def PTO_Layout_NCHW : I32EnumAttrCase<"NCHW", 5, "nchw">;
+def PTO_Layout_NC1HWC0 : I32EnumAttrCase<"NC1HWC0", 6, "nc1hwc0">;
+def PTO_Layout_NCDHW : I32EnumAttrCase<"NCDHW", 7, "ncdhw">;
+def PTO_Layout_NDC1HWC0 : I32EnumAttrCase<"NDC1HWC0", 8, "ndc1hwc0">;
+def PTO_Layout_GNCHW : I32EnumAttrCase<"GNCHW", 9, "gnchw">;
+def PTO_Layout_GNC1HWC0 : I32EnumAttrCase<"GNC1HWC0", 10, "gnc1hwc0">;
+def PTO_Layout_NHWC : I32EnumAttrCase<"NHWC", 11, "nhwc">;
+def PTO_Layout_FRACTAL_Z : I32EnumAttrCase<"FRACTAL_Z", 12, "fractal_z">;
+def PTO_Layout_FRACTAL_Z_3D :
+    I32EnumAttrCase<"FRACTAL_Z_3D", 13, "fractal_z_3d">;
 
 def PTO_LayoutEnum : PTO_I32Enum<
   "Layout", "Global tensor layout (row/col/fractal)", [
@@ -514,16 +523,26 @@ def PTO_LayoutEnum : PTO_I32Enum<
     PTO_Layout_DN,
     PTO_Layout_NZ,
     PTO_Layout_MX_A_ZZ,
-    PTO_Layout_MX_B_NN
+    PTO_Layout_MX_B_NN,
+    PTO_Layout_NCHW,
+    PTO_Layout_NC1HWC0,
+    PTO_Layout_NCDHW,
+    PTO_Layout_NDC1HWC0,
+    PTO_Layout_GNCHW,
+    PTO_Layout_GNC1HWC0,
+    PTO_Layout_NHWC,
+    PTO_Layout_FRACTAL_Z,
+    PTO_Layout_FRACTAL_Z_3D
   ]>;
 
 def PTO_LayoutAttr : PTO_Attr<"Layout", "layout"> {
   let parameters = (ins EnumParameter<PTO_LayoutEnum>:$layout);
   let assemblyFormat = "`<` params `>`";
   let description = [{
-    Layout inferred from shape/stride for GlobalTensor:
+    Layout inferred from shape/stride for GlobalTensor and ConvTile:
       ND (row-major), DN (col-major), NZ (fractal),
-      MX_A_ZZ (A-side MX scale), MX_B_NN (B-side MX scale).
+      MX_A_ZZ (A-side MX scale), MX_B_NN (B-side MX scale),
+      NCHW/NC1HWC0/NCDHW/NDC1HWC0/GNCHW/GNC1HWC0/NHWC/FRACTAL_Z/FRACTAL_Z_3D for conv layouts.
   }];
 }
 
@@ -1325,28 +1344,6 @@ def ConvTileConfigAttr : AttrDef<PTO_Dialect, "ConvTileConfig"> {
   );
 
   let hasCustomAssemblyFormat = 1;
-
-  let builders = [
-    AttrBuilder<(ins
-      "mlir::IntegerAttr":$fmapH,
-      "mlir::IntegerAttr":$fmapW,
-      ArrayRefParameter<"int64_t">:$padList,
-      "mlir::IntegerAttr":$filterH,
-      "mlir::IntegerAttr":$filterW,
-      "mlir::IntegerAttr":$dilationH,
-      "mlir::IntegerAttr":$dilationW,
-      "mlir::IntegerAttr":$strideH,
-      "mlir::IntegerAttr":$strideW,
-      "mlir::Attribute":$padValue,
-      "mlir::IntegerAttr":$channelSize,
-      "mlir::IntegerAttr":$repeatStride,
-      "mlir::IntegerAttr":$repeatTime,
-      "mlir::IntegerAttr":$repeatMode,
-      "mlir::IntegerAttr":$dstStride,
-      "mlir::IntegerAttr":$dstMposition,
-      "mlir::BoolAttr":$transpose
-    )>
-  ];
 
   let extraClassDeclaration = [{
     static ConvTileConfigAttr getDefault(MLIRContext *ctx);

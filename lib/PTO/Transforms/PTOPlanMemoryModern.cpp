@@ -259,11 +259,11 @@ static FailureOr<uint64_t> computeStaticBufferBytes(Value value) {
   if (auto convType = dyn_cast<ConvTileType>(value.getType())) {
     uint64_t elemBytes = getPTOStorageElemByteSize(convType.getElementType());
     const bool invalidCapacity =
-        elemBytes == 0 || convType.getBufferSize() <= 0;
+        elemBytes == 0 || convType.getBufferSizeValue() <= 0;
     if (invalidCapacity) {
       return failure();
     }
-    uint64_t bufferSize = static_cast<uint64_t>(convType.getBufferSize());
+    uint64_t bufferSize = static_cast<uint64_t>(convType.getBufferSizeValue());
     const bool overflows =
         bufferSize > std::numeric_limits<uint64_t>::max() / elemBytes;
     if (overflows) {
