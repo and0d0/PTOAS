@@ -808,9 +808,6 @@ static std::optional<int64_t> computeConvTileBufferSize(ArrayRef<int64_t> shape)
 
 static LogicalResult parseConvTileLayoutField(AsmParser &parser,
                                               Attribute &layoutAttr) {
-  if (failed(parseTileBufKeyEq(parser, "layout"))) {
-    return failure();
-  }
   if (failed(parser.parseAttribute(layoutAttr))) {
     return failure();
   }
@@ -819,9 +816,6 @@ static LogicalResult parseConvTileLayoutField(AsmParser &parser,
 
 static LogicalResult parseConvTileConfigField(AsmParser &parser,
                                               Attribute &configAttr) {
-  if (failed(parseTileBufKeyEq(parser, "config"))) {
-    return failure();
-  }
   if (failed(parser.parseAttribute(configAttr))) {
     return failure();
   }
@@ -948,7 +942,7 @@ Type ConvTileType::parse(AsmParser &parser) {
 
     if (key == "layout") {
       Attribute attr;
-      if (failed(parser.parseAttribute(attr))) {
+      if (failed(parseConvTileLayoutField(parser, attr))) {
         return Type();
       }
       layoutAttr = llvm::dyn_cast<LayoutAttr>(attr);
@@ -974,7 +968,7 @@ Type ConvTileType::parse(AsmParser &parser) {
 
     if (key == "config") {
       Attribute attr;
-      if (failed(parser.parseAttribute(attr))) {
+      if (failed(parseConvTileConfigField(parser, attr))) {
         return Type();
       }
       configAttr = llvm::dyn_cast_or_null<ConvTileConfigAttr>(attr);

@@ -33,6 +33,14 @@ constexpr int32_t kCompactModeNull = static_cast<int32_t>(CompactMode::Null);
 constexpr int32_t kCompactModeRowPlusOne =
     static_cast<int32_t>(CompactMode::RowPlusOne);
 
+static LogicalResult parseTileBufKeyEq(AsmParser &parser,
+                                       StringRef expectedKey) {
+  if (failed(parser.parseKeyword(expectedKey))) {
+    return failure();
+  }
+  return parser.parseEqual();
+}
+
 } // namespace
 
 TileBufConfigAttr TileBufConfigAttr::getDefault(MLIRContext *ctx) {
