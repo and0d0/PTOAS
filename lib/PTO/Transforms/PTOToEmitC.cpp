@@ -8394,7 +8394,6 @@ static FailureOr<GlobalTensorViewMetadata> buildGlobalTensorViewMetadata(
 
 static FailureOr<Value> createGlobalTensorView(
     ConversionPatternRewriter &rewriter, Location loc, Value ptr, Type elemTy,
-    ArrayRef<int64_t> shape, ArrayRef<int64_t> strides,
     const GlobalTensorViewMetadata &metadata);
 
 static FailureOr<Value> buildGlobalTensorViewFromPointer(
@@ -8422,7 +8421,7 @@ static FailureOr<Value> buildGlobalTensorViewFromPointer(
   }
 
   return createGlobalTensorView(
-      rewriter, loc, ptr, elemTy, shape, effectiveStrides, *metadata);
+      rewriter, loc, ptr, elemTy, *metadata);
 }
 
 static FailureOr<GlobalTensorViewMetadata> buildGlobalTensorViewMetadata(
@@ -8464,12 +8463,12 @@ static FailureOr<GlobalTensorViewMetadata> buildGlobalTensorViewMetadata(
 
 static FailureOr<Value> createGlobalTensorView(
     ConversionPatternRewriter &rewriter, Location loc, Value ptr, Type elemTy,
-    ArrayRef<int64_t> shape, ArrayRef<int64_t> strides,
     const GlobalTensorViewMetadata &metadata) {
   auto *ctx = rewriter.getContext();
   std::string gtTypeStr =
-      getGlobalTensorTypeStringFromShapeAndStrides(elemTy, shape, strides,
-                                                   metadata.layoutEnum);
+      "GlobalTensor<" + getElemTypeStringForGT(elemTy) + ", " +
+      metadata.shapeType + ", " + metadata.strideType + ", " +
+      metadata.layoutEnum + ">";
   auto gtType = emitc::OpaqueType::get(ctx, gtTypeStr);
   auto gt = rewriter.create<emitc::CallOpaqueOp>(
       loc, gtType, gtTypeStr, ArrayAttr{}, ArrayAttr{},
