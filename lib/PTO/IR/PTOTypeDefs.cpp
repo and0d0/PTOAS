@@ -910,7 +910,7 @@ Type ConvTileType::parse(AsmParser &parser) {
   }
 
   if (failed(parser.parseDimensionList(fields.shape, /*allowDynamic=*/false,
-                                       /*withTrailingX=*/false))) {
+                                       /*withTrailingX=*/true))) {
     return Type();
   }
 

@@ -33,14 +33,6 @@ constexpr int32_t kCompactModeNull = static_cast<int32_t>(CompactMode::Null);
 constexpr int32_t kCompactModeRowPlusOne =
     static_cast<int32_t>(CompactMode::RowPlusOne);
 
-static LogicalResult parseTileBufKeyEq(AsmParser &parser,
-                                       StringRef expectedKey) {
-  if (failed(parser.parseKeyword(expectedKey))) {
-    return failure();
-  }
-  return parser.parseEqual();
-}
-
 } // namespace
 
 TileBufConfigAttr TileBufConfigAttr::getDefault(MLIRContext *ctx) {
@@ -279,13 +271,8 @@ constexpr unsigned kConvTilePadListSize = 4;
 constexpr int32_t kConvTileDefaultZero = 0;
 constexpr int32_t kConvTileDefaultOne = 1;
 
-static LogicalResult parseTileBufKeyEq(AsmParser &parser, StringRef expectedKey);
-
-static LogicalResult parseConvTileIntField(AsmParser &parser, StringRef key,
+static LogicalResult parseConvTileIntField(AsmParser &parser,
                                            IntegerAttr &value) {
-  if (failed(parseTileBufKeyEq(parser, key))) {
-    return failure();
-  }
   int64_t parsed = 0;
   if (failed(parser.parseInteger(parsed))) {
     return failure();
@@ -297,9 +284,6 @@ static LogicalResult parseConvTileIntField(AsmParser &parser, StringRef key,
 
 static LogicalResult parseConvTileBoolField(AsmParser &parser, StringRef key,
                                             BoolAttr &value) {
-  if (failed(parseTileBufKeyEq(parser, key))) {
-    return failure();
-  }
   bool parsed = false;
   if (succeeded(parser.parseOptionalKeyword("true"))) {
     parsed = true;
@@ -314,11 +298,8 @@ static LogicalResult parseConvTileBoolField(AsmParser &parser, StringRef key,
   return success();
 }
 
-static LogicalResult parseConvTileAttrField(AsmParser &parser, StringRef key,
+static LogicalResult parseConvTileAttrField(AsmParser &parser,
                                             Attribute &value) {
-  if (failed(parseTileBufKeyEq(parser, key))) {
-    return failure();
-  }
   if (failed(parser.parseAttribute(value))) {
     return failure();
   }
@@ -327,9 +308,6 @@ static LogicalResult parseConvTileAttrField(AsmParser &parser, StringRef key,
 
 static LogicalResult parseConvTilePadListField(AsmParser &parser,
                                                SmallVectorImpl<int64_t> &padList) {
-  if (failed(parseTileBufKeyEq(parser, "pad_list"))) {
-    return failure();
-  }
   SmallVector<int64_t, kConvTilePadListSize> parsed;
   if (failed(parser.parseDimensionList(parsed, /*allowDynamic=*/false,
                                        /*withTrailingX=*/false))) {
@@ -535,7 +513,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
     }
 
     if (key == "fmap_h") {
-      if (failed(parseConvTileIntField(p, key, fmapH))) {
+      if (failed(parseConvTileIntField(p, fmapH))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -544,7 +522,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "fmap_w") {
-      if (failed(parseConvTileIntField(p, key, fmapW))) {
+      if (failed(parseConvTileIntField(p, fmapW))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -562,7 +540,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "filter_h") {
-      if (failed(parseConvTileIntField(p, key, filterH))) {
+      if (failed(parseConvTileIntField(p, filterH))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -571,7 +549,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "filter_w") {
-      if (failed(parseConvTileIntField(p, key, filterW))) {
+      if (failed(parseConvTileIntField(p, filterW))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -580,7 +558,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "dilation_h") {
-      if (failed(parseConvTileIntField(p, key, dilationH))) {
+      if (failed(parseConvTileIntField(p, dilationH))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -589,7 +567,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "dilation_w") {
-      if (failed(parseConvTileIntField(p, key, dilationW))) {
+      if (failed(parseConvTileIntField(p, dilationW))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -598,7 +576,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "stride_h") {
-      if (failed(parseConvTileIntField(p, key, strideH))) {
+      if (failed(parseConvTileIntField(p, strideH))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -607,7 +585,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "stride_w") {
-      if (failed(parseConvTileIntField(p, key, strideW))) {
+      if (failed(parseConvTileIntField(p, strideW))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -616,7 +594,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "pad_value") {
-      if (failed(parseConvTileAttrField(p, key, padValue))) {
+      if (failed(parseConvTileAttrField(p, padValue))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -625,7 +603,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "channel_size") {
-      if (failed(parseConvTileIntField(p, key, channelSize))) {
+      if (failed(parseConvTileIntField(p, channelSize))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -634,7 +612,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "repeat_stride") {
-      if (failed(parseConvTileIntField(p, key, repeatStride))) {
+      if (failed(parseConvTileIntField(p, repeatStride))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -643,7 +621,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "repeat_time") {
-      if (failed(parseConvTileIntField(p, key, repeatTime))) {
+      if (failed(parseConvTileIntField(p, repeatTime))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -652,7 +630,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "repeat_mode") {
-      if (failed(parseConvTileIntField(p, key, repeatMode))) {
+      if (failed(parseConvTileIntField(p, repeatMode))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -661,7 +639,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "dst_stride") {
-      if (failed(parseConvTileIntField(p, key, dstStride))) {
+      if (failed(parseConvTileIntField(p, dstStride))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {
@@ -670,7 +648,7 @@ Attribute ConvTileConfigAttr::parse(AsmParser &p, Type) {
       continue;
     }
     if (key == "dst_mposition") {
-      if (failed(parseConvTileIntField(p, key, dstMposition))) {
+      if (failed(parseConvTileIntField(p, dstMposition))) {
         return {};
       }
       if (failed(consumeFieldTerminator())) {

@@ -336,6 +336,47 @@ static void createLastUseAwareOpaqueCall(
                                        operands);
 }
 
+static void emitConvTileConfigInitCall(ConversionPatternRewriter &rewriter,
+                                       Location loc, Value tile,
+                                       pto::ConvTileType convTy) {
+  auto *ctx = rewriter.getContext();
+  auto cfg = convTy.getConfigAttr();
+
+  SmallVector<Attribute, 24> args;
+  args.push_back(IntegerAttr::get(IndexType::get(ctx), 0));
+
+  auto appendI32 = [&](IntegerAttr attr) {
+    args.push_back(IntegerAttr::get(rewriter.getI32Type(), attr.getInt()));
+  };
+  auto appendPad = [&](int64_t value) {
+    args.push_back(IntegerAttr::get(rewriter.getI32Type(), value));
+  };
+
+  appendI32(cfg.getFmapH());
+  appendI32(cfg.getFmapW());
+  for (int64_t pad : cfg.getPadList())
+    appendPad(pad);
+  appendI32(cfg.getFilterH());
+  appendI32(cfg.getFilterW());
+  appendI32(cfg.getDilationH());
+  appendI32(cfg.getDilationW());
+  appendI32(cfg.getStrideH());
+  appendI32(cfg.getStrideW());
+  args.push_back(cfg.getPadValue());
+  appendI32(cfg.getChannelSize());
+  appendI32(cfg.getRepeatStride());
+  appendI32(cfg.getRepeatTime());
+  appendI32(cfg.getRepeatMode());
+  appendI32(cfg.getDstStride());
+  appendI32(cfg.getDstMposition());
+  args.push_back(cfg.getTranspose());
+
+  rewriter.create<emitc::CallOpaqueOp>(
+      loc, TypeRange{}, "PTOAS__INIT_CONVTILE_CONFIG",
+      /*args=*/rewriter.getArrayAttr(args),
+      /*templateArgs=*/ArrayAttr{}, /*operands=*/ValueRange{tile});
+}
+
 static StringRef getFmatrixModeToken(pto::FmatrixMode mode) {
   switch (mode) {
   case pto::FmatrixMode::FMATRIX_A_AUTO:
@@ -12618,19 +12659,30 @@ struct PTOAllocTileToEmitC
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     MLIRContext *ctx = rewriter.getContext();
-    auto tileTy = cast<pto::TileBufType>(op.getResult().getType());
-    auto tileTypeString = getEmitCTileTypeString(tileTy);
+    Type resultTy = op.getResult().getType();
+    auto tileTy = dyn_cast<pto::TileBufType>(resultTy);
+    auto convTy = dyn_cast<pto::ConvTileType>(resultTy);
+    if (!tileTy && !convTy)
+      return rewriter.notifyMatchFailure(
+          op, "expected alloc_tile to produce a tile_buf or conv_tile");
+
+    std::optional<std::string> tileTypeString;
+    if (tileTy)
+      tileTypeString = getEmitCTileTypeString(tileTy);
+    else
+      tileTypeString = getEmitCConvTileTypeString(convTy);
     if (!tileTypeString)
       return rewriter.notifyMatchFailure(
           op, "only rank-2 alloc_tile handles can be converted to EmitC");
 
-    Type convertedTy = getTypeConverter()->convertType(tileTy);
+    Type convertedTy = getTypeConverter()->convertType(resultTy);
     if (!convertedTy)
       convertedTy = emitc::OpaqueType::get(ctx, *tileTypeString);
 
-    auto validShape = tileTy.getValidShape();
+    ArrayRef<int64_t> validShape = tileTy ? tileTy.getValidShape()
+                                          : ArrayRef<int64_t>{};
     bool hasDynamicValidDim =
-        llvm::any_of(validShape, [](int64_t dim) { return dim < 0; });
+        tileTy && llvm::any_of(validShape, [](int64_t dim) { return dim < 0; });
     bool useConstructor = hasDynamicValidDim;
 
     SmallVector<Value> constructorArgs;
@@ -12685,6 +12737,9 @@ struct PTOAllocTileToEmitC
               .getResult();
       tile = loadEmitCVariableIfNeeded(rewriter, loc, tile);
     }
+
+    if (convTy)
+      emitConvTileConfigInitCall(rewriter, loc, tile, convTy);
 
     Value addr = adaptor.getAddr();
     if (addr) {
@@ -13935,6 +13990,7 @@ struct EmitPTOManualPass
         bool needsEventIdArrayHelper = false;
         bool needsTRandomHelper = false;
         bool needsGlobalTensorDataHelper = false;
+        bool needsConvTileInitHelper = false;
         mop.walk([&](Operation *op) {
           if (isa<mlir::pto::DeclareEventIdArrayOp>(op))
             needsEventIdArrayHelper = true;
@@ -13950,6 +14006,10 @@ struct EmitPTOManualPass
           }
           if (isa<mlir::pto::PartitionViewOp>(op))
             needsGlobalTensorDataHelper = true;
+          if (auto alloc = dyn_cast<mlir::pto::AllocTileOp>(op)) {
+            if (isa<mlir::pto::ConvTileType>(alloc.getResult().getType()))
+              needsConvTileInitHelper = true;
+          }
         });
 
 		    // 1. 插入头文件
@@ -14017,6 +14077,41 @@ static AICORE inline void PTOAS__TRANDOM(
   TRandomKey key = {key0, key1};
   TRandomCounter counter = {counter0, counter1, counter2, counter3};
   TRANDOM<Rounds>(dst, key, counter);
+}
+)cpp"));
+        }
+        if (needsConvTileInitHelper) {
+	      builder.create<emitc::VerbatimOp>(
+	          loc, builder.getStringAttr(R"cpp(
+template <typename Tile, typename PadValueT>
+static AICORE inline void PTOAS__INIT_CONVTILE_CONFIG(
+    Tile &tile, uint16_t fmapH, uint16_t fmapW, uint8_t padLeft,
+    uint8_t padRight, uint8_t padTop, uint8_t padBottom, uint16_t filterH,
+    uint16_t filterW, uint16_t dilationH, uint16_t dilationW,
+    uint16_t strideH, uint16_t strideW, PadValueT padValue,
+    uint16_t channelSize, uint16_t repeatStride, uint8_t repeatTime,
+    uint8_t repeatMode, uint16_t dstStride, uint16_t dstMposition,
+    bool transpose) {
+  const uint8_t padList[4] = {padLeft, padRight, padTop, padBottom};
+  tile.SetFmapH(fmapH);
+  tile.SetFmapW(fmapW);
+  tile.SetPadListArray(padList);
+  tile.SetFilterH(filterH);
+  tile.SetFilterW(filterW);
+  tile.SetDilationH(dilationH);
+  tile.SetDilationW(dilationW);
+  tile.SetStrideH(strideH);
+  tile.SetStrideW(strideW);
+  tile.SetPadValue(padValue);
+  tile.SetChannelSize(channelSize);
+  tile.SetRepeatStride(repeatStride);
+  tile.SetRepeatTime(repeatTime);
+  tile.SetRepeatMode(repeatMode);
+#ifndef PTO_NPU_ARCH_A2A3
+  tile.SetDstStride(dstStride);
+  tile.SetDstMposition(dstMposition);
+#endif
+  tile.SetTranspose(transpose);
 }
 )cpp"));
         }
