@@ -66,6 +66,17 @@ static MlirContext inferContextFromElementType(MlirContext context,
   return mlirTypeGetContext(elementType);
 }
 
+static MlirContext inferContextFromAttribute(py::object contextObj,
+                                             MlirAttribute attr) {
+  if (!contextObj.is_none()) {
+    return contextObj.cast<MlirContext>();
+  }
+  if (mlirAttributeIsNull(attr)) {
+    throw py::value_error("context is required when attribute is null");
+  }
+  return mlirAttributeGetContext(attr);
+}
+
 static int32_t enumValueFromPy(py::object value, const char *attrName,
                                const char *enumName) {
   if (py::isinstance<py::int_>(value)) {
@@ -226,6 +237,12 @@ void mlir::pto::python::populatePTODialectBindings(pybind11::module_ &m) {
     py::enum_<mlir::pto::SaturationMode>(m, "SaturationMode")
     .value("ON", mlir::pto::SaturationMode::ON)
     .value("OFF", mlir::pto::SaturationMode::OFF);
+
+    py::enum_<mlir::pto::FmatrixMode>(m, "FmatrixMode")
+    .value("FMATRIX_A_AUTO", mlir::pto::FmatrixMode::FMATRIX_A_AUTO)
+    .value("FMATRIX_B_AUTO", mlir::pto::FmatrixMode::FMATRIX_B_AUTO)
+    .value("FMATRIX_A_MANUAL", mlir::pto::FmatrixMode::FMATRIX_A_MANUAL)
+    .value("FMATRIX_B_MANUAL", mlir::pto::FmatrixMode::FMATRIX_B_MANUAL);
 
     py::enum_<MlirPTOCmpMode>(m, "CmpMode")
       .value("EQ", MlirPTOCmpMode_EQ)
@@ -621,6 +638,10 @@ void mlir::pto::python::populatePTODialectBindings(pybind11::module_ &m) {
                     mlirPTOAttrIsAFmodPrecisionAttr,
                     mlirPTOFmodPrecisionAttrGet,
                     mlirPTOFmodPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "FmatrixModeAttr", "FmatrixMode",
+                    mlirPTOAttrIsAFmatrixModeAttr,
+                    mlirPTOFmatrixModeAttrGet,
+                    mlirPTOFmatrixModeAttrGetValue);
 
     mlir_attribute_subclass(
         m, "SaturationModeAttr",
@@ -1444,6 +1465,74 @@ void mlir::pto::python::populatePTODialectBindings(pybind11::module_ &m) {
             py::arg("context") = py::none(),
             py::arg("compact_mode") = py::none());
 
+    // ---- ConvTileConfigAttr ----
+    mlir_attribute_subclass(m, "ConvTileConfigAttr",
+                            [](MlirAttribute a) -> bool {
+                                return mlirPTOAttrIsAConvTileConfigAttr(a);
+                            })
+        .def_classmethod(
+            "get_default",
+            [](py::object cls, MlirContext ctx) -> py::object {
+                MlirAttribute a = mlirPTOConvTileConfigAttrGetDefault(ctx);
+                if (mlirAttributeIsNull(a)) {
+                  return py::none();
+                }
+                return cls(a);
+            },
+            py::arg("cls"), py::arg("context"))
+        .def_classmethod(
+            "get",
+            [](py::object cls,
+               MlirAttribute fmapH,
+               MlirAttribute fmapW,
+               std::vector<int64_t> padList,
+               MlirAttribute filterH,
+               MlirAttribute filterW,
+               MlirAttribute dilationH,
+               MlirAttribute dilationW,
+               MlirAttribute strideH,
+               MlirAttribute strideW,
+               MlirAttribute padValue,
+               MlirAttribute channelSize,
+               MlirAttribute repeatStride,
+               MlirAttribute repeatTime,
+               MlirAttribute repeatMode,
+               MlirAttribute dstStride,
+               MlirAttribute dstMposition,
+               MlirAttribute transpose,
+               py::object contextObj) -> py::object {
+                MlirContext ctx = inferContextFromAttribute(contextObj, fmapH);
+                MlirAttribute a = mlirPTOConvTileConfigAttrGet(
+                    ctx, fmapH, fmapW, static_cast<intptr_t>(padList.size()),
+                    padList.data(), filterH, filterW, dilationH, dilationW,
+                    strideH, strideW, padValue, channelSize, repeatStride,
+                    repeatTime, repeatMode, dstStride, dstMposition,
+                    transpose);
+                if (mlirAttributeIsNull(a)) {
+                  return py::none();
+                }
+                return cls(a);
+            },
+            py::arg("cls"),
+            py::arg("fmap_h"),
+            py::arg("fmap_w"),
+            py::arg("pad_list"),
+            py::arg("filter_h"),
+            py::arg("filter_w"),
+            py::arg("dilation_h"),
+            py::arg("dilation_w"),
+            py::arg("stride_h"),
+            py::arg("stride_w"),
+            py::arg("pad_value"),
+            py::arg("channel_size"),
+            py::arg("repeat_stride"),
+            py::arg("repeat_time"),
+            py::arg("repeat_mode"),
+            py::arg("dst_stride"),
+            py::arg("dst_mposition"),
+            py::arg("transpose"),
+            py::arg("context") = py::none());
+
     // ---- TileBufType ----
     mlir_type_subclass(m, "TileBufType", [](MlirType t) -> bool { return mlirPTOTypeIsATileBufType(t); })
         .def_classmethod(
@@ -1548,6 +1637,66 @@ void mlir::pto::python::populatePTODialectBindings(pybind11::module_ &m) {
         .def_property_readonly("s_fractal_size", [](MlirType self) -> int32_t {
           return mlirPTOTileBufTypeGetSFractalSize(self);
         });
+
+    // ---- ConvTileType ----
+    mlir_type_subclass(m, "ConvTileType",
+                       [](MlirType t) -> bool {
+                         return mlirPTOTypeIsAConvTileType(t);
+                       })
+        .def_classmethod(
+            "get",
+            [](py::object cls,
+               std::vector<int64_t> shape,
+               MlirType elementType,
+               MlirAttribute bufferSize,
+               MlirAttribute memorySpace,
+               MlirAttribute layout,
+               py::object configObj,
+               MlirContext ctx) -> py::object {
+                ctx = inferContextFromElementType(ctx, elementType);
+                MlirAttribute config = optionalAttributeFromPy(configObj);
+                MlirType ty = mlirPTOConvTileTypeGet(
+                    ctx, static_cast<intptr_t>(shape.size()), shape.data(),
+                    elementType, bufferSize, memorySpace, layout, config);
+                if (mlirTypeIsNull(ty)) {
+                  return py::none();
+                }
+                return cls(ty);
+            },
+            py::arg("cls"),
+            py::arg("shape"),
+            py::arg("element_type"),
+            py::arg("buffer_size"),
+            py::arg("memory_space"),
+            py::arg("layout"),
+            py::arg("config") = py::none(),
+            py::arg("context") = py::none())
+        .def_classmethod(
+            "upcast_type",
+            [](py::object cls, MlirType t) -> py::object {
+              if (mlirPTOTypeIsAConvTileType(t)) {
+                return cls(t);
+              }
+              return py::none();
+            },
+            py::arg("cls"), py::arg("type"))
+        .def_property_readonly(
+            "rank",
+            [](MlirType self) -> intptr_t {
+              return mlirPTOConvTileTypeGetRank(self);
+            })
+        .def_property_readonly(
+            "element_type",
+            [](MlirType self) -> MlirType {
+              return mlirPTOConvTileTypeGetElementType(self);
+            })
+        .def_property_readonly(
+            "shape",
+            [](MlirType self) -> py::list {
+              intptr_t n = 0;
+              const int64_t *d = mlirPTOConvTileTypeGetShape(self, &n);
+              return shapeToPyList(d, n);
+            });
 
     populatePTODialectSubmodule(m);
 }

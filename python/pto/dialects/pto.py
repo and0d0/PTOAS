@@ -61,11 +61,13 @@ TensorViewType = _pto_mod.TensorViewType
 PartitionTensorViewType = _pto_mod.PartitionTensorViewType
 TileType = _pto_mod.TileType
 TileBufType = _pto_mod.TileBufType
+ConvTileType = _pto_mod.ConvTileType
 AddressSpace = _pto_mod.AddressSpace
 AddressSpaceAttr = _pto_mod.AddressSpaceAttr
 FenceScope = _pto_mod.FenceScope
 FenceScopeAttr = _pto_mod.FenceScopeAttr
 TileBufConfigAttr = _pto_mod.TileBufConfigAttr
+ConvTileConfigAttr = _pto_mod.ConvTileConfigAttr
 BLayout = _pto_mod.BLayout
 BLayoutAttr = _pto_mod.BLayoutAttr
 SLayout = _pto_mod.SLayout
@@ -108,6 +110,8 @@ FmodPrecision = _pto_mod.FmodPrecision
 FmodPrecisionAttr = _pto_mod.FmodPrecisionAttr
 SaturationMode = _pto_mod.SaturationMode
 SaturationModeAttr = _pto_mod.SaturationModeAttr
+FmatrixMode = _pto_mod.FmatrixMode
+FmatrixModeAttr = _pto_mod.FmatrixModeAttr
 CmpMode = _pto_mod.CmpMode
 CmpModeAttr = _pto_mod.CmpModeAttr
 PIPE = _pto_mod.PIPE
@@ -290,6 +294,8 @@ __all__ = [
     "FmodPrecisionAttr",
     "SaturationMode",
     "SaturationModeAttr",
+    "FmatrixMode",
+    "FmatrixModeAttr",
     "CmpMode",
     "CmpModeAttr",
     "PIPE",
@@ -313,6 +319,8 @@ __all__ = [
     "VecStoreMode",
     "VecStoreModeAttr",
     "TileBufConfigAttr",
+    "ConvTileConfigAttr",
+    "ConvTileType",
     "TileConfig",
     # High-level sync helpers
     "record_event",

@@ -352,6 +352,57 @@ MlirType mlirPTOTileBufTypeGetWithValidShapeAndConfig(MlirContext ctx,
   return wrap(ty);
 }
 
+bool mlirPTOTypeIsAConvTileType(MlirType type) {
+  return mlir::isa<mlir::pto::ConvTileType>(unwrap(type));
+}
+
+MlirType mlirPTOConvTileTypeGet(MlirContext ctx, intptr_t rank,
+                                const int64_t *shape, MlirType elementType,
+                                MlirAttribute bufferSize,
+                                MlirAttribute memorySpace,
+                                MlirAttribute layout,
+                                MlirAttribute config) {
+  MLIRContext *c = unwrap(ctx);
+  auto shp = llvm::ArrayRef<int64_t>(shape, rank);
+  auto bufferSizeAttr = mlir::dyn_cast<mlir::IntegerAttr>(unwrap(bufferSize));
+  auto memorySpaceAttr =
+      mlir::dyn_cast<mlir::pto::AddressSpaceAttr>(unwrap(memorySpace));
+  auto layoutAttr = mlir::dyn_cast<mlir::pto::LayoutAttr>(unwrap(layout));
+  mlir::pto::ConvTileConfigAttr configAttr;
+  if (!mlirAttributeIsNull(config)) {
+    configAttr =
+        mlir::dyn_cast_or_null<mlir::pto::ConvTileConfigAttr>(unwrap(config));
+  }
+  if (!configAttr) {
+    configAttr = mlir::pto::ConvTileConfigAttr::getDefault(c);
+  }
+  if (!bufferSizeAttr || !memorySpaceAttr || !layoutAttr) {
+    return MlirType{nullptr};
+  }
+
+  auto ty = mlir::pto::ConvTileType::get(c, shp, unwrap(elementType),
+                                         bufferSizeAttr, memorySpaceAttr,
+                                         layoutAttr, configAttr);
+  return wrap(ty);
+}
+
+intptr_t mlirPTOConvTileTypeGetRank(MlirType type) {
+  return mlir::cast<mlir::pto::ConvTileType>(unwrap(type)).getRank();
+}
+
+MlirType mlirPTOConvTileTypeGetElementType(MlirType type) {
+  return wrap(mlir::cast<mlir::pto::ConvTileType>(unwrap(type)).getElementType());
+}
+
+const int64_t *mlirPTOConvTileTypeGetShape(MlirType type,
+                                           intptr_t *numDimsOut) {
+  static thread_local llvm::SmallVector<int64_t, 8> shape;
+  auto dims = mlir::cast<mlir::pto::ConvTileType>(unwrap(type)).getShape();
+  shape.assign(dims.begin(), dims.end());
+  *numDimsOut = static_cast<intptr_t>(shape.size());
+  return shape.data();
+}
+
 bool mlirPTOAttrIsABLayoutAttr(MlirAttribute attr) {
   return mlir::isa<mlir::pto::BLayoutAttr>(unwrap(attr));
 }
@@ -436,6 +487,7 @@ DEFINE_PTO_ENUM_ATTR_CAPI(RemPrecision, RemPrecisionAttr, RemPrecision)
 DEFINE_PTO_ENUM_ATTR_CAPI(RsqrtPrecision, RsqrtPrecisionAttr, RsqrtPrecision)
 DEFINE_PTO_ENUM_ATTR_CAPI(SqrtPrecision, SqrtPrecisionAttr, SqrtPrecision)
 DEFINE_PTO_ENUM_ATTR_CAPI(FmodPrecision, FmodPrecisionAttr, FmodPrecision)
+DEFINE_PTO_ENUM_ATTR_CAPI(FmatrixMode, FmatrixModeAttr, FmatrixMode)
 
 #undef DEFINE_PTO_ENUM_ATTR_CAPI
 
@@ -760,6 +812,14 @@ static mlir::pto::CompactModeAttr toCompactModeAttr(mlir::MLIRContext *c,
   return {};
 }
 
+static mlir::IntegerAttr toI32IntegerAttr(mlir::Attribute a) {
+  auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(a);
+  if (!intAttr || !intAttr.getType().isSignlessInteger(kI32BitWidth)) {
+    return {};
+  }
+  return intAttr;
+}
+
 bool mlirPTOAttrIsACompactModeAttr(MlirAttribute attr) {
   return mlir::isa<mlir::pto::CompactModeAttr>(unwrap(attr));
 }
@@ -910,6 +970,56 @@ MlirAttribute mlirPTOTileBufConfigAttrGetWithCompactMode(
   }
 
   return wrap(mlir::pto::TileBufConfigAttr::get(c, blA, slA, sz, pvA, cmA));
+}
+
+bool mlirPTOAttrIsAConvTileConfigAttr(MlirAttribute attr) {
+  return mlir::isa<mlir::pto::ConvTileConfigAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirPTOConvTileConfigAttrGetDefault(MlirContext ctx) {
+  auto *c = unwrap(ctx);
+  return wrap(mlir::pto::ConvTileConfigAttr::getDefault(c));
+}
+
+MlirAttribute mlirPTOConvTileConfigAttrGet(
+    MlirContext ctx, MlirAttribute fmapH, MlirAttribute fmapW,
+    intptr_t padListSize, const int64_t *padList, MlirAttribute filterH,
+    MlirAttribute filterW, MlirAttribute dilationH, MlirAttribute dilationW,
+    MlirAttribute strideH, MlirAttribute strideW, MlirAttribute padValue,
+    MlirAttribute channelSize, MlirAttribute repeatStride,
+    MlirAttribute repeatTime, MlirAttribute repeatMode, MlirAttribute dstStride,
+    MlirAttribute dstMposition, MlirAttribute transpose) {
+  auto *c = unwrap(ctx);
+  auto fmapHAttr = toI32IntegerAttr(unwrap(fmapH));
+  auto fmapWAttr = toI32IntegerAttr(unwrap(fmapW));
+  auto filterHAttr = toI32IntegerAttr(unwrap(filterH));
+  auto filterWAttr = toI32IntegerAttr(unwrap(filterW));
+  auto dilationHAttr = toI32IntegerAttr(unwrap(dilationH));
+  auto dilationWAttr = toI32IntegerAttr(unwrap(dilationW));
+  auto strideHAttr = toI32IntegerAttr(unwrap(strideH));
+  auto strideWAttr = toI32IntegerAttr(unwrap(strideW));
+  auto channelSizeAttr = toI32IntegerAttr(unwrap(channelSize));
+  auto repeatStrideAttr = toI32IntegerAttr(unwrap(repeatStride));
+  auto repeatTimeAttr = toI32IntegerAttr(unwrap(repeatTime));
+  auto repeatModeAttr = toI32IntegerAttr(unwrap(repeatMode));
+  auto dstStrideAttr = toI32IntegerAttr(unwrap(dstStride));
+  auto dstMpositionAttr = toI32IntegerAttr(unwrap(dstMposition));
+  auto transposeAttr = mlir::dyn_cast<mlir::BoolAttr>(unwrap(transpose));
+  if (!fmapHAttr || !fmapWAttr || !filterHAttr || !filterWAttr ||
+      !dilationHAttr || !dilationWAttr || !strideHAttr || !strideWAttr ||
+      !channelSizeAttr || !repeatStrideAttr || !repeatTimeAttr ||
+      !repeatModeAttr || !dstStrideAttr || !dstMpositionAttr ||
+      !transposeAttr) {
+    return MlirAttribute{nullptr};
+  }
+
+  auto pads =
+      llvm::ArrayRef<int64_t>(padList, static_cast<size_t>(padListSize));
+  return wrap(mlir::pto::ConvTileConfigAttr::get(
+      c, fmapHAttr, fmapWAttr, pads, filterHAttr, filterWAttr, dilationHAttr,
+      dilationWAttr, strideHAttr, strideWAttr, unwrap(padValue),
+      channelSizeAttr, repeatStrideAttr, repeatTimeAttr, repeatModeAttr,
+      dstStrideAttr, dstMpositionAttr, transposeAttr));
 }
 
 MlirType mlirPTOGMTypeGet(MlirContext ctx, intptr_t rank, const int64_t *shape,
