@@ -3592,9 +3592,20 @@ static LogicalResult verifyConstantLocalAddress(Operation *op, Value addr,
 }
 
 LogicalResult AllocTileOp::verify() {
-  auto ty = dyn_cast<pto::TileBufType>(getResult().getType());
+  auto resultType = getResult().getType();
+  if (auto convTy = dyn_cast<pto::ConvTileType>(resultType)) {
+    bool hasValidShapeOperands = getValidRow() || getValidCol();
+    if (hasValidShapeOperands) {
+      return emitOpError("valid_row and valid_col operands require result to be `!pto.tile_buf`");
+    }
+
+    return verifyConstantLocalAddress(getOperation(), getAddr(),
+                                      convTy.getMemorySpace());
+  }
+
+  auto ty = dyn_cast<pto::TileBufType>(resultType);
   if (!ty) {
-    return emitOpError("result must be `!pto.tile_buf`");
+    return emitOpError("result must be `!pto.tile_buf` or `!pto.conv_tile`");
   }
 
   if (failed(verifyTileBufLayoutConstraints(*this, ty, "result"))) {

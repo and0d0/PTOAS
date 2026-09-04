@@ -1591,8 +1591,8 @@ public:
       return failure();
     }
 
-    auto tileType = dyn_cast<TileBufType>(op.getResult().getType());
-    if (!tileType) {
+    Type tileType = op.getResult().getType();
+    if (!isa<TileBufType, ConvTileType>(tileType)) {
       return failure();
     }
 
