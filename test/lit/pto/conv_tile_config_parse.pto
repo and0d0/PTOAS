@@ -1,0 +1,37 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-arch=a5 --emit-pto-ir %s -o - | FileCheck %s
+
+module {
+  func.func @conv_tile_config_parse(
+      %src: !pto.conv_tile<
+          mat, 1x1x3x4x8xf16,
+          config=#pto.conv_tile_config<
+            fmap_h=3, fmap_w=4, pad_list=1x2x3x4,
+            filter_h=1, filter_w=1, dilation_h=1, dilation_w=1,
+            stride_h=1, stride_w=1, pad_value=0 : i32,
+            channel_size=8, repeat_stride=16, repeat_time=2,
+            repeat_mode=0, dst_stride=32, dst_mposition=0,
+            transpose=false>>) {
+    pto.set_fmatrix %src : !pto.conv_tile<
+        mat, 1x1x3x4x8xf16,
+        config=#pto.conv_tile_config<
+          fmap_h=3, fmap_w=4, pad_list=1x2x3x4,
+          filter_h=1, filter_w=1, dilation_h=1, dilation_w=1,
+          stride_h=1, stride_w=1, pad_value=0 : i32,
+          channel_size=8, repeat_stride=16, repeat_time=2,
+          repeat_mode=0, dst_stride=32, dst_mposition=0,
+          transpose=false>>
+    return
+  }
+}
+
+// CHECK-LABEL: func.func @conv_tile_config_parse
+// CHECK: !pto.conv_tile<mat, 1x1x3x4x8xf16
+// CHECK-SAME: config=#pto.conv_tile_config<fmap_h=3, fmap_w=4, pad_list=1x2x3x4

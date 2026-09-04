@@ -40,8 +40,6 @@ def build():
             ptr_f32 = pto.PtrType.get(f32, ctx)
             tv5_f32 = pto.TensorViewType.get(5, f32, ctx)
             src_ptv = pto.PartitionTensorViewType.get([1, 1, 3, 4, 8], f32, ctx)
-            dst_tv = pto.TensorViewType.get(2, f32, ctx)
-            dst_ptv = pto.PartitionTensorViewType.get([16, 32], f32, ctx)
 
             vec = pto.AddressSpaceAttr.get(pto.AddressSpace.VEC, ctx)
             left = pto.AddressSpaceAttr.get(pto.AddressSpace.LEFT, ctx)
@@ -88,7 +86,7 @@ def build():
                 ctx,
             )
 
-            fn_ty = func.FunctionType.get([ptr_f32, ptr_f32], [])
+            fn_ty = func.FunctionType.get([ptr_f32], [])
             with InsertionPoint(module.body):
                 fn = func.FuncOp("timg2col_runtime_kernel", fn_ty)
                 fn.operation.attributes["pto.entry"] = UnitAttr.get(ctx)
@@ -100,16 +98,12 @@ def build():
                 c3 = arith.ConstantOp(IndexType.get(ctx), 3).result
                 c4 = arith.ConstantOp(IndexType.get(ctx), 4).result
                 c8 = arith.ConstantOp(IndexType.get(ctx), 8).result
-                c16 = arith.ConstantOp(IndexType.get(ctx), 16).result
                 c32 = arith.ConstantOp(IndexType.get(ctx), 32).result
                 c96 = arith.ConstantOp(IndexType.get(ctx), 96).result
-                src_ptr, dst_ptr = entry.arguments
+                src_ptr = entry.arguments[0]
 
                 src_view = pto.MakeTensorViewOp(
                     tv5_f32, src_ptr, [c1, c1, c3, c4, c8], [c96, c96, c32, c8, c1]
-                ).result
-                dst_view = pto.MakeTensorViewOp(
-                    dst_tv, dst_ptr, [c16, c32], [c32, c1]
                 ).result
 
                 src_part = pto.PartitionViewOp(
@@ -118,24 +112,25 @@ def build():
                     offsets=[c0, c0, c0, c0, c0],
                     sizes=[c1, c1, c3, c4, c8],
                 ).result
-                dst_part = pto.PartitionViewOp(
-                    dst_ptv, dst_view, offsets=[c0, c0], sizes=[c16, c32]
-                ).result
 
                 src_tile = pto.AllocTileOp(src_tile_ty).result
                 dst_tile = pto.AllocTileOp(dst_tile_ty).result
-                pto.TLoadOp(None, src_part, src_tile)
-                pto.SetFmatrixOp(src_tile, pto.FmatrixModeAttr.get(pto.FmatrixMode.FMATRIX_B_MANUAL, ctx))
-                pto.SetImg2colRptOp(src_tile, pto.FmatrixModeAttr.get(pto.FmatrixMode.FMATRIX_B_MANUAL, ctx))
-                pto.SetImg2colPaddingOp(src_tile, pto.FmatrixModeAttr.get(pto.FmatrixMode.FMATRIX_B_MANUAL, ctx))
-                pto.TImg2colOp(
-                    dst_tile,
-                    src_tile,
-                    posM=1,
-                    posK=8,
-                    fmatrixMode=pto.FmatrixModeAttr.get(pto.FmatrixMode.FMATRIX_B_MANUAL, ctx),
-                )
-                pto.TStoreOp(None, dst_tile, dst_part)
+                cube_section = pto.SectionCubeOp()
+                with InsertionPoint(cube_section.body.blocks.append()):
+                    fmatrix_mode = pto.FmatrixModeAttr.get(
+                        pto.FmatrixMode.FMATRIX_B_MANUAL, ctx
+                    )
+                    pto.TLoadOp(None, src_part, src_tile)
+                    pto.SetFmatrixOp(src_tile, fmatrixMode=fmatrix_mode)
+                    pto.SetImg2colRptOp(src_tile, fmatrixMode=fmatrix_mode)
+                    pto.SetImg2colPaddingOp(src_tile, fmatrixMode=fmatrix_mode)
+                    pto.TImg2colOp(
+                        dst_tile,
+                        src_tile,
+                        posM=1,
+                        posK=8,
+                        fmatrixMode=fmatrix_mode,
+                    )
                 func.ReturnOp([])
 
             module.operation.verify()
