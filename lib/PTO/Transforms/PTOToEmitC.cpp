@@ -217,7 +217,7 @@ static int64_t getIntegerAttrSignedValue(IntegerAttr attr) {
 static SmallVector<unsigned, 4> collectTileOperandNumbers(Operation *op) {
   SmallVector<unsigned, 4> tileOperandNumbers;
   for (OpOperand &operand : op->getOpOperands()) {
-    if (isa<pto::TileBufType>(operand.get().getType()))
+    if (isa<pto::TileBufType, pto::ConvTileType>(operand.get().getType()))
       tileOperandNumbers.push_back(operand.getOperandNumber());
   }
   return tileOperandNumbers;
@@ -336,6 +336,71 @@ static void createLastUseAwareOpaqueCall(
                                        operands);
 }
 
+static void emitConvTileConfigInitCall(ConversionPatternRewriter &rewriter,
+                                       Location loc, Value tile,
+                                       pto::ConvTileType convTy) {
+  auto *ctx = rewriter.getContext();
+  auto cfg = convTy.getConfigAttr();
+
+  SmallVector<Attribute, 24> args;
+  args.push_back(IntegerAttr::get(IndexType::get(ctx), 0));
+
+  auto appendI32 = [&](IntegerAttr attr) {
+    args.push_back(IntegerAttr::get(rewriter.getI32Type(), attr.getInt()));
+  };
+  auto appendPad = [&](int64_t value) {
+    args.push_back(IntegerAttr::get(rewriter.getI32Type(), value));
+  };
+
+  appendI32(cfg.getFmapH());
+  appendI32(cfg.getFmapW());
+  for (int64_t pad : cfg.getPadList())
+    appendPad(pad);
+  appendI32(cfg.getFilterH());
+  appendI32(cfg.getFilterW());
+  appendI32(cfg.getDilationH());
+  appendI32(cfg.getDilationW());
+  appendI32(cfg.getStrideH());
+  appendI32(cfg.getStrideW());
+  args.push_back(cfg.getPadValue());
+  appendI32(cfg.getChannelSize());
+  appendI32(cfg.getRepeatStride());
+  appendI32(cfg.getRepeatTime());
+  appendI32(cfg.getRepeatMode());
+  appendI32(cfg.getDstStride());
+  appendI32(cfg.getDstMposition());
+  args.push_back(cfg.getTranspose());
+
+  rewriter.create<emitc::CallOpaqueOp>(
+      loc, TypeRange{}, "PTOAS__INIT_CONVTILE_CONFIG",
+      /*args=*/rewriter.getArrayAttr(args),
+      /*templateArgs=*/ArrayAttr{}, /*operands=*/ValueRange{tile});
+}
+
+static StringRef getFmatrixModeToken(pto::FmatrixMode mode) {
+  switch (mode) {
+  case pto::FmatrixMode::FMATRIX_A_AUTO:
+    return "pto::SetFmatrixMode::FMATRIX_A_AUTO";
+  case pto::FmatrixMode::FMATRIX_B_AUTO:
+    return "pto::SetFmatrixMode::FMATRIX_B_AUTO";
+  case pto::FmatrixMode::FMATRIX_A_MANUAL:
+    return "pto::SetFmatrixMode::FMATRIX_A_MANUAL";
+  case pto::FmatrixMode::FMATRIX_B_MANUAL:
+    return "pto::SetFmatrixMode::FMATRIX_B_MANUAL";
+  }
+  llvm_unreachable("unknown FmatrixMode");
+}
+
+static ArrayAttr getFmatrixModeTemplateArgs(ConversionPatternRewriter &rewriter,
+                                            pto::FmatrixMode mode) {
+  if (mode == pto::FmatrixMode::FMATRIX_A_MANUAL) {
+    return ArrayAttr{};
+  }
+  auto *ctx = rewriter.getContext();
+  return rewriter.getArrayAttr(
+      {emitc::OpaqueAttr::get(ctx, getFmatrixModeToken(mode))});
+}
+
 static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
                                          Location loc, Value basePtr,
                                          MemRefType mrTy, Operation *anchor,
@@ -400,6 +465,24 @@ static std::string layoutToEmitCString(mlir::pto::Layout layout) {
     return "pto::Layout::MX_A_ZZ";
   case mlir::pto::Layout::MX_B_NN:
     return "pto::Layout::MX_B_NN";
+  case mlir::pto::Layout::NCHW:
+    return "pto::Layout::NCHW";
+  case mlir::pto::Layout::NC1HWC0:
+    return "pto::Layout::NC1HWC0";
+  case mlir::pto::Layout::NCDHW:
+    return "pto::Layout::NCDHW";
+  case mlir::pto::Layout::NDC1HWC0:
+    return "pto::Layout::NDC1HWC0";
+  case mlir::pto::Layout::GNCHW:
+    return "pto::Layout::GNCHW";
+  case mlir::pto::Layout::GNC1HWC0:
+    return "pto::Layout::GNC1HWC0";
+  case mlir::pto::Layout::NHWC:
+    return "pto::Layout::NHWC";
+  case mlir::pto::Layout::FRACTAL_Z:
+    return "pto::Layout::FRACTAL_Z";
+  case mlir::pto::Layout::FRACTAL_Z_3D:
+    return "pto::Layout::FRACTAL_Z_3D";
   }
   return "pto::Layout::ND";
 }
@@ -843,6 +926,25 @@ static std::optional<std::string> getEmitCTileTypeString(pto::TileBufType type) 
          tileBufCompactToken(configAttr) + ">";
 }
 
+static std::optional<std::string> getEmitCConvTileTypeString(pto::ConvTileType type) {
+  auto shape = type.getShape();
+  if (shape.empty() || shape.size() > 6)
+    return std::nullopt;
+
+  Type elemTy = type.getElementType();
+  auto layoutAttr = dyn_cast_or_null<pto::LayoutAttr>(type.getLayout());
+  if (!layoutAttr)
+    layoutAttr = pto::LayoutAttr::get(type.getContext(), pto::Layout::NC1HWC0);
+
+  std::string shapeType = "pto::ConvTileShape<" + joinIntTemplateParams(shape) + ">";
+  return std::string("ConvTile<") +
+         tileRoleToken(type.getMemorySpace(), elemTy) + ", " +
+         getEmitCScalarTypeToken(elemTy) + ", " +
+         std::to_string(type.getBufferSizeValue()) + ", " +
+         layoutToEmitCString(layoutAttr.getLayout()) + ", " +
+         shapeType + ">";
+}
+
 //===----------------------------------------------------------------------===//
 // Type Converter
 //===----------------------------------------------------------------------===//
@@ -1019,6 +1121,13 @@ public:
 
     addConversion([Ctx](pto::TileBufType type) -> std::optional<Type> {
       auto typeString = getEmitCTileTypeString(type);
+      if (!typeString)
+        return std::nullopt;
+      return emitc::OpaqueType::get(Ctx, *typeString);
+    });
+
+    addConversion([Ctx](pto::ConvTileType type) -> std::optional<Type> {
+      auto typeString = getEmitCConvTileTypeString(type);
       if (!typeString)
         return std::nullopt;
       return emitc::OpaqueType::get(Ctx, *typeString);
@@ -12352,6 +12461,80 @@ struct PTOXORSToEmitC : public OpConversionPattern<pto::TXorSOp> {
     return success();
   }
 };
+
+struct PTOSetFmatrixToEmitC : public OpConversionPattern<pto::SetFmatrixOp> {
+  using OpConversionPattern<pto::SetFmatrixOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(pto::SetFmatrixOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
+    createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
+                                 "SETFMATRIX",
+                                 ValueRange{peelUnrealized(adaptor.getSrc())},
+                                 ArrayAttr{}, templateArgs);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct PTOSetImg2colRptToEmitC
+    : public OpConversionPattern<pto::SetImg2colRptOp> {
+  using OpConversionPattern<pto::SetImg2colRptOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(pto::SetImg2colRptOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
+    createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
+                                 "SET_IMG2COL_RPT",
+                                 ValueRange{peelUnrealized(adaptor.getSrc())},
+                                 ArrayAttr{}, templateArgs);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct PTOSetImg2colPaddingToEmitC
+    : public OpConversionPattern<pto::SetImg2colPaddingOp> {
+  using OpConversionPattern<pto::SetImg2colPaddingOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(pto::SetImg2colPaddingOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
+    createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
+                                 "SET_IMG2COL_PADDING",
+                                 ValueRange{peelUnrealized(adaptor.getSrc())},
+                                 ArrayAttr{}, templateArgs);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct PTOTImg2colToEmitC : public OpConversionPattern<pto::TImg2colOp> {
+  using OpConversionPattern<pto::TImg2colOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(pto::TImg2colOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
+    Value dst = peelUnrealized(adaptor.getDst());
+    Value src = peelUnrealized(adaptor.getSrc());
+    Type u16Ty = emitc::OpaqueType::get(ctx, "uint16_t");
+    Value posM = makeEmitCIntConstant(rewriter, loc, u16Ty,
+                                      static_cast<int64_t>(op.getPosM()));
+    Value posK = makeEmitCIntConstant(rewriter, loc, u16Ty,
+                                      static_cast<int64_t>(op.getPosK()));
+    auto templateArgs = getFmatrixModeTemplateArgs(rewriter, op.getFmatrixMode());
+
+    createLastUseAwareOpaqueCall(rewriter, op.getOperation(), TypeRange{},
+                                 "TIMG2COL",
+                                 ValueRange{dst, src, posM, posK}, ArrayAttr{},
+                                 templateArgs);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct PTOPrintToTPRINT : public OpConversionPattern<pto::TPrintOp> {
   using OpConversionPattern<pto::TPrintOp>::OpConversionPattern;
 
@@ -12476,19 +12659,30 @@ struct PTOAllocTileToEmitC
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     MLIRContext *ctx = rewriter.getContext();
-    auto tileTy = cast<pto::TileBufType>(op.getResult().getType());
-    auto tileTypeString = getEmitCTileTypeString(tileTy);
+    Type resultTy = op.getResult().getType();
+    auto tileTy = dyn_cast<pto::TileBufType>(resultTy);
+    auto convTy = dyn_cast<pto::ConvTileType>(resultTy);
+    if (!tileTy && !convTy)
+      return rewriter.notifyMatchFailure(
+          op, "expected alloc_tile to produce a tile_buf or conv_tile");
+
+    std::optional<std::string> tileTypeString;
+    if (tileTy)
+      tileTypeString = getEmitCTileTypeString(tileTy);
+    else
+      tileTypeString = getEmitCConvTileTypeString(convTy);
     if (!tileTypeString)
       return rewriter.notifyMatchFailure(
           op, "only rank-2 alloc_tile handles can be converted to EmitC");
 
-    Type convertedTy = getTypeConverter()->convertType(tileTy);
+    Type convertedTy = getTypeConverter()->convertType(resultTy);
     if (!convertedTy)
       convertedTy = emitc::OpaqueType::get(ctx, *tileTypeString);
 
-    auto validShape = tileTy.getValidShape();
+    ArrayRef<int64_t> validShape = tileTy ? tileTy.getValidShape()
+                                          : ArrayRef<int64_t>{};
     bool hasDynamicValidDim =
-        llvm::any_of(validShape, [](int64_t dim) { return dim < 0; });
+        tileTy && llvm::any_of(validShape, [](int64_t dim) { return dim < 0; });
     bool useConstructor = hasDynamicValidDim;
 
     SmallVector<Value> constructorArgs;
@@ -12543,6 +12737,9 @@ struct PTOAllocTileToEmitC
               .getResult();
       tile = loadEmitCVariableIfNeeded(rewriter, loc, tile);
     }
+
+    if (convTy)
+      emitConvTileConfigInitCall(rewriter, loc, tile, convTy);
 
     Value addr = adaptor.getAddr();
     if (addr) {
@@ -13712,6 +13909,9 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOPrintToTPRINT>(typeConverter, ctx);
   patterns.add<PTOPrintOpToEmitC>(typeConverter, ctx);
   patterns.add<PTOTrapOpToEmitC>(typeConverter, ctx);
+  patterns.add<PTOSetFmatrixToEmitC, PTOSetImg2colRptToEmitC,
+               PTOSetImg2colPaddingToEmitC, PTOTImg2colToEmitC>(
+      typeConverter, ctx);
   patterns.add<
     PTOTMatmulBiasToTMATMUL_BIAS,
     PTOTMatmulMXToTMATMUL_MX,
@@ -13790,6 +13990,7 @@ struct EmitPTOManualPass
         bool needsEventIdArrayHelper = false;
         bool needsTRandomHelper = false;
         bool needsGlobalTensorDataHelper = false;
+        bool needsConvTileInitHelper = false;
         mop.walk([&](Operation *op) {
           if (isa<mlir::pto::DeclareEventIdArrayOp>(op))
             needsEventIdArrayHelper = true;
@@ -13805,6 +14006,10 @@ struct EmitPTOManualPass
           }
           if (isa<mlir::pto::PartitionViewOp>(op))
             needsGlobalTensorDataHelper = true;
+          if (auto alloc = dyn_cast<mlir::pto::AllocTileOp>(op)) {
+            if (isa<mlir::pto::ConvTileType>(alloc.getResult().getType()))
+              needsConvTileInitHelper = true;
+          }
         });
 
 		    // 1. 插入头文件
@@ -13872,6 +14077,41 @@ static AICORE inline void PTOAS__TRANDOM(
   TRandomKey key = {key0, key1};
   TRandomCounter counter = {counter0, counter1, counter2, counter3};
   TRANDOM<Rounds>(dst, key, counter);
+}
+)cpp"));
+        }
+        if (needsConvTileInitHelper) {
+	      builder.create<emitc::VerbatimOp>(
+	          loc, builder.getStringAttr(R"cpp(
+template <typename Tile, typename PadValueT>
+static AICORE inline void PTOAS__INIT_CONVTILE_CONFIG(
+    Tile &tile, uint16_t fmapH, uint16_t fmapW, uint8_t padLeft,
+    uint8_t padRight, uint8_t padTop, uint8_t padBottom, uint16_t filterH,
+    uint16_t filterW, uint16_t dilationH, uint16_t dilationW,
+    uint16_t strideH, uint16_t strideW, PadValueT padValue,
+    uint16_t channelSize, uint16_t repeatStride, uint8_t repeatTime,
+    uint8_t repeatMode, uint16_t dstStride, uint16_t dstMposition,
+    bool transpose) {
+  const uint8_t padList[4] = {padLeft, padRight, padTop, padBottom};
+  tile.SetFmapH(fmapH);
+  tile.SetFmapW(fmapW);
+  tile.SetPadListArray(padList);
+  tile.SetFilterH(filterH);
+  tile.SetFilterW(filterW);
+  tile.SetDilationH(dilationH);
+  tile.SetDilationW(dilationW);
+  tile.SetStrideH(strideH);
+  tile.SetStrideW(strideW);
+  tile.SetPadValue(padValue);
+  tile.SetChannelSize(channelSize);
+  tile.SetRepeatStride(repeatStride);
+  tile.SetRepeatTime(repeatTime);
+  tile.SetRepeatMode(repeatMode);
+#ifndef PTO_NPU_ARCH_A2A3
+  tile.SetDstStride(dstStride);
+  tile.SetDstMposition(dstMposition);
+#endif
+  tile.SetTranspose(transpose);
 }
 )cpp"));
         }

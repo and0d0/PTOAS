@@ -126,6 +126,10 @@ static bool isKnownZeroOrUnitExtent(int64_t value);
 static bool isByteIntegerType(Type ty);
 static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name,
                                          bool allowLowPrecision = false);
+static LogicalResult verifyConvTileCommon(Operation *op, Type ty, StringRef name,
+                                          bool allowLowPrecision = false);
+static LogicalResult verifyTileLikeCommon(Operation *op, Type ty, StringRef name,
+                                          bool allowLowPrecision = false);
 static LogicalResult verifyTmpCapacityAtLeast(Operation *op, Type tmpTy,
                                               uint64_t requiredBytes,
                                               StringRef tmpName = "tmp");
@@ -1956,9 +1960,12 @@ static unsigned getElemByteSize(Type ty) {
   return getPTOStorageElemByteSize(ty);
 }
 
-static LogicalResult verifyTileBufLayoutConstraints(Operation *op,
-                                                    pto::TileBufType tb,
+static LogicalResult verifyTileBufLayoutConstraints(Operation *op, Type ty,
                                                     StringRef name) {
+  auto tb = dyn_cast<pto::TileBufType>(ty);
+  if (!tb) {
+    return op->emitOpError() << "expects " << name << " to be a !pto.tile_buf";
+  }
   auto shape = tb.getShape();
   if (shape.size() != 2) {
     return op->emitOpError() << "expects " << name << " to be rank-2";
@@ -3585,7 +3592,21 @@ static LogicalResult verifyConstantLocalAddress(Operation *op, Value addr,
 }
 
 LogicalResult AllocTileOp::verify() {
-  auto ty = getResult().getType(); // TileBufType
+  auto resultType = getResult().getType();
+  if (auto convTy = dyn_cast<pto::ConvTileType>(resultType)) {
+    bool hasValidShapeOperands = getValidRow() || getValidCol();
+    if (hasValidShapeOperands) {
+      return emitOpError("valid_row and valid_col operands require result to be `!pto.tile_buf`");
+    }
+
+    return verifyConstantLocalAddress(getOperation(), getAddr(),
+                                      convTy.getMemorySpace());
+  }
+
+  auto ty = dyn_cast<pto::TileBufType>(resultType);
+  if (!ty) {
+    return emitOpError("result must be `!pto.tile_buf` or `!pto.conv_tile`");
+  }
 
   if (failed(verifyTileBufLayoutConstraints(*this, ty, "result"))) {
     return failure();
@@ -3789,13 +3810,20 @@ LogicalResult TAssignOp::verify() {
     return emitOpError("result type must match tile operand type");
   }
 
-  auto tileTy = dyn_cast<TileBufType>(getTile().getType());
-  if (!tileTy) {
-    return emitOpError("expects tile operand and result to be !pto.tile_buf");
+  auto tileTy = getTile().getType();
+  if (!isa<TileBufType, ConvTileType>(tileTy)) {
+    return emitOpError("expects tile operand and result to be !pto.tile_buf or !pto.conv_tile");
+  }
+
+  Attribute memorySpace;
+  if (auto tb = dyn_cast<TileBufType>(tileTy)) {
+    memorySpace = tb.getMemorySpace();
+  } else if (auto ct = dyn_cast<ConvTileType>(tileTy)) {
+    memorySpace = ct.getMemorySpace();
   }
 
   if (failed(verifyConstantLocalAddress(getOperation(), getAddr(),
-                                        tileTy.getMemorySpace()))) {
+                                        memorySpace))) {
     return failure();
   }
 
@@ -3805,14 +3833,14 @@ LogicalResult TAssignOp::verify() {
 LogicalResult TLoadOp::verify() {
   auto verifyCommon =
       [&](bool allowLowPrecision)
-      -> FailureOr<std::pair<pto::PartitionTensorViewType, pto::TileBufType>> {
+      -> FailureOr<std::pair<pto::PartitionTensorViewType, Type>> {
     auto srcPart = dyn_cast<pto::PartitionTensorViewType>(getSrc().getType());
-    auto dstTile = dyn_cast<pto::TileBufType>(getDst().getType());
-    if (!srcPart || !dstTile) {
-      emitOpError("expects src to be !pto.partition_tensor_view and dst to be !pto.tile_buf");
+    Type dstTy = getDst().getType();
+    if (!srcPart || !isa<pto::TileBufType, pto::ConvTileType>(dstTy)) {
+      emitOpError("expects src to be !pto.partition_tensor_view and dst to be !pto.tile_buf or !pto.conv_tile");
       return failure();
     }
-    if (failed(verifyTileBufCommon(*this, dstTile, "dst", allowLowPrecision))) {
+    if (failed(verifyTileLikeCommon(*this, dstTy, "dst", allowLowPrecision))) {
       return failure();
     }
 
@@ -3823,14 +3851,14 @@ LogicalResult TLoadOp::verify() {
         return failure();
       }
     }
-    auto dstValid = dstTile.getValidShape();
+    auto dstValid = getValidShapeVec(dstTy);
     for (unsigned i = 0; i < dstValid.size(); ++i) {
       if (dstValid[i] != ShapedType::kDynamic && dstValid[i] < 0) {
         emitOpError() << "expects dst valid_shape[" << i << "] to be non-negative";
         return failure();
       }
     }
-    return std::make_pair(srcPart, dstTile);
+    return std::make_pair(srcPart, dstTy);
   };
 
   auto verifyA2A3 = [&]() -> LogicalResult {
@@ -3841,7 +3869,7 @@ LogicalResult TLoadOp::verify() {
     auto [srcPart, dstTile] = *common;
 
     Type srcElem = srcPart.getElementType();
-    Type dstElem = dstTile.getElementType();
+    Type dstElem = getElemTy(dstTile);
     if (isPTOLowPrecisionType(srcElem) || isPTOLowPrecisionType(dstElem)) {
       return emitOpError("expects A2/A3 tload low-precision element types to be unsupported");
     }
@@ -3870,7 +3898,7 @@ LogicalResult TLoadOp::verify() {
     auto [srcPart, dstTile] = *common;
 
     Type srcElem = srcPart.getElementType();
-    Type dstElem = dstTile.getElementType();
+    Type dstElem = getElemTy(dstTile);
     unsigned srcBytes = getElemByteSize(srcElem);
     unsigned dstBytes = getElemByteSize(dstElem);
     if (srcBytes != dstBytes) {
@@ -3887,17 +3915,23 @@ LogicalResult TLoadOp::verify() {
     }
 
     if (dstElem.isInteger(64)) {
-      auto pad = dstTile.getPadValueI32();
-      if (pad != static_cast<int32_t>(pto::PadValue::Null) &&
-          pad != static_cast<int32_t>(pto::PadValue::Zero)) {
-        return emitOpError("expects A5 i64/u64 tload dst pad to be null or zero");
+      if (auto dstTB = dyn_cast<pto::TileBufType>(dstTile)) {
+        auto pad = dstTB.getPadValueI32();
+        if (pad != static_cast<int32_t>(pto::PadValue::Null) &&
+            pad != static_cast<int32_t>(pto::PadValue::Zero)) {
+          return emitOpError("expects A5 i64/u64 tload dst pad to be null or zero");
+        }
       }
     }
 
     auto dstSpace = getPTOMemorySpaceEnum(dstTile);
     if (dstSpace && *dstSpace == pto::AddressSpace::VEC) {
-      int32_t bl = dstTile.getBLayoutValueI32();
-      int32_t sl = dstTile.getSLayoutValueI32();
+      auto dstTB = dyn_cast<pto::TileBufType>(dstTile);
+      if (!dstTB) {
+        return emitOpError("expects A5 tload vec dst to be a tile_buf");
+      }
+      int32_t bl = dstTB.getBLayoutValueI32();
+      int32_t sl = dstTB.getSLayoutValueI32();
       bool isND = (bl == static_cast<int32_t>(pto::BLayout::RowMajor) &&
                    sl == static_cast<int32_t>(pto::SLayout::NoneBox));
       bool isDN = (bl == static_cast<int32_t>(pto::BLayout::ColMajor) &&
@@ -3913,6 +3947,109 @@ LogicalResult TLoadOp::verify() {
   };
 
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
+}
+
+LogicalResult mlir::pto::SetFmatrixOp::verify() {
+  if (failed(verifyConvTileCommon(*this, getSrc().getType(), "src",
+                                  /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be a_manual or b_manual");
+  }
+  return success();
+}
+
+LogicalResult mlir::pto::SetImg2colRptOp::verify() {
+  if (failed(verifyConvTileCommon(*this, getSrc().getType(), "src",
+                                  /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be a_manual or b_manual");
+  }
+  return success();
+}
+
+LogicalResult mlir::pto::SetImg2colPaddingOp::verify() {
+  if (failed(verifyConvTileCommon(*this, getSrc().getType(), "src",
+                                  /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be a_manual or b_manual");
+  }
+  return success();
+}
+
+LogicalResult mlir::pto::TImg2colOp::verify() {
+  if (failed(verifyTileBufCommon(*this, getDst().getType(), "dst",
+                                 /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  if (failed(verifyConvTileCommon(*this, getSrc().getType(), "src",
+                                  /*allowLowPrecision=*/true))) {
+    return failure();
+  }
+  if (getElemTy(getDst().getType()) != getElemTy(getSrc().getType())) {
+    return emitOpError() << "expects src and dst to have the same element type";
+  }
+
+  auto srcCT = dyn_cast<pto::ConvTileType>(getSrc().getType());
+  if (!srcCT) {
+    return emitOpError("expects src to be a !pto.conv_tile");
+  }
+  auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+  if (!srcLayout ||
+      (srcLayout.getLayout() != pto::Layout::NC1HWC0 &&
+       srcLayout.getLayout() != pto::Layout::NDC1HWC0)) {
+    return emitOpError(
+        "expects src layout to be NC1HWC0 or NDC1HWC0");
+  }
+
+  auto dstTile = dyn_cast<pto::TileBufType>(getDst().getType());
+  if (!dstTile) {
+    return emitOpError("expects dst to be a !pto.tile_buf");
+  }
+  if (failed(verifyTileBufLayoutConstraints(*this, dstTile, "dst"))) {
+    return failure();
+  }
+  if (dstTile.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::ColMajor) ||
+      dstTile.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::RowMajor)) {
+    return emitOpError(
+        "expects dst layout to be BLayout=col_major and SLayout=row_major");
+  }
+  auto dstSpace = getPTOMemorySpaceEnum(dstTile);
+  if (!dstSpace || *dstSpace != pto::AddressSpace::LEFT) {
+    return emitOpError("expects dst to use loc=left");
+  }
+
+  auto checkPos = [&](uint32_t value, StringRef name) -> LogicalResult {
+    if (value > std::numeric_limits<uint16_t>::max()) {
+      return emitOpError() << "expects " << name
+                           << " to fit in an unsigned 16-bit integer";
+    }
+    return success();
+  };
+  if (failed(checkPos(getPosM(), "posM")) || failed(checkPos(getPosK(), "posK"))) {
+    return failure();
+  }
+
+  auto mode = getFmatrixMode();
+  if (mode != pto::FmatrixMode::FMATRIX_A_AUTO &&
+      mode != pto::FmatrixMode::FMATRIX_B_AUTO &&
+      mode != pto::FmatrixMode::FMATRIX_A_MANUAL &&
+      mode != pto::FmatrixMode::FMATRIX_B_MANUAL) {
+    return emitOpError("expects fmatrix_mode to be one of a_auto, b_auto, a_manual, or b_manual");
+  }
+
+  return success();
 }
 
 LogicalResult TPrefetchOp::verify() {
@@ -4613,7 +4750,7 @@ static bool isPTOShapedLike(Type ty) {
 }
 
 static bool isTileLikeType(Type ty) {
-  return isa<pto::TileBufType>(ty);
+  return isa<pto::TileBufType, pto::ConvTileType>(ty);
 }
 
 static Type getElemTy(Type ty) {
@@ -4625,6 +4762,9 @@ static Type getElemTy(Type ty) {
   }
   if (auto tb = mlir::dyn_cast<pto::TileBufType>(ty)) {
     return tb.getElementType();
+  }
+  if (auto ct = mlir::dyn_cast<pto::ConvTileType>(ty)) {
+    return ct.getElementType();
   }
   if (auto tv = mlir::dyn_cast<pto::PartitionTensorViewType>(ty)) {
     return tv.getElementType();
@@ -4642,6 +4782,9 @@ static SmallVector<int64_t, 4> getShapeVec(Type ty) {
   }
   if (auto tb = mlir::dyn_cast<pto::TileBufType>(ty)) {
     return SmallVector<int64_t, 4>(tb.getShape().begin(), tb.getShape().end());
+  }
+  if (auto ct = mlir::dyn_cast<pto::ConvTileType>(ty)) {
+    return SmallVector<int64_t, 4>(ct.getShape().begin(), ct.getShape().end());
   }
   if (auto tv = mlir::dyn_cast<pto::PartitionTensorViewType>(ty)) {
     return SmallVector<int64_t, 4>(tv.getShape().begin(), tv.getShape().end());
@@ -4916,6 +5059,12 @@ static std::optional<pto::AddressSpace> getPTOMemorySpaceEnum(Type ty) {
   }
   if (auto tb = dyn_cast<pto::TileBufType>(ty)) {
     if (auto as = dyn_cast_or_null<pto::AddressSpaceAttr>(tb.getMemorySpace())) {
+      return as.getAddressSpace();
+    }
+    return std::nullopt;
+  }
+  if (auto ct = dyn_cast<pto::ConvTileType>(ty)) {
+    if (auto as = dyn_cast_or_null<pto::AddressSpaceAttr>(ct.getMemorySpace())) {
       return as.getAddressSpace();
     }
     return std::nullopt;
@@ -5282,6 +5431,75 @@ static bool isA5SupportedTCvtPair(Type srcElem, Type dstElem) {
     return isA5LowPrecisionTCvtPair(srcElem, dstElem);
   }
   return true;
+}
+
+static LogicalResult verifyConvTileCommon(Operation *op, Type ty, StringRef name,
+                                          bool allowLowPrecision) {
+  auto ct = dyn_cast<pto::ConvTileType>(ty);
+  if (!ct) {
+    return op->emitOpError() << "expects " << name << " to be a !pto.conv_tile";
+  }
+
+  auto as = getPTOMemorySpaceEnum(ty);
+  if (!as || *as != pto::AddressSpace::MAT) {
+    return op->emitOpError() << "expects " << name
+                             << " to be in the mat address space";
+  }
+
+  if (!allowLowPrecision && isPTOLowPrecisionType(ct.getElementType())) {
+    return op->emitOpError() << name << ": dtype " << ct.getElementType()
+                             << " is not supported by this op yet";
+  }
+
+  auto shape = getShapeVec(ty);
+  if (shape.empty() || shape.size() > 6) {
+    return op->emitOpError() << "expects " << name
+                             << " to have a rank in [1, 6]";
+  }
+  for (unsigned i = 0; i < shape.size(); ++i) {
+    if (shape[i] <= 0) {
+      return op->emitOpError() << "expects " << name << " shape[" << i
+                               << "] to be positive";
+    }
+  }
+
+  auto bufferSize = dyn_cast<IntegerAttr>(ct.getBufferSize());
+  if (!bufferSize) {
+    return op->emitOpError() << "expects " << name
+                             << " to have a signless integer buffer_size";
+  }
+  if (bufferSize.getInt() <= 0) {
+    return op->emitOpError() << "expects " << name
+                             << " buffer_size to be positive";
+  }
+
+  int64_t logicalSize = 1;
+  for (int64_t dim : shape) {
+    if (logicalSize > std::numeric_limits<int64_t>::max() / dim) {
+      return op->emitOpError() << "cannot compute logical size of " << name
+                               << " without overflow";
+    }
+    logicalSize *= dim;
+  }
+  if (bufferSize.getInt() < logicalSize) {
+    return op->emitOpError() << "expects " << name
+                             << " buffer_size to cover at least "
+                             << logicalSize << " elements";
+  }
+
+  return success();
+}
+
+static LogicalResult verifyTileLikeCommon(Operation *op, Type ty, StringRef name,
+                                          bool allowLowPrecision) {
+  if (isa<pto::TileBufType>(ty)) {
+    return verifyTileBufCommon(op, ty, name, allowLowPrecision);
+  }
+  if (isa<pto::ConvTileType>(ty)) {
+    return verifyConvTileCommon(op, ty, name, allowLowPrecision);
+  }
+  return op->emitOpError() << "expects " << name
+                           << " to be a !pto.tile_buf or !pto.conv_tile";
 }
 
 static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name,
@@ -7932,6 +8150,17 @@ static bool isRowMajorNoneBoxND(pto::TileBufType ty) {
          ty.getSLayoutValueI32() == static_cast<int32_t>(pto::SLayout::NoneBox);
 }
 
+static bool isConvTileExtractElem(Type ty) {
+  if (ty.isF16() || ty.isBF16() || ty.isF32()) {
+    return true;
+  }
+  if (auto intTy = dyn_cast<IntegerType>(ty)) {
+    unsigned width = intTy.getWidth();
+    return width == 8 || width == 16 || width == 32;
+  }
+  return false;
+}
+
 struct TExtractCommon {
   Type srcTy;
   Type dstTy;
@@ -8067,6 +8296,60 @@ static LogicalResult verifyTExtractA2A3Mat(TExtractOp op,
 }
 
 static LogicalResult verifyTExtractA2A3(TExtractOp op) {
+  if (isa<pto::ConvTileType>(op.getSrc().getType())) {
+    Type srcTy = op.getSrc().getType();
+    Type dstTy = op.getDst().getType();
+    const bool hasFp = static_cast<bool>(op.getFp());
+    if (failed(verifyTileLikeCommon(op, srcTy, "src",
+                                    /*allowLowPrecision=*/false)) ||
+        failed(verifyTileBufCommon(op, dstTy, "dst",
+                                   /*allowLowPrecision=*/false)) ||
+        failed(verifyNonNegativeIndexRowCol(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(),
+            /*includeIndexAndIntOpsInConstFold=*/hasFp)) ||
+        failed(verifyExtractStaticBoundsCommon(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(), srcTy,
+            dstTy, /*includeIndexAndIntOpsInConstFold=*/hasFp))) {
+      return failure();
+    }
+    if (hasFp || op.getPreQuantScalar() ||
+        op.getReluPreMode() != pto::ReluPreMode::NoRelu ||
+        op.getAccToVecModeAttr()) {
+      return op.emitOpError("expects convtile textract to use the base form");
+    }
+    auto srcCT = dyn_cast<pto::ConvTileType>(srcTy);
+    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
+    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
+    if (!srcSpace || *srcSpace != pto::AddressSpace::MAT) {
+      return op.emitOpError("expects convtile textract src to use loc=mat");
+    }
+    if (!dstSpace || *dstSpace != pto::AddressSpace::RIGHT) {
+      return op.emitOpError("expects convtile textract dst to use loc=right");
+    }
+    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+    if (!srcLayout ||
+        (srcLayout.getLayout() != pto::Layout::FRACTAL_Z &&
+         srcLayout.getLayout() != pto::Layout::FRACTAL_Z_3D)) {
+      return op.emitOpError(
+          "expects convtile textract src to use layout=FRACTAL_Z or FRACTAL_Z_3D");
+    }
+    auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
+    if (!dstTb ||
+        dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
+        dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor)) {
+      return op.emitOpError(
+          "expects convtile textract dst to use blayout=row_major and slayout=col_major");
+    }
+    Type srcElem = getElemTy(srcTy);
+    Type dstElem = getElemTy(dstTy);
+    if (!srcElem || !dstElem || srcElem != dstElem) {
+      return op.emitOpError("expects convtile textract src and dst to have the same element type");
+    }
+    if (!isConvTileExtractElem(srcElem)) {
+      return op.emitOpError("expects convtile textract element type to be i8/i16/i32/f16/bf16/f32");
+    }
+    return success();
+  }
   auto common = verifyTExtractCommon(op, /*allowLowPrecision=*/false);
   if (failed(common)) {
     return failure();
@@ -8171,6 +8454,60 @@ static LogicalResult verifyTExtractA5Acc(TExtractOp op,
 }
 
 static LogicalResult verifyTExtractA5(TExtractOp op) {
+  if (isa<pto::ConvTileType>(op.getSrc().getType())) {
+    Type srcTy = op.getSrc().getType();
+    Type dstTy = op.getDst().getType();
+    const bool hasFp = static_cast<bool>(op.getFp());
+    const bool hasPreQuantScalar = static_cast<bool>(op.getPreQuantScalar());
+    const bool hasRelu = op.getReluPreMode() != pto::ReluPreMode::NoRelu;
+    if (failed(verifyTileLikeCommon(op, srcTy, "src",
+                                    /*allowLowPrecision=*/true)) ||
+        failed(verifyTileBufCommon(op, dstTy, "dst",
+                                   /*allowLowPrecision=*/true)) ||
+        failed(verifyNonNegativeIndexRowCol(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(),
+            /*includeIndexAndIntOpsInConstFold=*/hasFp)) ||
+        failed(verifyExtractStaticBoundsCommon(
+            *op.getOperation(), op.getIndexRow(), op.getIndexCol(), srcTy,
+            dstTy, /*includeIndexAndIntOpsInConstFold=*/hasFp))) {
+      return failure();
+    }
+    if (hasFp || hasPreQuantScalar || hasRelu || op.getAccToVecModeAttr()) {
+      return op.emitOpError("expects convtile textract to use the base form");
+    }
+    auto srcCT = dyn_cast<pto::ConvTileType>(srcTy);
+    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
+    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
+    if (!srcSpace || *srcSpace != pto::AddressSpace::MAT) {
+      return op.emitOpError("expects convtile textract src to use loc=mat");
+    }
+    if (!dstSpace || *dstSpace != pto::AddressSpace::RIGHT) {
+      return op.emitOpError("expects convtile textract dst to use loc=right");
+    }
+    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+    if (!srcLayout ||
+        (srcLayout.getLayout() != pto::Layout::FRACTAL_Z &&
+         srcLayout.getLayout() != pto::Layout::FRACTAL_Z_3D)) {
+      return op.emitOpError(
+          "expects convtile textract src to use layout=FRACTAL_Z or FRACTAL_Z_3D");
+    }
+    auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
+    if (!dstTb ||
+        dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
+        dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor)) {
+      return op.emitOpError(
+          "expects convtile textract dst to use blayout=row_major and slayout=col_major");
+    }
+    Type srcElem = getElemTy(srcTy);
+    Type dstElem = getElemTy(dstTy);
+    if (!srcElem || !dstElem || srcElem != dstElem) {
+      return op.emitOpError("expects convtile textract src and dst to have the same element type");
+    }
+    if (!isConvTileExtractElem(srcElem)) {
+      return op.emitOpError("expects convtile textract element type to be i8/i16/i32/f16/bf16/f32");
+    }
+    return success();
+  }
   auto common = verifyTExtractCommon(op, /*allowLowPrecision=*/true);
   if (failed(common)) {
     return failure();
@@ -9655,6 +9992,48 @@ static LogicalResult verifyTMovImpl(TMovOp op, bool isA5) {
   }
   if (classifyTMovForm(fp) == TMovForm::XToZz) {
     return verifyTMovXToZz(op, isA5);
+  }
+  if (auto srcCT = dyn_cast<pto::ConvTileType>(op.getSrc().getType())) {
+    Type srcTy = op.getSrc().getType();
+    Type dstTy = op.getDst().getType();
+    Value preQuantScalar = op.getPreQuantScalar();
+    auto accToVecModeAttr = op.getAccToVecModeAttr();
+    auto reluMode = op.getReluPreMode();
+    const bool hasFp = static_cast<bool>(fp);
+    const bool hasPreQuantScalar = static_cast<bool>(preQuantScalar);
+    auto srcTb = dyn_cast<pto::TileBufType>(srcTy);
+    auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
+    Type srcElem = getElemTy(srcTy);
+    Type dstElem = getElemTy(dstTy);
+    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
+    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
+
+    if (!srcTb || !dstTb || !srcSpace || !dstSpace || !srcElem || !dstElem) {
+      return op.emitOpError("expects convtile tmov operands to be valid tile types");
+    }
+    if (hasFp || hasPreQuantScalar || accToVecModeAttr ||
+        reluMode != pto::ReluPreMode::NoRelu) {
+      return op.emitOpError("expects convtile tmov to use the base form");
+    }
+    if (*srcSpace != pto::AddressSpace::MAT) {
+      return op.emitOpError("expects convtile tmov src to use loc=mat");
+    }
+    if (*dstSpace != pto::AddressSpace::RIGHT) {
+      return op.emitOpError("expects convtile tmov dst to use loc=right");
+    }
+    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+    if (!srcLayout || srcLayout.getLayout() != pto::Layout::FRACTAL_Z) {
+      return op.emitOpError("expects convtile tmov src to use layout=FRACTAL_Z");
+    }
+    if (dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
+        dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor)) {
+      return op.emitOpError(
+          "expects convtile tmov dst to use blayout=row_major and slayout=col_major");
+    }
+    if (srcElem != dstElem) {
+      return op.emitOpError("expects convtile tmov src and dst to have the same element type");
+    }
+    return success();
   }
   return verifyTMovGeneric(op, isA5);
 }
@@ -16432,8 +16811,210 @@ static LogicalResult verifyTTransA5(TTransOp op) {
 }
 
 mlir::LogicalResult mlir::pto::TTransOp::verify() {
+  auto verifyConvTile = [&]() -> LogicalResult {
+    Type srcTy = getSrc().getType();
+    Type tmpTy = getTmp() ? getTmp().getType() : Type{};
+    Type dstTy = getDst().getType();
+    auto srcCT = dyn_cast<pto::ConvTileType>(srcTy);
+    auto dstCT = dyn_cast<pto::ConvTileType>(dstTy);
+    auto tmpCT = dyn_cast<pto::ConvTileType>(tmpTy);
+
+    if (!srcCT || !dstCT) {
+      return emitOpError("expects convtile ttrans src and dst to be !pto.conv_tile");
+    }
+    if (!tmpTy) {
+      return emitOpError("expects convtile ttrans to provide a tmp operand");
+    }
+    if (!tmpCT) {
+      return emitOpError("expects convtile ttrans tmp to be !pto.conv_tile");
+    }
+
+    if (failed(verifyConvTileCommon(*this, srcTy, "src",
+                                    /*allowLowPrecision=*/false)) ||
+        failed(verifyConvTileCommon(*this, dstTy, "dst",
+                                    /*allowLowPrecision=*/false)) ||
+        failed(verifyConvTileCommon(*this, tmpTy, "tmp",
+                                    /*allowLowPrecision=*/false))) {
+      return failure();
+    }
+
+    Type srcElem = getElemTy(srcTy);
+    Type dstElem = getElemTy(dstTy);
+    Type tmpElem = getElemTy(tmpTy);
+    if (!srcElem || !dstElem || !tmpElem || srcElem != dstElem || srcElem != tmpElem) {
+      return emitOpError() << "expects convtile src, dst, and tmp to have the same element type";
+    }
+
+    auto srcLayout = dyn_cast_or_null<pto::LayoutAttr>(srcCT.getLayout());
+    auto dstLayout = dyn_cast_or_null<pto::LayoutAttr>(dstCT.getLayout());
+    if (!srcLayout || !dstLayout) {
+      return emitOpError("expects convtile ttrans src and dst to have a layout attr");
+    }
+
+    const int64_t elemBytes = getPTOStorageElemByteSize(srcElem);
+    if (elemBytes != 1 && elemBytes != 2 && elemBytes != 4) {
+      return emitOpError("expects convtile ttrans element size to be 1, 2, or 4 bytes");
+    }
+    const int64_t c0 = 32 / elemBytes;
+
+    auto checkedAdd = [](int64_t lhs, int64_t rhs) -> std::optional<int64_t> {
+      if (lhs < 0 || rhs < 0 || lhs > std::numeric_limits<int64_t>::max() - rhs) {
+        return std::nullopt;
+      }
+      return lhs + rhs;
+    };
+    auto checkedMul = [](int64_t lhs, int64_t rhs) -> std::optional<int64_t> {
+      if (lhs < 0 || rhs < 0 || (rhs != 0 && lhs > std::numeric_limits<int64_t>::max() / rhs)) {
+        return std::nullopt;
+      }
+      return lhs * rhs;
+    };
+    auto checkedCeilDiv = [&](int64_t lhs, int64_t rhs) -> std::optional<int64_t> {
+      if (lhs < 0 || rhs <= 0) {
+        return std::nullopt;
+      }
+      auto biased = checkedAdd(lhs, rhs - 1);
+      if (!biased) {
+        return std::nullopt;
+      }
+      return *biased / rhs;
+    };
+
+    auto srcShape = getShapeVec(srcTy);
+    auto dstShape = getShapeVec(dstTy);
+    auto expectShape = [&](ArrayRef<int64_t> actual, ArrayRef<int64_t> expected,
+                           StringRef name) -> LogicalResult {
+      if (actual.size() != expected.size()) {
+        return emitOpError() << "expects " << name << " rank to be " << expected.size();
+      }
+      for (size_t i = 0; i < expected.size(); ++i) {
+        if (actual[i] != expected[i]) {
+          return emitOpError() << "expects " << name << " shape[" << i << "] to be "
+                               << expected[i] << " (got " << actual[i] << ")";
+        }
+      }
+      return success();
+    };
+
+    auto verifyPair = [&](pto::Layout srcLayoutKind,
+                          pto::Layout dstLayoutKind) -> LogicalResult {
+      switch (srcLayoutKind) {
+      case pto::Layout::NCHW: {
+        if (dstLayoutKind != pto::Layout::NC1HWC0) {
+          return emitOpError("expects convtile ttrans NCHW src to lower to NC1HWC0 dst");
+        }
+        if (srcShape.size() != 4 || dstShape.size() != 5) {
+          return emitOpError("expects convtile ttrans NCHW->NC1HWC0 to use 4D src and 5D dst");
+        }
+        auto expectedC1 = checkedCeilDiv(srcShape[1], c0);
+        if (!expectedC1) {
+          return emitOpError("cannot compute convtile ttrans NCHW->NC1HWC0 channel split");
+        }
+        SmallVector<int64_t, 6> expected{srcShape[0], *expectedC1, srcShape[2], srcShape[3], c0};
+        return expectShape(dstShape, expected, "dst");
+      }
+      case pto::Layout::NC1HWC0: {
+        if (dstLayoutKind != pto::Layout::FRACTAL_Z) {
+          return emitOpError("expects convtile ttrans NC1HWC0 src to lower to FRACTAL_Z dst");
+        }
+        if (srcShape.size() != 5 || dstShape.size() != 4) {
+          return emitOpError("expects convtile ttrans NC1HWC0->FRACTAL_Z to use 5D src and 4D dst");
+        }
+        auto expectedN1 = checkedCeilDiv(srcShape[0], 16);
+        if (!expectedN1) {
+          return emitOpError("cannot compute convtile ttrans NC1HWC0->FRACTAL_Z batch split");
+        }
+        auto expectedC1HW = checkedMul(srcShape[1], srcShape[2]);
+        if (!expectedC1HW) {
+          return emitOpError("cannot compute convtile ttrans NC1HWC0->FRACTAL_Z output size");
+        }
+        expectedC1HW = checkedMul(*expectedC1HW, srcShape[3]);
+        if (!expectedC1HW) {
+          return emitOpError("cannot compute convtile ttrans NC1HWC0->FRACTAL_Z output size");
+        }
+        SmallVector<int64_t, 6> expected{*expectedC1HW, *expectedN1, 16, srcShape[4]};
+        return expectShape(dstShape, expected, "dst");
+      }
+      case pto::Layout::GNCHW: {
+        if (dstLayoutKind != pto::Layout::GNC1HWC0) {
+          return emitOpError("expects convtile ttrans GNCHW src to lower to GNC1HWC0 dst");
+        }
+        if (srcShape.size() != 5 || dstShape.size() != 6) {
+          return emitOpError("expects convtile ttrans GNCHW->GNC1HWC0 to use 5D src and 6D dst");
+        }
+        auto expectedC1 = checkedCeilDiv(srcShape[2], c0);
+        if (!expectedC1) {
+          return emitOpError("cannot compute convtile ttrans GNCHW->GNC1HWC0 channel split");
+        }
+        SmallVector<int64_t, 6> expected{srcShape[0], srcShape[1], *expectedC1, srcShape[3],
+                                         srcShape[4], c0};
+        return expectShape(dstShape, expected, "dst");
+      }
+      case pto::Layout::GNC1HWC0: {
+        if (dstLayoutKind != pto::Layout::FRACTAL_Z) {
+          return emitOpError("expects convtile ttrans GNC1HWC0 src to lower to FRACTAL_Z dst");
+        }
+        if (srcShape.size() != 6 || dstShape.size() != 4) {
+          return emitOpError("expects convtile ttrans GNC1HWC0->FRACTAL_Z to use 6D src and 4D dst");
+        }
+        auto expectedN1 = checkedCeilDiv(srcShape[1], 16);
+        if (!expectedN1) {
+          return emitOpError("cannot compute convtile ttrans GNC1HWC0->FRACTAL_Z batch split");
+        }
+        auto expectedGC1HW = checkedMul(srcShape[0], srcShape[2]);
+        if (!expectedGC1HW) {
+          return emitOpError("cannot compute convtile ttrans GNC1HWC0->FRACTAL_Z output size");
+        }
+        expectedGC1HW = checkedMul(*expectedGC1HW, srcShape[3]);
+        if (!expectedGC1HW) {
+          return emitOpError("cannot compute convtile ttrans GNC1HWC0->FRACTAL_Z output size");
+        }
+        expectedGC1HW = checkedMul(*expectedGC1HW, srcShape[4]);
+        if (!expectedGC1HW) {
+          return emitOpError("cannot compute convtile ttrans GNC1HWC0->FRACTAL_Z output size");
+        }
+        SmallVector<int64_t, 6> expected{*expectedGC1HW, *expectedN1, 16, srcShape[5]};
+        return expectShape(dstShape, expected, "dst");
+      }
+      case pto::Layout::NCDHW: {
+        if (dstLayoutKind != pto::Layout::FRACTAL_Z_3D) {
+          return emitOpError("expects convtile ttrans NCDHW src to lower to FRACTAL_Z_3D dst");
+        }
+        if (srcShape.size() != 5 || dstShape.size() != 4) {
+          return emitOpError("expects convtile ttrans NCDHW->FRACTAL_Z_3D to use 5D src and 4D dst");
+        }
+        auto expectedC1 = checkedCeilDiv(srcShape[1], c0);
+        auto expectedN1 = checkedCeilDiv(srcShape[0], 16);
+        if (!expectedC1 || !expectedN1) {
+          return emitOpError("cannot compute convtile ttrans NCDHW->FRACTAL_Z_3D split");
+        }
+        auto expectedDst0 = checkedMul(srcShape[2], *expectedC1);
+        if (!expectedDst0) {
+          return emitOpError("cannot compute convtile ttrans NCDHW->FRACTAL_Z_3D output size");
+        }
+        expectedDst0 = checkedMul(*expectedDst0, srcShape[3]);
+        if (!expectedDst0) {
+          return emitOpError("cannot compute convtile ttrans NCDHW->FRACTAL_Z_3D output size");
+        }
+        expectedDst0 = checkedMul(*expectedDst0, srcShape[4]);
+        if (!expectedDst0) {
+          return emitOpError("cannot compute convtile ttrans NCDHW->FRACTAL_Z_3D output size");
+        }
+        SmallVector<int64_t, 6> expected{*expectedDst0, *expectedN1, 16, c0};
+        return expectShape(dstShape, expected, "dst");
+      }
+      default:
+        return emitOpError("expects convtile ttrans src to use NCHW, NC1HWC0, GNCHW, GNC1HWC0, or NCDHW layout");
+      }
+    };
+
+    return verifyPair(srcLayout.getLayout(), dstLayout.getLayout());
+  };
   auto verifyA2A3 = [&]() -> LogicalResult { return verifyTTransA2A3(*this); };
   auto verifyA5 = [&]() -> LogicalResult { return verifyTTransA5(*this); };
+  if (isa<pto::ConvTileType>(getSrc().getType())) {
+    return verifyConvTile();
+  }
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
@@ -18046,6 +18627,12 @@ void TLoadOp::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffec
 }
 
 void TPrefetchOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
+}
+
+void TImg2colOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());

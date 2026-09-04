@@ -1,0 +1,65 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @timg2col_sample(
+      %src: !pto.conv_tile<
+          mat, 1x1x3x4x8xf32,
+          config=#pto.conv_tile_config<
+            fmap_h=3, fmap_w=4, pad_list=1x0x1x0,
+            filter_h=2, filter_w=2, dilation_h=1, dilation_w=1,
+            stride_h=1, stride_w=1, pad_value=0 : i32,
+            channel_size=8, repeat_stride=0, repeat_time=1,
+            repeat_mode=0, dst_stride=1, dst_mposition=0,
+            transpose=false>>,
+      %dst: !pto.tile_buf<left, 16x32xf32, valid=9x32, blayout=col_major, slayout=row_major, fractal=512>) {
+    pto.set_fmatrix %src {fmatrixMode = #pto.fmatrix_mode<b_manual>}
+      : !pto.conv_tile<
+          mat, 1x1x3x4x8xf32,
+          config=#pto.conv_tile_config<
+            fmap_h=3, fmap_w=4, pad_list=1x0x1x0,
+            filter_h=2, filter_w=2, dilation_h=1, dilation_w=1,
+            stride_h=1, stride_w=1, pad_value=0 : i32,
+            channel_size=8, repeat_stride=0, repeat_time=1,
+            repeat_mode=0, dst_stride=1, dst_mposition=0,
+            transpose=false>>
+    pto.set_img2col_rpt %src {fmatrixMode = #pto.fmatrix_mode<b_manual>}
+      : !pto.conv_tile<
+          mat, 1x1x3x4x8xf32,
+          config=#pto.conv_tile_config<
+            fmap_h=3, fmap_w=4, pad_list=1x0x1x0,
+            filter_h=2, filter_w=2, dilation_h=1, dilation_w=1,
+            stride_h=1, stride_w=1, pad_value=0 : i32,
+            channel_size=8, repeat_stride=0, repeat_time=1,
+            repeat_mode=0, dst_stride=1, dst_mposition=0,
+            transpose=false>>
+    pto.set_img2col_padding %src {fmatrixMode = #pto.fmatrix_mode<b_manual>}
+      : !pto.conv_tile<
+          mat, 1x1x3x4x8xf32,
+          config=#pto.conv_tile_config<
+            fmap_h=3, fmap_w=4, pad_list=1x0x1x0,
+            filter_h=2, filter_w=2, dilation_h=1, dilation_w=1,
+            stride_h=1, stride_w=1, pad_value=0 : i32,
+            channel_size=8, repeat_stride=0, repeat_time=1,
+            repeat_mode=0, dst_stride=1, dst_mposition=0,
+            transpose=false>>
+    pto.timg2col %dst, %src {posM = 1 : i32, posK = 8 : i32,
+                             fmatrixMode = #pto.fmatrix_mode<b_manual>}
+      : !pto.tile_buf<left, 16x32xf32, valid=9x32, blayout=col_major, slayout=row_major, fractal=512>,
+        !pto.conv_tile<
+            mat, 1x1x3x4x8xf32,
+            config=#pto.conv_tile_config<
+              fmap_h=3, fmap_w=4, pad_list=1x0x1x0,
+              filter_h=2, filter_w=2, dilation_h=1, dilation_w=1,
+              stride_h=1, stride_w=1, pad_value=0 : i32,
+              channel_size=8, repeat_stride=0, repeat_time=1,
+              repeat_mode=0, dst_stride=1, dst_mposition=0,
+              transpose=false>>
+    return
+  }
+}

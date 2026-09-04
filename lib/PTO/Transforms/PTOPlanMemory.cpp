@@ -94,6 +94,22 @@ static std::optional<int64_t> getTileBufferFootprintBytes(TileBufType type) {
          static_cast<int64_t>(elemBytes);
 }
 
+static std::optional<int64_t> getConvTileFootprintBytes(ConvTileType type) {
+  unsigned elemBytes = getPTOStorageElemByteSize(type.getElementType());
+  int64_t bufferSize = type.getBufferSizeValue();
+  bool invalidCapacity = elemBytes == 0 || bufferSize <= 0;
+  if (invalidCapacity) {
+    return std::nullopt;
+  }
+
+  int64_t elemBytesI64 = static_cast<int64_t>(elemBytes);
+  bool overflows = bufferSize > std::numeric_limits<int64_t>::max() / elemBytesI64;
+  if (overflows) {
+    return std::nullopt;
+  }
+  return bufferSize * elemBytesI64;
+}
+
 static int64_t ceilDivBitsToBytes(int64_t bits) {
   return (bits + kBitsPerByte - 1) / kBitsPerByte;
 }
@@ -1115,6 +1131,9 @@ BufferInfo MemLivenessAnalysis::GetBufferInfo(Operation *op, Value operand,
   if (auto tileType = dyn_cast<TileBufType>(operand.getType())) {
     elementType = tileType.getElementType();
     footprintBytes = getTileBufferFootprintBytes(tileType);
+  } else if (auto convType = dyn_cast<ConvTileType>(operand.getType())) {
+    elementType = convType.getElementType();
+    footprintBytes = getConvTileFootprintBytes(convType);
   } else if (auto multiType = dyn_cast<MultiTileBufType>(operand.getType())) {
     TileBufType slotType = multiType.getSlotType();
     elementType = slotType.getElementType();
@@ -2663,8 +2682,8 @@ public:
       return failure();
     }
 
-    auto tileType = dyn_cast<TileBufType>(op.getResult().getType());
-    if (!tileType) {
+    Type tileType = op.getResult().getType();
+    if (!isa<TileBufType, ConvTileType>(tileType)) {
       return failure();
     }
 

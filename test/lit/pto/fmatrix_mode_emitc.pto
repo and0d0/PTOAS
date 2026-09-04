@@ -1,0 +1,62 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-arch=a5 %s -o - | FileCheck %s
+
+module {
+  func.func @fmatrix_mode_default(
+      %cfg: !pto.conv_tile<mat, 1x1x1x1x16xf16>,
+      %dst: !pto.tile_buf<left, 16x16xf16, blayout=col_major, slayout=row_major, fractal=512>) {
+    pto.set_fmatrix %cfg : !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    pto.set_img2col_rpt %cfg : !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    pto.set_img2col_padding %cfg : !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    pto.timg2col %dst, %cfg
+      : !pto.tile_buf<left, 16x16xf16, blayout=col_major, slayout=row_major, fractal=512>,
+        !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    return
+  }
+
+  func.func @fmatrix_mode_b(
+      %cfg: !pto.conv_tile<mat, 1x1x1x1x16xf16>,
+      %dst: !pto.tile_buf<left, 16x16xf16, blayout=col_major, slayout=row_major, fractal=512>) {
+    pto.set_fmatrix %cfg {fmatrixMode = #pto.fmatrix_mode<b_manual>}
+      : !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    pto.set_img2col_rpt %cfg {fmatrixMode = #pto.fmatrix_mode<b_manual>}
+      : !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    pto.set_img2col_padding %cfg {fmatrixMode = #pto.fmatrix_mode<b_manual>}
+      : !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    pto.timg2col %dst, %cfg {fmatrixMode = #pto.fmatrix_mode<b_auto>}
+      : !pto.tile_buf<left, 16x16xf16, blayout=col_major, slayout=row_major, fractal=512>,
+        !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    return
+  }
+
+  func.func @fmatrix_mode_a_auto(
+      %cfg: !pto.conv_tile<mat, 1x1x1x1x16xf16>,
+      %dst: !pto.tile_buf<left, 16x16xf16, blayout=col_major, slayout=row_major, fractal=512>) {
+    pto.timg2col %dst, %cfg {fmatrixMode = #pto.fmatrix_mode<a_auto>}
+      : !pto.tile_buf<left, 16x16xf16, blayout=col_major, slayout=row_major, fractal=512>,
+        !pto.conv_tile<mat, 1x1x1x1x16xf16>
+    return
+  }
+}
+
+// CHECK-LABEL: fmatrix_mode_default
+// CHECK: SETFMATRIX(
+// CHECK: SET_IMG2COL_RPT(
+// CHECK: SET_IMG2COL_PADDING(
+// CHECK: TIMG2COL(
+
+// CHECK-LABEL: fmatrix_mode_b
+// CHECK: SETFMATRIX<pto::SetFmatrixMode::FMATRIX_B_MANUAL>
+// CHECK: SET_IMG2COL_RPT<pto::SetFmatrixMode::FMATRIX_B_MANUAL>
+// CHECK: SET_IMG2COL_PADDING<pto::SetFmatrixMode::FMATRIX_B_MANUAL>
+// CHECK: TIMG2COL<pto::SetFmatrixMode::FMATRIX_B_AUTO>
+
+// CHECK-LABEL: fmatrix_mode_a_auto
+// CHECK: TIMG2COL<pto::SetFmatrixMode::FMATRIX_A_AUTO>

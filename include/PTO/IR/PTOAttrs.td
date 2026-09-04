@@ -95,6 +95,28 @@ def PTO_SignednessAttr : PTO_Attr<"Signedness", "signedness"> {
 }
 
 //===----------------------------------------------------------------------===//
+// FMATRIX mode
+//===----------------------------------------------------------------------===//
+
+def PTO_FmatrixMode_AutoA : I32EnumAttrCase<"FMATRIX_A_AUTO", 0, "a_auto">;
+def PTO_FmatrixMode_AutoB : I32EnumAttrCase<"FMATRIX_B_AUTO", 1, "b_auto">;
+def PTO_FmatrixMode_ManualA : I32EnumAttrCase<"FMATRIX_A_MANUAL", 2, "a_manual">;
+def PTO_FmatrixMode_ManualB : I32EnumAttrCase<"FMATRIX_B_MANUAL", 3, "b_manual">;
+
+def PTO_FmatrixModeEnum : PTO_I32Enum<
+  "FmatrixMode", "PTO FMATRIX selector", [
+    PTO_FmatrixMode_AutoA,
+    PTO_FmatrixMode_AutoB,
+    PTO_FmatrixMode_ManualA,
+    PTO_FmatrixMode_ManualB
+  ]>;
+
+def PTO_FmatrixModeAttr : EnumAttr<PTO_Dialect, PTO_FmatrixModeEnum, "fmatrix_mode"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "A/B selector for FMATRIX-related ops";
+}
+
+//===----------------------------------------------------------------------===//
 // SIMT GM load/store L1 and L2 cache controls
 //===----------------------------------------------------------------------===//
 
@@ -484,6 +506,16 @@ def PTO_Layout_DN : I32EnumAttrCase<"DN", 1, "dn">;
 def PTO_Layout_NZ : I32EnumAttrCase<"NZ", 2, "nz">;
 def PTO_Layout_MX_A_ZZ : I32EnumAttrCase<"MX_A_ZZ", 3, "mx_a_zz">;
 def PTO_Layout_MX_B_NN : I32EnumAttrCase<"MX_B_NN", 4, "mx_b_nn">;
+def PTO_Layout_NCHW : I32EnumAttrCase<"NCHW", 5, "nchw">;
+def PTO_Layout_NC1HWC0 : I32EnumAttrCase<"NC1HWC0", 6, "nc1hwc0">;
+def PTO_Layout_NCDHW : I32EnumAttrCase<"NCDHW", 7, "ncdhw">;
+def PTO_Layout_NDC1HWC0 : I32EnumAttrCase<"NDC1HWC0", 8, "ndc1hwc0">;
+def PTO_Layout_GNCHW : I32EnumAttrCase<"GNCHW", 9, "gnchw">;
+def PTO_Layout_GNC1HWC0 : I32EnumAttrCase<"GNC1HWC0", 10, "gnc1hwc0">;
+def PTO_Layout_NHWC : I32EnumAttrCase<"NHWC", 11, "nhwc">;
+def PTO_Layout_FRACTAL_Z : I32EnumAttrCase<"FRACTAL_Z", 12, "fractal_z">;
+def PTO_Layout_FRACTAL_Z_3D :
+    I32EnumAttrCase<"FRACTAL_Z_3D", 13, "fractal_z_3d">;
 
 def PTO_LayoutEnum : PTO_I32Enum<
   "Layout", "Global tensor layout (row/col/fractal)", [
@@ -491,16 +523,67 @@ def PTO_LayoutEnum : PTO_I32Enum<
     PTO_Layout_DN,
     PTO_Layout_NZ,
     PTO_Layout_MX_A_ZZ,
-    PTO_Layout_MX_B_NN
+    PTO_Layout_MX_B_NN,
+    PTO_Layout_NCHW,
+    PTO_Layout_NC1HWC0,
+    PTO_Layout_NCDHW,
+    PTO_Layout_NDC1HWC0,
+    PTO_Layout_GNCHW,
+    PTO_Layout_GNC1HWC0,
+    PTO_Layout_NHWC,
+    PTO_Layout_FRACTAL_Z,
+    PTO_Layout_FRACTAL_Z_3D
   ]>;
 
 def PTO_LayoutAttr : PTO_Attr<"Layout", "layout"> {
   let parameters = (ins EnumParameter<PTO_LayoutEnum>:$layout);
   let assemblyFormat = "`<` params `>`";
   let description = [{
-    Layout inferred from shape/stride for GlobalTensor:
+    Layout inferred from shape/stride for GlobalTensor and ConvTile:
       ND (row-major), DN (col-major), NZ (fractal),
-      MX_A_ZZ (A-side MX scale), MX_B_NN (B-side MX scale).
+      MX_A_ZZ (A-side MX scale), MX_B_NN (B-side MX scale),
+      NCHW/NC1HWC0/NCDHW/NDC1HWC0/GNCHW/GNC1HWC0/NHWC/FRACTAL_Z/FRACTAL_Z_3D for conv layouts.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// ConvTile layout
+//===----------------------------------------------------------------------===//
+
+def PTO_ConvLayout_NC1HWC0 :
+    I32EnumAttrCase<"NC1HWC0", 0, "nc1hwc0">;
+def PTO_ConvLayout_NDC1HWC0 :
+    I32EnumAttrCase<"NDC1HWC0", 1, "ndc1hwc0">;
+def PTO_ConvLayout_FRACTAL_Z :
+    I32EnumAttrCase<"FRACTAL_Z", 2, "fractal_z">;
+def PTO_ConvLayout_FRACTAL_Z_3D :
+    I32EnumAttrCase<"FRACTAL_Z_3D", 3, "fractal_z_3d">;
+def PTO_ConvLayout_NCHW :
+    I32EnumAttrCase<"NCHW", 4, "nchw">;
+def PTO_ConvLayout_NHWC :
+    I32EnumAttrCase<"NHWC", 5, "nhwc">;
+def PTO_ConvLayout_GNCHW :
+    I32EnumAttrCase<"GNCHW", 6, "gnchw">;
+def PTO_ConvLayout_GNC1HWC0 :
+    I32EnumAttrCase<"GNC1HWC0", 7, "gnc1hwc0">;
+
+def PTO_ConvLayoutEnum : PTO_I32Enum<
+  "ConvLayout", "PTO ConvTile storage layout", [
+    PTO_ConvLayout_NC1HWC0,
+    PTO_ConvLayout_NDC1HWC0,
+    PTO_ConvLayout_FRACTAL_Z,
+    PTO_ConvLayout_FRACTAL_Z_3D,
+    PTO_ConvLayout_NCHW,
+    PTO_ConvLayout_NHWC,
+    PTO_ConvLayout_GNCHW,
+    PTO_ConvLayout_GNC1HWC0
+  ]>;
+
+def PTO_ConvLayoutAttr : PTO_Attr<"ConvLayout", "conv_layout"> {
+  let parameters = (ins EnumParameter<PTO_ConvLayoutEnum>:$value);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Physical layout carried by a PTO ConvTile.
   }];
 }
 
@@ -1234,6 +1317,56 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
                                 mlir::IntegerAttr sFractalSize,
                                 mlir::Attribute pad,
                                 mlir::Attribute compactMode);
+  }];
+}
+
+// ---------- conv_tile_config ----------
+def ConvTileConfigAttr : AttrDef<PTO_Dialect, "ConvTileConfig"> {
+  let mnemonic = "conv_tile_config";
+  let parameters = (ins
+    "mlir::IntegerAttr":$fmapH,
+    "mlir::IntegerAttr":$fmapW,
+    ArrayRefParameter<"int64_t">:$padList,
+    "mlir::IntegerAttr":$filterH,
+    "mlir::IntegerAttr":$filterW,
+    "mlir::IntegerAttr":$dilationH,
+    "mlir::IntegerAttr":$dilationW,
+    "mlir::IntegerAttr":$strideH,
+    "mlir::IntegerAttr":$strideW,
+    "mlir::Attribute":$padValue,
+    "mlir::IntegerAttr":$channelSize,
+    "mlir::IntegerAttr":$repeatStride,
+    "mlir::IntegerAttr":$repeatTime,
+    "mlir::IntegerAttr":$repeatMode,
+    "mlir::IntegerAttr":$dstStride,
+    "mlir::IntegerAttr":$dstMposition,
+    "mlir::BoolAttr":$transpose
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    static ConvTileConfigAttr getDefault(MLIRContext *ctx);
+    bool isDefault() const;
+
+    static LogicalResult verify(function_ref<InFlightDiagnostic()> emitError,
+                                mlir::IntegerAttr fmapH,
+                                mlir::IntegerAttr fmapW,
+                                ArrayRef<int64_t> padList,
+                                mlir::IntegerAttr filterH,
+                                mlir::IntegerAttr filterW,
+                                mlir::IntegerAttr dilationH,
+                                mlir::IntegerAttr dilationW,
+                                mlir::IntegerAttr strideH,
+                                mlir::IntegerAttr strideW,
+                                mlir::Attribute padValue,
+                                mlir::IntegerAttr channelSize,
+                                mlir::IntegerAttr repeatStride,
+                                mlir::IntegerAttr repeatTime,
+                                mlir::IntegerAttr repeatMode,
+                                mlir::IntegerAttr dstStride,
+                                mlir::IntegerAttr dstMposition,
+                                mlir::BoolAttr transpose);
   }];
 }
 

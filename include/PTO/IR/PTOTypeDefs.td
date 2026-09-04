@@ -228,6 +228,35 @@ def TileBufType : TypeDef<PTO_Dialect, "TileBuf"> {
   }];
 }
 
+def ConvTileType : TypeDef<PTO_Dialect, "ConvTile"> {
+  let mnemonic = "conv_tile";
+  let parameters = (ins
+    ArrayRefParameter<"int64_t">:$shape,
+    "mlir::Type":$elementType,
+    "mlir::IntegerAttr":$bufferSize,
+    "mlir::pto::AddressSpaceAttr":$memorySpace,
+    "mlir::pto::LayoutAttr":$layout,
+    "mlir::pto::ConvTileConfigAttr":$config
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    int64_t getRank() const { return getShape().size(); }
+    int64_t getDimSize(unsigned idx) const { return getShape()[idx]; }
+    int64_t getNumElements() const {
+      int64_t num = 1;
+      for (int64_t dim : getShape()) num *= dim;
+      return num;
+    }
+
+    int64_t getBufferSizeValue() const { return getBufferSize().getInt(); }
+
+    mlir::pto::ConvTileConfigAttr getConfigAttr() const;
+    bool hasNonDefaultConfig() const;
+  }];
+}
+
 // =============================================================================
 // MultiTileBufType
 // =============================================================================

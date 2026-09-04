@@ -269,6 +269,26 @@ int32_t TileBufType::getCompactModeI32() const {
   return 0;
 }
 
+ConvTileConfigAttr ConvTileType::getConfigAttr() const {
+  if constexpr (std::is_same_v<decltype(getConfig()), ConvTileConfigAttr>) {
+    auto cfg = getConfig();
+    if (!cfg) {
+      cfg = ConvTileConfigAttr::getDefault(getContext());
+    }
+    return cfg;
+  } else {
+    auto cfg = llvm::dyn_cast_or_null<ConvTileConfigAttr>(getConfig());
+    if (!cfg) {
+      cfg = ConvTileConfigAttr::getDefault(getContext());
+    }
+    return cfg;
+  }
+}
+
+bool ConvTileType::hasNonDefaultConfig() const {
+  return !getConfigAttr().isDefault();
+}
+
 namespace {
 
 struct ParsedTileBufFields {
@@ -754,6 +774,263 @@ void mlir::pto::TileBufType::print(mlir::AsmPrinter &printer) const {
     printer << ", compact=" << stringifyCompactModeInt(cfg.getCompactMode());
   }
 
+  printer << ">";
+}
+
+namespace {
+
+struct ParsedConvTileFields {
+  std::string locStr;
+  SmallVector<int64_t, 6> shape;
+  Type dtype;
+  IntegerAttr bufferSize;
+  Attribute layoutAttr;
+  ConvTileConfigAttr config;
+};
+
+static std::optional<int64_t> computeConvTileBufferSize(ArrayRef<int64_t> shape) {
+  if (shape.empty()) {
+    return std::nullopt;
+  }
+
+  int64_t capacity = 1;
+  for (int64_t dim : shape) {
+    if (dim <= 0) {
+      return std::nullopt;
+    }
+    if (capacity > std::numeric_limits<int64_t>::max() / dim) {
+      return std::nullopt;
+    }
+    capacity *= dim;
+  }
+  return capacity;
+}
+
+static LogicalResult parseConvTileLayoutField(AsmParser &parser,
+                                              Attribute &layoutAttr) {
+  if (failed(parser.parseAttribute(layoutAttr))) {
+    return failure();
+  }
+  return success();
+}
+
+static LogicalResult parseConvTileConfigField(AsmParser &parser,
+                                              Attribute &configAttr) {
+  if (failed(parser.parseAttribute(configAttr))) {
+    return failure();
+  }
+  return success();
+}
+
+static void printConvTileLayoutField(AsmPrinter &printer, Attribute layoutAttr) {
+  printer << "layout=";
+  printer.printAttribute(layoutAttr);
+}
+
+static void printConvTileConfigField(AsmPrinter &printer,
+                                     ConvTileConfigAttr configAttr) {
+  printer << "config=";
+  printer.printAttribute(configAttr);
+}
+
+static Type buildConvTileType(AsmParser &parser,
+                              const ParsedConvTileFields &fields) {
+  MLIRContext *ctx = parser.getContext();
+  auto emitError = [&]() -> InFlightDiagnostic {
+    return parser.emitError(parser.getNameLoc());
+  };
+
+  if (fields.shape.empty()) {
+    emitError() << "conv_tile shape must be non-empty";
+    return Type();
+  }
+  if (fields.shape.size() > 6) {
+    emitError() << "conv_tile shape must have rank in [1, 6]";
+    return Type();
+  }
+  if (llvm::is_contained(fields.shape, ShapedType::kDynamic)) {
+    emitError() << "conv_tile shape must be static";
+    return Type();
+  }
+
+  auto defaultBufferSize = computeConvTileBufferSize(fields.shape);
+  if (!defaultBufferSize) {
+    emitError() << "conv_tile shape must have a positive, overflow-free element count";
+    return Type();
+  }
+
+  IntegerAttr bufferSize = fields.bufferSize;
+  if (!bufferSize) {
+    bufferSize = IntegerAttr::get(parser.getBuilder().getI64Type(),
+                                  *defaultBufferSize);
+  } else if (bufferSize.getInt() < *defaultBufferSize) {
+    emitError() << "conv_tile buffer_size must be at least the logical element count";
+    return Type();
+  }
+
+  auto memorySpace = resolveTileBufMemorySpace(fields.locStr);
+  if (!memorySpace.has_value()) {
+    emitError() << "unknown loc: " << fields.locStr;
+    return Type();
+  }
+  if (*memorySpace != AddressSpace::MAT) {
+    emitError() << "conv_tile only supports loc=mat";
+    return Type();
+  }
+
+  auto layoutAttr = llvm::dyn_cast_or_null<LayoutAttr>(fields.layoutAttr);
+  if (!layoutAttr) {
+    emitError() << "layout must be a pto.layout attr";
+    return Type();
+  }
+  auto cfg = fields.config ? fields.config : ConvTileConfigAttr::getDefault(ctx);
+
+  return ConvTileType::get(ctx, fields.shape, fields.dtype, bufferSize,
+                           AddressSpaceAttr::get(ctx, *memorySpace),
+                           layoutAttr, cfg);
+}
+
+} // namespace
+
+Type ConvTileType::parse(AsmParser &parser) {
+  if (failed(parser.parseLess())) {
+    return Type();
+  }
+
+  std::string firstToken;
+  if (failed(parser.parseKeywordOrString(&firstToken))) {
+    return Type();
+  }
+
+  ParsedConvTileFields fields;
+  fields.locStr = firstToken;
+
+  if (failed(parser.parseComma())) {
+    return Type();
+  }
+
+  if (failed(parser.parseDimensionList(fields.shape, /*allowDynamic=*/false,
+                                       /*withTrailingX=*/true))) {
+    return Type();
+  }
+
+  if (failed(parser.parseType(fields.dtype))) {
+    return Type();
+  }
+
+  bool parsedGreater = false;
+  bool seenLayout = false;
+  bool seenConfig = false;
+  bool seenBufferSize = false;
+  LayoutAttr layoutAttr;
+  IntegerAttr bufferSizeAttr;
+  ConvTileConfigAttr configAttr;
+  configAttr = ConvTileConfigAttr::getDefault(parser.getContext());
+  while (!parsedGreater) {
+    if (succeeded(parser.parseOptionalGreater())) {
+      parsedGreater = true;
+      break;
+    }
+    if (failed(parser.parseComma())) {
+      return Type();
+    }
+
+    StringRef key;
+    if (failed(parser.parseKeyword(&key)) || failed(parser.parseEqual())) {
+      return Type();
+    }
+
+    if (key == "layout") {
+      Attribute attr;
+      if (failed(parseConvTileLayoutField(parser, attr))) {
+        return Type();
+      }
+      layoutAttr = llvm::dyn_cast<LayoutAttr>(attr);
+      if (!layoutAttr || seenLayout) {
+        return Type();
+      }
+      seenLayout = true;
+      continue;
+    }
+
+    if (key == "buffer_size") {
+      Attribute attr;
+      if (failed(parser.parseAttribute(attr))) {
+        return Type();
+      }
+      bufferSizeAttr = llvm::dyn_cast_or_null<IntegerAttr>(attr);
+      if (!bufferSizeAttr || seenBufferSize) {
+        return Type();
+      }
+      seenBufferSize = true;
+      continue;
+    }
+
+    if (key == "config") {
+      Attribute attr;
+      if (failed(parseConvTileConfigField(parser, attr))) {
+        return Type();
+      }
+      configAttr = llvm::dyn_cast_or_null<ConvTileConfigAttr>(attr);
+      if (!configAttr || seenConfig) {
+        return Type();
+      }
+      seenConfig = true;
+      continue;
+    }
+
+    parser.emitError(parser.getCurrentLocation(),
+                     "unknown key in conv_tile syntax: ")
+        << key;
+    return Type();
+  }
+
+  if (!layoutAttr) {
+    layoutAttr = LayoutAttr::get(parser.getContext(), Layout::NC1HWC0);
+  }
+
+  if (!bufferSizeAttr) {
+    auto defaultBufferSize = computeConvTileBufferSize(fields.shape);
+    if (!defaultBufferSize) {
+      parser.emitError(parser.getCurrentLocation(),
+                       "conv_tile shape must have a positive, overflow-free element count");
+      return Type();
+    }
+    bufferSizeAttr =
+        IntegerAttr::get(parser.getBuilder().getI64Type(), *defaultBufferSize);
+  }
+
+  if (!seenConfig) {
+    configAttr = ConvTileConfigAttr::getDefault(parser.getContext());
+  }
+
+  return buildConvTileType(parser, {fields.locStr, fields.shape, fields.dtype,
+                                    bufferSizeAttr, layoutAttr, configAttr});
+}
+
+void ConvTileType::print(AsmPrinter &printer) const {
+  printer << "<";
+  printer << stringifyLocFromMemorySpace(getMemorySpace());
+  printer << ", ";
+  auto shape = getShape();
+  for (auto it = shape.begin(); it != shape.end(); ++it) {
+    if (it != shape.begin()) {
+      printer << "x";
+    }
+    if (*it == ShapedType::kDynamic) {
+      printer << "?";
+    } else {
+      printer << *it;
+    }
+  }
+  printer << "x";
+  printer.printType(getElementType());
+  printer << ", buffer_size=";
+  printer.printAttribute(getBufferSize());
+  printer << ", ";
+  printConvTileLayoutField(printer, getLayout());
+  printer << ", ";
+  printConvTileConfigField(printer, getConfigAttr());
   printer << ">";
 }
 
