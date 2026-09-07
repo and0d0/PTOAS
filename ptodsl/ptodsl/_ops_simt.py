@@ -682,6 +682,18 @@ def _sync_event_id_operand_in_range(event_id, *, context: str, lo: int, hi: int,
     return event_id if isinstance(event_id, int) else unwrap_surface_value(event_id)
 
 
+def _intra_block_event_id_operand(event_id, *, context: str, lo: int, hi: int):
+    if isinstance(event_id, int):
+        _validate_static_event_id_range(event_id, context=context, lo=lo, hi=hi,
+                                         meaning="physical event_id")
+        return event_id
+
+    value = unwrap_surface_value(event_id)
+    if not IntegerType.isinstance(value.type) or IntegerType(value.type).width not in (32, 64):
+        raise TypeError(f"{context} expects an i32 or i64 event_id, got {value.type}")
+    return value
+
+
 def _flag_event_id_operand(event_id, *, context: str):
     if isinstance(event_id, int):
         _validate_static_event_id(event_id, context=context)
@@ -722,12 +734,11 @@ def set_intra_block(pipe, event_id):
         context="set_intra_block(pipe, event_id)",
         allowed=("PIPE_FIX", "PIPE_MTE1", "PIPE_MTE2", "PIPE_MTE3", "PIPE_V"),
     )
-    event_operand = _sync_event_id_operand_in_range(
+    event_operand = _intra_block_event_id_operand(
         event_id,
         context="set_intra_block(..., event_id=...)",
         lo=0,
         hi=31,
-        meaning="physical event_id",
     )
     _pto.set_intra_block(_pipe_attr(pipe), event_operand)
 
@@ -739,12 +750,11 @@ def wait_intra_block(pipe, event_id):
         context="wait_intra_block(pipe, event_id)",
         allowed=("PIPE_FIX", "PIPE_MTE1", "PIPE_MTE2", "PIPE_MTE3", "PIPE_V"),
     )
-    event_operand = _sync_event_id_operand_in_range(
+    event_operand = _intra_block_event_id_operand(
         event_id,
         context="wait_intra_block(..., event_id=...)",
         lo=0,
         hi=31,
-        meaning="physical event_id",
     )
     _pto.wait_intra_block(_pipe_attr(pipe), event_operand)
 

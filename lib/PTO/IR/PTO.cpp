@@ -114,10 +114,18 @@ static ParseResult parseSyncEventOpCommon(OpAsmParser &parser,
                                           OperationState &result,
                                           StringAttr pipeAttrName,
                                           StringAttr eventIdAttrName);
+static ParseResult parseSyncEventOpIntra(OpAsmParser &parser,
+                                         OperationState &result,
+                                         StringAttr pipeAttrName,
+                                         StringAttr eventIdAttrName);
 static void printSyncEventOpCommon(OpAsmPrinter &p, Operation *op,
                                    PipeAttr pipeAttr, IntegerAttr eventAttr,
                                    Value eventDyn, StringRef pipeAttrName,
                                    StringRef eventIdAttrName);
+static void printSyncEventOpIntra(OpAsmPrinter &p, Operation *op,
+                                  PipeAttr pipeAttr, IntegerAttr eventAttr,
+                                  Value eventDyn, StringRef pipeAttrName,
+                                  StringRef eventIdAttrName);
 static bool isTileLikeType(Type ty);
 static SmallVector<int64_t, 4> getShapeVec(Type ty);
 static SmallVector<int64_t, 4> getValidShapeVec(Type ty);
@@ -761,6 +769,59 @@ static ParseResult parseSyncEventOpCommon(OpAsmParser &parser,
   return success();
 }
 
+static ParseResult parseSyncEventOpIntra(OpAsmParser &parser,
+                                         OperationState &result,
+                                         StringAttr pipeAttrName,
+                                         StringAttr eventIdAttrName) {
+  PipeAttr pipeAttr;
+  if (succeeded(parser.parseOptionalLess())) {
+    StringRef pipeTok;
+    if (parser.parseKeyword(&pipeTok) || parser.parseGreater()) {
+      return failure();
+    }
+    auto pipeOr = symbolizePIPE(pipeTok);
+    if (!pipeOr) {
+      return parser.emitError(parser.getCurrentLocation())
+             << "unknown pipe token: " << pipeTok;
+    }
+    pipeAttr = PipeAttr::get(parser.getContext(), *pipeOr);
+    result.addAttribute(pipeAttrName, pipeAttr);
+  } else if (parser.parseAttribute(pipeAttr, pipeAttrName,
+                                   result.attributes)) {
+    return failure();
+  }
+  if (parser.parseComma()) {
+    return failure();
+  }
+
+  OpAsmParser::UnresolvedOperand eventOperand;
+  OptionalParseResult parseEventOperand =
+      parser.parseOptionalOperand(eventOperand);
+  if (parseEventOperand.has_value()) {
+    if (failed(*parseEventOperand)) {
+      return failure();
+    }
+    Type eventType;
+    if (parser.parseColonType(eventType)) {
+      return failure();
+    }
+    if (parser.resolveOperand(eventOperand, eventType, result.operands)) {
+      return failure();
+    }
+  } else {
+    IntegerAttr eventAttr;
+    if (parser.parseAttribute(eventAttr, parser.getBuilder().getI32Type(),
+                              eventIdAttrName, result.attributes)) {
+      return failure();
+    }
+  }
+
+  if (parser.parseOptionalAttrDict(result.attributes)) {
+    return failure();
+  }
+  return success();
+}
+
 static void printSyncEventOpCommon(OpAsmPrinter &p, Operation *op,
                                    PipeAttr pipeAttr, IntegerAttr eventAttr,
                                    Value eventDyn, StringRef pipeAttrName,
@@ -771,6 +832,19 @@ static void printSyncEventOpCommon(OpAsmPrinter &p, Operation *op,
   } else {
     p << eventDyn;
 }
+  p.printOptionalAttrDict(op->getAttrs(), {pipeAttrName, eventIdAttrName});
+}
+
+static void printSyncEventOpIntra(OpAsmPrinter &p, Operation *op,
+                                  PipeAttr pipeAttr, IntegerAttr eventAttr,
+                                  Value eventDyn, StringRef pipeAttrName,
+                                  StringRef eventIdAttrName) {
+  p << " <" << stringifyPIPE(pipeAttr.getPipe()) << ">, ";
+  if (eventAttr) {
+    p << eventAttr.getInt();
+  } else {
+    p << eventDyn << " : " << eventDyn.getType();
+  }
   p.printOptionalAttrDict(op->getAttrs(), {pipeAttrName, eventIdAttrName});
 }
 
@@ -4203,7 +4277,15 @@ static LogicalResult verifyNamedSyncEventOp(Operation *op, PipeAttr pipe,
   const bool hasDynamicEventId = static_cast<bool>(eventIdDyn);
   if (hasStaticEventId == hasDynamicEventId) {
     return op->emitOpError()
-           << "expects exactly one event-id form: static attr or dynamic index operand";
+           << "expects exactly one event-id form: static attr or dynamic integer operand";
+  }
+  if (hasDynamicEventId) {
+    Type eventIdType = eventIdDyn.getType();
+    if (!eventIdType.isInteger(32) && !eventIdType.isInteger(64)) {
+      return op->emitOpError()
+             << "expects dynamic event_id to be i32 or i64, but got "
+             << eventIdType;
+    }
   }
   const bool staticEventIdOutOfRange =
       hasStaticEventId &&
@@ -4271,15 +4353,15 @@ LogicalResult mlir::pto::WaitCrossBlockOp::verify() {
 
 ParseResult mlir::pto::SetIntraBlockOp::parse(OpAsmParser &parser,
                                                OperationState &result) {
-  return parseSyncEventOpCommon(parser, result,
-                                SetIntraBlockOp::getPipeAttrName(result.name),
-                                SetIntraBlockOp::getEventIdAttrName(result.name));
+  return parseSyncEventOpIntra(
+      parser, result, SetIntraBlockOp::getPipeAttrName(result.name),
+      SetIntraBlockOp::getEventIdAttrName(result.name));
 }
 
 void mlir::pto::SetIntraBlockOp::print(OpAsmPrinter &p) {
-  printSyncEventOpCommon(p, getOperation(), getPipe(), getEventIdAttr(),
-                         getEventIdDyn(), getPipeAttrName().getValue(),
-                         getEventIdAttrName().getValue());
+  printSyncEventOpIntra(p, getOperation(), getPipe(), getEventIdAttr(),
+                        getEventIdDyn(), getPipeAttrName().getValue(),
+                        getEventIdAttrName().getValue());
 }
 
 LogicalResult mlir::pto::SetIntraBlockOp::verify() {
@@ -4298,15 +4380,15 @@ LogicalResult mlir::pto::SetIntraBlockOp::verify() {
 
 ParseResult mlir::pto::WaitIntraBlockOp::parse(OpAsmParser &parser,
                                                OperationState &result) {
-  return parseSyncEventOpCommon(parser, result,
-                                WaitIntraBlockOp::getPipeAttrName(result.name),
-                                WaitIntraBlockOp::getEventIdAttrName(result.name));
+  return parseSyncEventOpIntra(
+      parser, result, WaitIntraBlockOp::getPipeAttrName(result.name),
+      WaitIntraBlockOp::getEventIdAttrName(result.name));
 }
 
 void mlir::pto::WaitIntraBlockOp::print(OpAsmPrinter &p) {
-  printSyncEventOpCommon(p, getOperation(), getPipe(), getEventIdAttr(),
-                         getEventIdDyn(), getPipeAttrName().getValue(),
-                         getEventIdAttrName().getValue());
+  printSyncEventOpIntra(p, getOperation(), getPipe(), getEventIdAttr(),
+                        getEventIdDyn(), getPipeAttrName().getValue(),
+                        getEventIdAttrName().getValue());
 }
 
 LogicalResult mlir::pto::WaitIntraBlockOp::verify() {

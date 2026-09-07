@@ -2818,11 +2818,15 @@ def WaitCrossBlockOp : PTO_Op<"wait_cross_block"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+def PTO_IntraBlockEventIdType : Type<
+  CPred<"::mlir::isa<::mlir::IntegerType>($_self)">,
+  "integer event id">;
+
 def SetIntraBlockOp : PTO_Op<"set_intra_block"> {
   let summary = "Signal an intra-block synchronization flag";
   let description = [{ Lowers to `__builtin_cce_set_intra_block`. }];
   let arguments = (ins PTO_PipeAttr:$pipe, OptionalAttr<I32Attr>:$event_id,
-                       Optional<Index>:$event_id_dyn);
+                       Optional<PTO_IntraBlockEventIdType>:$event_id_dyn);
   let hasVerifier = 1;
   let hasCustomAssemblyFormat = 1;
 }
@@ -2831,7 +2835,7 @@ def WaitIntraBlockOp : PTO_Op<"wait_intra_block"> {
   let summary = "Wait for an intra-block synchronization flag";
   let description = [{ Lowers to `__builtin_cce_wait_intra_block`. }];
   let arguments = (ins PTO_PipeAttr:$pipe, OptionalAttr<I32Attr>:$event_id,
-                       Optional<Index>:$event_id_dyn);
+                       Optional<PTO_IntraBlockEventIdType>:$event_id_dyn);
   let hasVerifier = 1;
   let hasCustomAssemblyFormat = 1;
 }
