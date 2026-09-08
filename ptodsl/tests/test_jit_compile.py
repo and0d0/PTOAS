@@ -4334,7 +4334,7 @@ def public_mask_surface_probe():
 
 @pto.jit(target="a5")
 def public_sync_surface_probe():
-    dynamic_event = pto.const(3)
+    dynamic_event = pto.const(3, dtype=pto.i32)
     pto.get_buf(pto.Pipe.V, 0)
     pto.rls_buf(pto.Pipe.MTE2, 1, 2)
     pto.set_flag(pto.Pipe.MTE2, pto.Pipe.V, event_id=0)
