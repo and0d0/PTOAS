@@ -85,8 +85,9 @@ for (int i = 0; i < N; i++)
 ### `pto.vdiv`
 
 - **syntax:** `%result = pto.vdiv %lhs, %rhs, %mask : !pto.vreg<NxT>, !pto.vreg<NxT>, !pto.mask<G> -> !pto.vreg<NxT>`
-- **A5 types:** f16, f32; only signed or signless i16/i32 are materialized
-  through the A5 software library.
+- **A5 types:** f16, f32, and integer i16/ui16/i32/ui32 vectors with the
+  matching b16 or b32 mask; integer forms are materialized through the A5
+  software library.
 
 ```c
 for (int i = 0; i < N; i++)
@@ -96,12 +97,41 @@ for (int i = 0; i < N; i++)
 - **inputs:** `%lhs` is the numerator, `%rhs` is the denominator, and `%mask`
   selects active lanes.
 - **outputs:** `%result` is the lane-wise quotient.
-- **constraints and limitations:** i16 and i32 division is rounded toward zero
+- **precision:** `precisionType` selects the `DivAlgo` algorithm, one of
+  `intrinsic` (default), `diff_compensation`,
+  `precision_1ulp_ftz_true`, `precision_0ulp_ftz_true`,
+  `precision_0ulp_ftz_false` and `precision_1ulp_ftz_false`.
+
+  | Selector | A5 f32 lowering | Requirements |
+  | --- | --- | --- |
+  | `intrinsic` / `precision_1ulp_ftz_true` | one native vector divide | any element type the op supports |
+  | `diff_compensation` | compensated residual search | f32 + `b32` mask |
+  | `precision_0ulp_ftz_true` |  residual search | f32 + `b32` mask |
+  | `precision_0ulp_ftz_false` | normalise + residual search + IEEE rounding | f32 + `b32` mask |
+  | `precision_1ulp_ftz_false` | normalise + single divide + IEEE rounding | f32 + `b32` mask |
+
+  The three software selectors are expanded through SoftLib and reject other
+  element types, other mask granularities and other targets at verification
+  time. 
+  The compensated algorithms compare fused residuals of the native quotient and
+  its two bit neighbours; an equal residual takes the lower neighbour
+  (`z - 1`), matching the reference `vcmp_lt` + `vsel` chain. Native
+  zero, infinity and NaN results are preserved,
+  including signed zero and target-specific NaN payloads. Subnormal handling
+  inherits native vector arithmetic; this mode does not request gradual
+  underflow or modify the floating-point control state. Inactive lanes follow
+  the ordinary vector `vdiv` zeroing semantics and are written as positive zero
+  (`+0`); they do not preserve a previous destination value. The supplied mask
+  is applied consistently throughout the operation.
+  Unlike tile division, this operation consumes and returns register values
+  without requiring a destination tile.
+- **constraints and limitations:** i16, ui16, i32 and ui32 division is rounded toward zero
   and is exact for every nonzero denominator, including values outside f32's
   exact range. It is expanded late to a PTODSL SoftOps implementation because
   the released BiSheng toolchain cannot lower the integer HiVM intrinsic
-  reliably; unsigned integer variants (ui16/ui32) and other integer element
-  widths are rejected at compile time on A5 rather than reaching the
+  reliably. Unsigned division supports the full ui16/ui32 range, including
+  values with the top bit set. Other integer element widths are rejected at
+  compile time on A5 rather than reaching the
   unsupported integer HiVM path. The overflowing
   pairs `INT16_MIN / -1` and `INT32_MIN / -1` follow the target's
   two's-complement result representation. Division by zero is undefined.

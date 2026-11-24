@@ -39,13 +39,20 @@ jobs:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
           token: ${{ secrets.GIT_TOKEN }}
       -
+        name: oidc_auth
+        uses: huaweicloud-oidc-auth
+        with:
+          audience: ${{ secrets.audience }}
+          agency_urn: ${{ secrets.agency_urn }}
+          provider_urn: ${{ secrets.provider_urn }}
+          region: cn-north-4
+          duration: 3600
+      -
         name: download
         uses: obs-download
         with:
           endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
           bucket: "ascend-ci"
-          access-key: ${{ secrets.AK }}
-          secret-key: ${{ secrets.SK }}
           key: |
             ${{ env.obs_path }}/pr_filelist.txt
             ${{ env.obs_path }}/pr_filelist_mod.txt
@@ -64,6 +71,8 @@ jobs:
             export GE_ST_RT2=${{ inputs.ge_st_rt2 }}
             export GIT_TARGET_BRANCH=${{ env.TARGET_BRANCH }}
             export OS_TYPE=${{ inputs.arch == 'arm64' && 'aarch64' || 'x86_64' }}
+            export CMAKE_C_COMPILER_LAUNCHER=/tmp/codearts/cloudcache/xcache
+            export CMAKE_CXX_COMPILER_LAUNCHER=/tmp/codearts/cloudcache/xcache
             BuildAccelerate bash compile.sh
           AC_SERVER_IP: ${{ vars.AC_SERVER_IP }}
       -
@@ -102,8 +111,6 @@ jobs:
         with:
           endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
           bucket: "ascend-ci"
-          access-key: ${{ secrets.AK }}
-          secret-key: ${{ secrets.SK }}
           artifact-path: |
             ${{ steps.process_checkout.outputs.path }}/build_out/${{ inputs.package_name != '' && inputs.package_name || '*.tar.gz' }}
           object-prefix: ${{ env.obs_path }}/

@@ -1,0 +1,472 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Included by PTO.cpp as part of the PTO IR implementation translation unit.
+
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "llvm/ADT/DenseSet.h"
+
+mlir::LogicalResult mlir::pto::TPowSOp::verify() {
+  Type dstTy = getDst().getType();
+  FailureOr<Type> elem = verifyRowMajorScalarTileCommon(
+      getOperation(), getSrc().getType(), dstTy, getScalar().getType());
+  if (failed(elem))
+    return failure();
+
+  // Same dtype matrix as TPowOp; see comment in TPowOp::verify.
+  bool isIntElem = elem->isInteger(mlir::pto::kValue32) || elem->isInteger(mlir::pto::kValue16) ||
+                   elem->isInteger(mlir::pto::kValue8);
+  if (failed(verifyTPowSElemType(*this, *elem, isIntElem))) {
+    return failure();
+  }
+  return verifyTPowSTmp(*this, dstTy, isIntElem);
+}
+
+
+static std::optional<int64_t> getStaticNumElements(ArrayRef<int64_t> shape) {
+  int64_t numel = 1;
+  for (int64_t d : shape) {
+    if (d == ShapedType::kDynamic) {
+      return std::nullopt;
+    }
+    if (d < 0) {
+      return std::nullopt;
+    }
+    numel *= d;
+  }
+  return numel;
+}
+
+static std::optional<int64_t> getElemBytes(Type elemTy) {
+  if (!elemTy) {
+    return std::nullopt;
+  }
+  if (auto ft = dyn_cast<FloatType>(elemTy)) {
+    if (ft.isF16() || ft.isBF16()) {
+      return mlir::pto::kValue2;
+    }
+    if (ft.isF32()) {
+        return mlir::pto::kValue4;
+    }
+    if (ft.isF64()) {
+        return mlir::pto::kValue8;
+    }
+    // 8-bit float kinds fall through to the shared storage-width utility.
+  }
+  if (auto it = dyn_cast<IntegerType>(elemTy)) {
+    int64_t bits = it.getWidth();
+    if (bits <= 0) {
+      return std::nullopt;
+    }
+    return std::max<int64_t>(1, bits / mlir::pto::kValue8);
+  }
+  // Low-precision PTO element types (f8*, hif8, f4-packed, *x2) report their
+  // storage width through the shared utility.
+  int64_t bits = mlir::pto::getPTOStorageElemBitWidth(elemTy);
+  if (bits <= 0) {
+    return std::nullopt;
+  }
+  return std::max<int64_t>(1, bits / mlir::pto::kValue8);
+}
+
+static std::optional<int64_t> getConstIndexLike(Value v) {
+  if (auto cOp = v.getDefiningOp<arith::ConstantIndexOp>()) {
+    return cOp.value();
+  }
+  if (auto cInt = v.getDefiningOp<arith::ConstantIntOp>()) {
+    return cInt.value();
+  }
+  if (auto cOp = v.getDefiningOp<arith::ConstantOp>()) {
+    if (auto ia = dyn_cast<IntegerAttr>(cOp.getValue())) {
+      return ia.getInt();
+    }
+  }
+  if (auto castOp = v.getDefiningOp<arith::IndexCastOp>()) {
+    return getConstIndexLike(castOp.getIn());
+  }
+  if (auto extOp = v.getDefiningOp<arith::ExtSIOp>()) {
+    return getConstIndexLike(extOp.getIn());
+  }
+  if (auto extOp = v.getDefiningOp<arith::ExtUIOp>()) {
+    return getConstIndexLike(extOp.getIn());
+  }
+  if (auto truncOp = v.getDefiningOp<arith::TruncIOp>()) {
+    return getConstIndexLike(truncOp.getIn());
+  }
+  return std::nullopt;
+}
+
+mlir::LogicalResult mlir::pto::SetValidShapeOp::verify() {
+  SmallVector<int64_t> shape;
+  auto srcTy = getSource().getType();
+  if (srcTy.getRank() != mlir::pto::kValue2) {
+      return emitOpError("expects rank-2 tile_buf source");
+  }
+
+  ArrayRef<int64_t> validShape = srcTy.getValidShape();
+  if (validShape.size() != mlir::pto::kValue2) {
+      return emitOpError("expects source validShape to be rank-2");
+  }
+  if (!srcTy.hasDynamicValid()) {
+    return emitOpError("expects source tile_buf to have dynamic validShape (?, ?)");
+  }
+
+  shape.assign(srcTy.getShape().begin(), srcTy.getShape().end());
+
+  if (!isLocallyBoundTile(getSource())) {
+    return emitOpError(
+        "requires a locally bound tile source (alloc_tile/declare_tile/tpop "
+        "results or supported local views/selections)");
+  }
+
+  auto checkDim = [this, &shape](Value operand, unsigned dimIdx,
+                                 StringRef dimName) -> LogicalResult {
+    int64_t maxStatic = shape[dimIdx];
+
+    auto constVal = getConstIndexLike(operand);
+    if (!constVal) {
+      return success();
+    }
+
+    if (*constVal < 0) {
+      return emitOpError() << "expects " << dimName << " operand to be non-negative";
+    }
+    if (maxStatic != ShapedType::kDynamic && *constVal > maxStatic) {
+      return emitOpError() << "expects " << dimName << " operand <= shape dim ("
+                           << maxStatic << ")";
+    }
+    return success();
+  };
+  if (failed(checkDim(getValidRow(), /*dimIdx=*/0, "row"))) {
+    return failure();
+  }
+  if (failed(checkDim(getValidCol(), /*dimIdx=*/1, "col"))) {
+    return failure();
+  }
+
+  return success();
+}
+
+mlir::LogicalResult mlir::pto::GetValidShapeOp::verify() {
+  auto srcTy = getSource().getType();
+  if (srcTy.getRank() != mlir::pto::kValue2) {
+      return emitOpError("expects rank-2 tile_buf source");
+  }
+  if (srcTy.getValidShape().size() != mlir::pto::kValue2) {
+      return emitOpError("expects source validShape to be rank-2");
+  }
+  return success();
+}
+
+
+// Tile-config constraints of the E8M0 scale transpose view: mat storage,
+// compact=null, fractal=32, and the two tiles swap RR <-> CC wholesale.
+static LogicalResult verifyMxScaleTReshapeConfig(TReshapeOp op,
+                                                 TileBufType srcTb,
+                                                 TileBufType dstTb) {
+  auto loc = getPTOMemorySpaceEnum(srcTb);
+  if (!loc || *loc != pto::AddressSpace::MAT) {
+    return op.emitOpError("expects E8M0 scale treshape to use mat storage");
+  }
+  if (srcTb.getCompactModeI32() !=
+          static_cast<int32_t>(pto::CompactMode::Null) ||
+      dstTb.getCompactModeI32() !=
+          static_cast<int32_t>(pto::CompactMode::Null)) {
+    return op.emitOpError("expects E8M0 scale treshape to use compact=null");
+  }
+  if (srcTb.getSFractalSizeI32() != mlir::pto::kValue32 ||
+      dstTb.getSFractalSizeI32() != mlir::pto::kValue32) {
+    return op.emitOpError("expects E8M0 scale treshape to use fractal=32");
+  }
+  auto isRR = [](TileBufType tb) {
+    return tb.getBLayoutValueI32() ==
+               static_cast<int32_t>(pto::BLayout::RowMajor) &&
+           tb.getSLayoutValueI32() ==
+               static_cast<int32_t>(pto::SLayout::RowMajor);
+  };
+  auto isCC = [](TileBufType tb) {
+    return tb.getBLayoutValueI32() ==
+               static_cast<int32_t>(pto::BLayout::ColMajor) &&
+           tb.getSLayoutValueI32() ==
+               static_cast<int32_t>(pto::SLayout::ColMajor);
+  };
+  if (!((isRR(srcTb) && isCC(dstTb)) ||
+        (isCC(srcTb) && isRR(dstTb)))) {
+    return op.emitOpError(
+        "expects E8M0 scale treshape to transpose RR and CC layouts");
+  }
+  if (srcTb.getShape()[0] != dstTb.getShape()[1] ||
+      srcTb.getShape()[1] != dstTb.getShape()[0]) {
+    return op.emitOpError(
+        "expects E8M0 scale treshape to transpose the physical shape");
+  }
+  return success();
+}
+
+static LogicalResult verifyMxScaleTReshapeA5(TReshapeOp op, TileBufType srcTb,
+                                             TileBufType dstTb) {
+  if (failed(verifyMxScaleTReshapeConfig(op, srcTb, dstTb))) {
+    return failure();
+  }
+  if (failed(verifyTileBufLayoutConstraints(op, srcTb, "src")) ||
+      failed(verifyTileBufLayoutConstraints(op, dstTb, "dst"))) {
+    return failure();
+  }
+  // TRESHAPE aliases the whole buffer; the result type initializes its valid
+  // extents. The source may instead have alloc_tile runtime valid operands.
+  auto dstValid = dstTb.getValidShape();
+  if (dstValid[0] <= 0 || dstValid[1] <= 0) {
+    return op.emitOpError(
+        "expects E8M0 scale treshape result valid extents to be positive and static");
+  }
+  return success();
+}
+
+static LogicalResult verifyMxScaleTReshape(TReshapeOp op, TileBufType srcTb,
+                                           TileBufType dstTb) {
+  auto verifyA2A3 = [&op]() -> LogicalResult {
+    return op.emitOpError("expects E8M0 scale treshape to target A5");
+  };
+  auto verifyA5 = [&op, &srcTb, &dstTb]() -> LogicalResult {
+    return verifyMxScaleTReshapeA5(op, srcTb, dstTb);
+  };
+  return dispatchVerifierByArch(op.getOperation(), verifyA2A3, verifyA5);
+}
+
+// Tile-config constraints of the packed E8M0 scale storage view: vec storage
+// and byte-preserving views across the boxed/non-boxed boundary.
+static LogicalResult verifyPackedE8M0ScaleViewA5(TReshapeOp op,
+    TileBufType srcTb, TileBufType dstTb)
+{
+    auto loc = getPTOMemorySpaceEnum(srcTb);
+    if (!loc || *loc != pto::AddressSpace::VEC) {
+        return op.emitOpError(
+            "expects packed E8M0 scale treshape to use vec storage");
+    }
+    if (failed(verifyTileBufLayoutConstraints(op, srcTb, "src"))) {
+        return failure();
+    }
+    if (failed(verifyTileBufLayoutConstraints(op, dstTb, "dst"))) {
+        return failure();
+    }
+    // TRESHAPE aliases the whole buffer; the result type initializes its valid
+    // extents, mirroring the E8M0 scale transpose view.
+    auto dstValid = dstTb.getValidShape();
+    if (dstValid[0] <= 0 || dstValid[1] <= 0) {
+        return op.emitOpError(
+            "expects packed E8M0 scale treshape result valid extents to be "
+            "positive and static");
+    }
+    return success();
+}
+
+static LogicalResult verifyPackedE8M0ScaleViewTReshape(TReshapeOp op,
+    TileBufType srcTb, TileBufType dstTb)
+{
+    auto verifyA2A3 = [&op]() -> LogicalResult {
+        return op.emitOpError(
+            "expects packed E8M0 scale treshape to target A5");
+    };
+    auto verifyA5 = [op, srcTb, dstTb]() -> LogicalResult {
+        return verifyPackedE8M0ScaleViewA5(op, srcTb, dstTb);
+    };
+    return dispatchVerifierByArch(op.getOperation(), verifyA2A3, verifyA5);
+}
+
+// Shared treshape prechecks: common tile verification (byte-preserving
+// low-precision views are accepted; the element-width query covers every
+// low-precision storage width), matching storage, resolvable element byte
+// widths, static shapes, and equal total byte size.
+static LogicalResult verifyTReshapeBasics(TReshapeOp op, TileBufType srcTb,
+    TileBufType dstTb)
+{
+    Type ts = op.getSrc().getType();
+    Type tr = op.getResult().getType();
+    Type srcElem = srcTb.getElementType();
+    Type dstElem = dstTb.getElementType();
+    const bool allowLowPrecision = true;
+    bool srcCommon = succeeded(
+        verifyTileBufCommon(op, ts, "src", allowLowPrecision));
+    bool dstCommon = succeeded(
+        verifyTileBufCommon(op, tr, "dst", allowLowPrecision));
+    if (!srcCommon || !dstCommon) {
+        return failure();
+    }
+
+    bool sameSpace = srcTb.getMemorySpace() == dstTb.getMemorySpace();
+    if (!sameSpace) {
+        return op.emitOpError("expects src and dst to use the same loc");
+    }
+
+    auto srcElemBytes = getElemBytes(srcElem);
+    auto dstElemBytes = getElemBytes(dstElem);
+    bool elemBytesKnown = srcElem && dstElem &&
+        srcElemBytes.has_value() && dstElemBytes.has_value();
+    if (!elemBytesKnown) {
+        return op.emitOpError("failed to get element byte width for src/dst");
+    }
+
+    auto srcNumel = getStaticNumElements(getShapeVec(ts));
+    auto dstNumel = getStaticNumElements(getShapeVec(tr));
+    bool staticShapes = srcNumel.has_value() && dstNumel.has_value();
+    if (!staticShapes) {
+        return op.emitOpError("expects static shapes for treshape");
+    }
+
+    bool sameTotalBytes = srcElemBytes.value() * srcNumel.value() ==
+        dstElemBytes.value() * dstNumel.value();
+    if (!sameTotalBytes) {
+        return op.emitOpError(
+            "expects src and dst to have the same total byte size");
+    }
+    return success();
+}
+
+mlir::LogicalResult mlir::pto::TReshapeOp::verify()
+{
+    Type ts = getSrc().getType();
+    Type tr = getResult().getType();
+    auto srcTb = dyn_cast<pto::TileBufType>(ts);
+    auto dstTb = dyn_cast<pto::TileBufType>(tr);
+    if (!srcTb || !dstTb) {
+        return emitOpError("expects src/result to be !pto.tile_buf types");
+    }
+
+    if (failed(verifyTReshapeBasics(*this, srcTb, dstTb))) {
+        return failure();
+    }
+
+    Type srcElem = srcTb.getElementType();
+    Type dstElem = dstTb.getElementType();
+    bool srcBoxed = srcTb.getSLayoutValueI32() !=
+        static_cast<int32_t>(pto::SLayout::NoneBox);
+    bool dstBoxed = dstTb.getSLayoutValueI32() !=
+        static_cast<int32_t>(pto::SLayout::NoneBox);
+    // MX E8M0 scales are byte payloads: flat Vec views over packed scale tiles
+    // cross the boxed/non-boxed boundary while preserving bytes, so this
+    // specific crossing is allowed to alias the bytes.
+    const bool isMxScale = isPTOF8E8M0Type(srcElem) && srcElem == dstElem;
+    const bool isPackedE8M0ScaleView = isMxScale && srcBoxed != dstBoxed;
+    if (srcBoxed != dstBoxed && !isPackedE8M0ScaleView) {
+        return emitOpError(
+            "cannot reshape between boxed and non-boxed tile layouts");
+    }
+
+    // The MX scale transpose view keeps its dedicated constraints; every other
+    // byte-preserving view only needs the generic checks above.
+    if (isMxScale && !isPackedE8M0ScaleView) {
+        return verifyMxScaleTReshape(*this, srcTb, dstTb);
+    }
+    if (isPackedE8M0ScaleView) {
+        return verifyPackedE8M0ScaleViewTReshape(*this, srcTb, dstTb);
+    }
+    return success();
+}
+
+static LogicalResult verifyNumericBitcastOperands(Operation *op, Type srcType,
+                                                   Type dstType) {
+  auto srcVectorType = dyn_cast<VectorType>(srcType);
+  auto dstVectorType = dyn_cast<VectorType>(dstType);
+  const bool mixesScalarAndVector =
+      static_cast<bool>(srcVectorType) != static_cast<bool>(dstVectorType);
+  if (mixesScalarAndVector) {
+    return op->emitOpError()
+           << "requires both numeric types to be scalar or both to be "
+              "builtin vectors; got "
+           << srcType << " -> " << dstType;
+  }
+  if (srcVectorType &&
+      (srcVectorType.getShape() != dstVectorType.getShape() ||
+       srcVectorType.getScalableDims() != dstVectorType.getScalableDims())) {
+    return op->emitOpError()
+           << "requires numeric vectors to have the same shape; got "
+           << srcType << " -> " << dstType;
+  }
+
+  Type srcElementType = getElementTypeOrSelf(srcType);
+  Type dstElementType = getElementTypeOrSelf(dstType);
+  const bool hasUnsupportedElementType =
+      !isa<IntegerType, FloatType>(srcElementType) ||
+      !isa<IntegerType, FloatType>(dstElementType);
+  if (hasUnsupportedElementType) {
+    return op->emitOpError()
+           << "requires integer or floating-point numeric types; got "
+           << srcType << " -> " << dstType;
+  }
+  const bool hasMismatchedElementWidth =
+      srcElementType.getIntOrFloatBitWidth() !=
+      dstElementType.getIntOrFloatBitWidth();
+  if (hasMismatchedElementWidth) {
+    return op->emitOpError() << "requires equal element bit widths; got "
+                             << srcType << " -> " << dstType;
+  }
+  return success();
+}
+
+static LogicalResult verifyTileBitcastOperands(Operation *op, TileBufType srcTy,
+                                               TileBufType dstTy) {
+  if (srcTy.getMemorySpace() != dstTy.getMemorySpace()) {
+    return op->emitOpError("expects src/result to have the same memorySpace");
+  }
+  if (srcTy.getElementType() == dstTy.getElementType()) {
+    return op->emitOpError(
+        "expects src/result to have different element types; use "
+        "pto.treshape for shape/config changes");
+  }
+  if (srcTy.getShape() != dstTy.getShape()) {
+    return op->emitOpError(
+        "expects src/result to have the same shape; use pto.treshape for shape changes");
+  }
+  if (srcTy.getValidShape() != dstTy.getValidShape()) {
+    return op->emitOpError("expects src/result to have the same validShape");
+  }
+  const bool sameConfig = srcTy.getConfigAttr() == dstTy.getConfigAttr();
+  if (!sameConfig) {
+    return op->emitOpError("expects src/result to have the same tile config");
+  }
+
+  auto numel = getStaticNumElements(srcTy.getShape());
+  if (!numel.has_value()) {
+    return op->emitOpError("expects static shapes for bitcast");
+  }
+  auto srcBytes = getElemBytes(srcTy.getElementType());
+  auto dstBytes = getElemBytes(dstTy.getElementType());
+  if (!srcBytes.has_value() || !dstBytes.has_value()) {
+    return op->emitOpError("unsupported element type for bitcast");
+  }
+  int64_t srcTotalBytes = numel.value() * srcBytes.value();
+  int64_t dstTotalBytes = numel.value() * dstBytes.value();
+  if (dstTotalBytes > srcTotalBytes) {
+    return op->emitOpError("bitcast result requires more bytes than source storage");
+  }
+  return success();
+}
+
+mlir::LogicalResult mlir::pto::BitcastOp::verify() {
+  for (StringRef attrName :
+       {"fastmath", "roundingmode", "overflowFlags", "signedness"}) {
+    if ((*this)->hasAttr(attrName)) {
+      return emitOpError() << "does not accept " << attrName;
+    }
+  }
+
+  auto srcTy = llvm::dyn_cast<TileBufType>(getSrc().getType());
+  auto dstTy = llvm::dyn_cast<TileBufType>(getResult().getType());
+  const bool mixesTileAndNumeric =
+      static_cast<bool>(srcTy) != static_cast<bool>(dstTy);
+  if (mixesTileAndNumeric) {
+    return emitOpError(
+        "requires both source and result to be tile buffers or both to be "
+        "numeric values");
+  }
+  if (!srcTy) {
+    return verifyNumericBitcastOperands(getOperation(), getSrc().getType(),
+                                        getResult().getType());
+  }
+  return verifyTileBitcastOperands(getOperation(), srcTy, dstTy);
+}

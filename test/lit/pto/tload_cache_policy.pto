@@ -1,0 +1,116 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-level=level3 --pto-arch=a3 --emit-pto-ir %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=PTOIR
+// RUN: ptoas --pto-level=level3 --pto-arch=a3 %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=EMITC --implicit-check-not=TLoadL2Hint
+// RUN: ptoas --pto-level=level3 --pto-arch=a5 %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=EMITC --implicit-check-not=TLoadL2Hint
+// RUN: ptoas --pto-level=level3 --pto-arch=a3 --emit-pto-ir %s -o %t.pto
+// RUN: ptoas --pto-level=level3 --pto-arch=a3 --emit-pto-ir %t.pto 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=PTOIR
+
+module {
+  func.func private @default_load(
+      %src: !pto.partition_tensor_view<16x16xf32>,
+      %dst: !pto.tile_buf<vec, 16x16xf32>) {
+    pto.tload ins(%src : !pto.partition_tensor_view<16x16xf32>)
+              outs(%dst : !pto.tile_buf<vec, 16x16xf32>)
+    return
+  }
+
+  func.func private @l2_bypass_load(
+      %src: !pto.partition_tensor_view<16x16xf32>,
+      %dst: !pto.tile_buf<vec, 16x16xf32>) {
+    pto.tload ins(%src : !pto.partition_tensor_view<16x16xf32>)
+              outs(%dst : !pto.tile_buf<vec, 16x16xf32>)
+              {cache_policy = #pto.load_cache_policy<l2_bypass>}
+    return
+  }
+
+  func.func private @l2_bypass_offset_i64(
+      %src: !pto.partition_tensor_view<16x16xf32>,
+      %dst: !pto.tile_buf<vec, 16x16xf32>, %offset: i64) {
+    pto.tload ins(%src : !pto.partition_tensor_view<16x16xf32>)
+              outs(%dst : !pto.tile_buf<vec, 16x16xf32>)
+              {cache_policy = #pto.load_cache_policy<l2_bypass>}
+              offset = %offset : i64
+    pto.tload ins(%src : !pto.partition_tensor_view<16x16xf32>)
+              outs(%dst : !pto.tile_buf<vec, 16x16xf32>)
+    return
+  }
+
+  func.func private @l2_bypass_offset_index(
+      %src: !pto.partition_tensor_view<16x16xf16>,
+      %dst: !pto.tile_buf<vec, 16x16xf16>, %offset: index) {
+    pto.tload ins(%src : !pto.partition_tensor_view<16x16xf16>)
+              outs(%dst : !pto.tile_buf<vec, 16x16xf16>)
+              {cache_policy = #pto.load_cache_policy<l2_bypass>}
+              offset = %offset : index
+    return
+  }
+
+  func.func private @default_offset_ignored(
+      %src: !pto.partition_tensor_view<16x16xf32>,
+      %dst: !pto.tile_buf<vec, 16x16xf32>, %offset: i64) {
+    pto.tload ins(%src : !pto.partition_tensor_view<16x16xf32>)
+              outs(%dst : !pto.tile_buf<vec, 16x16xf32>)
+              offset = %offset : i64
+    pto.tload ins(%src : !pto.partition_tensor_view<16x16xf32>)
+              outs(%dst : !pto.tile_buf<vec, 16x16xf32>)
+              {cache_policy = #pto.load_cache_policy<default>}
+              offset = %offset : i64
+    return
+  }
+}
+
+// PTOIR-LABEL: func.func private @default_load(
+// PTOIR: pto.tload ins(
+// PTOIR-NOT: cache_policy
+// PTOIR-LABEL: func.func private @l2_bypass_load(
+// PTOIR: pto.tload ins(
+// PTOIR-SAME: cache_policy = #pto.load_cache_policy<l2_bypass>
+// PTOIR-LABEL: func.func private @l2_bypass_offset_i64(
+// PTOIR: pto.tload ins(
+// PTOIR-SAME: cache_policy = #pto.load_cache_policy<l2_bypass>
+// PTOIR-SAME: offset = {{.*}} : i64
+// PTOIR-LABEL: func.func private @l2_bypass_offset_index(
+// PTOIR: pto.tload ins(
+// PTOIR-SAME: offset = {{.*}} : index
+// PTOIR-LABEL: func.func private @default_offset_ignored(
+// PTOIR: pto.tload ins(
+// PTOIR-SAME: offset = {{.*}} : i64
+
+// EMITC-LABEL: default_load(
+// EMITC-NOT: TASSIGN
+// EMITC: TLOAD(
+// EMITC-LABEL: l2_bypass_load(
+// EMITC-NOT: TASSIGN
+// EMITC: TLOAD(
+// EMITC-LABEL: l2_bypass_offset_i64(
+// EMITC-SAME: > [[SRC:v[0-9]+]], {{.*}}> [[DST:v[0-9]+]], int64_t [[OFFSET:v[0-9]+]])
+// EMITC: __gm__ float* [[DATA:v[0-9]+]] = PTOAS__GLOBAL_TENSOR_DATA([[SRC]]);
+// EMITC: __gm__ uint8_t* [[BYTES:v[0-9]+]] = reinterpret_cast<__gm__ uint8_t*>([[DATA]]);
+// EMITC: __gm__ float* [[ADJUSTED_DATA:v[0-9]+]] = (__gm__ float*) ([[BYTES]] + [[OFFSET]]);
+// EMITC: [[COPY:v[0-9]+]] = [[SRC]];
+// EMITC-NEXT: TASSIGN([[COPY]], [[ADJUSTED_DATA]]);
+// EMITC-NEXT: TLOAD([[DST]], [[COPY]]);
+// EMITC-NEXT: TLOAD([[DST]], [[SRC]]);
+// EMITC-LABEL: l2_bypass_offset_index(
+// EMITC-SAME: int64_t [[INDEX_OFFSET:v[0-9]+]])
+// EMITC: __gm__ uint8_t* [[INDEX_BYTES:v[0-9]+]] = {{.*}};
+// EMITC: __gm__ half* {{.*}} = (__gm__ half*) ([[INDEX_BYTES]] + [[INDEX_OFFSET]]);
+// EMITC: TASSIGN(
+// EMITC-NEXT: TLOAD(
+// EMITC-LABEL: default_offset_ignored(
+// EMITC-NOT: PTOAS__GLOBAL_TENSOR_DATA
+// EMITC-NOT: TASSIGN
+// EMITC: TLOAD(
+// EMITC-NEXT: TLOAD(
+// EMITC-NEXT: return;

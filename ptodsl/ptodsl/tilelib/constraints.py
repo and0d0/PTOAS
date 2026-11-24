@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,6 +6,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Central candidate-legality evaluation for TileLib version selection.
 
 Hard metadata (dtype signatures, layouts, and memory spaces) and custom
@@ -552,8 +554,11 @@ _PREDICATE_PACKING_LAYOUTS = {
     # 256-lane 32-byte NORM store.
     "f32": (128, 16),
     "i32": (128, 16),
+    "ui32": (128, 16),
     "f16": (128, 16),
     "i16": (128, 16),
+    "ui16": (128, 16),
+    "bf16": (128, 16),
     "i8": (256, 32),
     "ui8": (256, 32),
 }
@@ -578,10 +583,9 @@ def require_predicate_compare_1d(
 
     ``flattened_destination`` models operations such as ``tcmps`` whose 1D
     form writes the packed predicate into one continuous destination prefix.
-    It accepts either an exact packed row stride or a destination row with one
-    predicate container element per physical data element. The latter is an
-    explicit logical-range capacity contract, not a packed-byte requirement;
-    arbitrary intermediate predicate-row padding remains a 2D fallback.
+    It accepts only an exact packed row stride. A destination row padded to a
+    different physical stride stays on the 2D fallback, so the predicate image
+    keeps the same row layout a 2D consumer reads.
     """
 
     allowed_memory_spaces = frozenset(memory_spaces)
@@ -609,10 +613,13 @@ def require_predicate_compare_1d(
         if valid_rows == 1:
             return _single_row_has_capacity(data_shapes, storage, valid_cols)
         data_rows_are_contiguous = _data_rows_contiguous(data_shapes, data_valid_shapes)
-        destination_holds_logical_range = storage.row_bytes >= max(
-            shape[1] for shape in data_shapes
-        ) * _dtype_bytewidth(context.get(f"{predicate_operand}_dtype"))
-        if flattened_destination and destination_holds_logical_range:
+        row_store_count = _ceil_div(valid_cols, storage.elements_per_store)
+        row_store_bytes = row_store_count * storage.bytes_per_store
+        if (
+            flattened_destination
+            and storage.row_bytes == row_store_bytes
+            and valid_cols % storage.elements_per_store == 0
+        ):
             total_elements = valid_rows * valid_cols
             total_store_count = _ceil_div(total_elements, storage.elements_per_store)
             required_total_bytes = total_store_count * storage.bytes_per_store

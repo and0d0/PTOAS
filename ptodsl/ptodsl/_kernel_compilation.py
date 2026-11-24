@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,6 +6,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Kernel specialization and compilation helpers for ``@pto.jit``."""
 
 from __future__ import annotations
@@ -39,6 +41,10 @@ class CompiledKernelHandle(ModuleArtifact):
         self._constexpr_bindings = dict(constexpr_bindings)
         self._module_spec = module_spec
         self._kernel_signature = kernel_signature
+        # Set on the first native build; shared by every launch handle over this
+        # specialization and by native_library().
+        self._native_library = None
+        self._native_library_path = None
 
     @property
     def specialization_key(self):
@@ -62,6 +68,45 @@ class CompiledKernelHandle(ModuleArtifact):
             raise kernel_module_launch_error(self._py_name)
         grid, stream = parse_launch_spec(launch_spec)
         return LaunchHandle(self, grid, stream)
+
+    @property
+    def mode(self):
+        """Return the kernel's allocation mode."""
+        return self._module_spec.mode
+
+    @property
+    def kernel_signature(self):
+        """Return the parsed launch/ABI signature for this specialization."""
+        return self._kernel_signature
+
+    def native_library(self):
+        """Build this specialization once and reuse the loaded library.
+
+        Returns ``(CDLL, launch_symbol)``. Launching shares this cache across
+        every ``compiled[grid, stream]`` handle. Callers that only need host
+        symbols from ``native_options['host_sources']`` use the CDLL; the path
+        is available from ``native_library_path()``.
+        """
+        if self._module_spec.entry is False:
+            raise kernel_module_launch_error(self._py_name)
+        if self._native_library is None:
+            from ._runtime.native_build import build_native_library
+
+            library, library_path, launch_symbol = build_native_library(
+                py_name=self._py_name,
+                module_spec=self._module_spec,
+                kernel_signature=self._kernel_signature,
+                mlir_text=self.mlir_text(),
+                specialization_key=self._specialization_key,
+            )
+            self._native_library = (library, launch_symbol)
+            self._native_library_path = library_path
+        return self._native_library
+
+    def native_library_path(self):
+        """Build this specialization if needed and return its shared library path."""
+        self.native_library()
+        return self._native_library_path
 
 
 class KernelCompiler:

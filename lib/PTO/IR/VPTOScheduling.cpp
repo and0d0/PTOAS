@@ -22,6 +22,9 @@ using namespace mlir;
 using namespace mlir::pto;
 
 namespace {
+
+constexpr int64_t kVectorRegisterBytes = mlir::pto::kValue256;
+constexpr int64_t kVectorRegisterPairBytes = mlir::pto::kValue512;
 constexpr unsigned kBitsPerByte = 8;
 constexpr unsigned kInt64BitWidth = 64;
 
@@ -82,7 +85,7 @@ static std::optional<int64_t> getElementByteSize(Value pointer) {
 
   int64_t byteSize;
   if (llvm::MulOverflow(elementCount, static_cast<int64_t>(bitWidth / kBitsPerByte),
-                        byteSize))
+                        byteSize) != 0)
     return std::nullopt;
   return byteSize;
 }
@@ -105,7 +108,7 @@ static void setStaticIndexedRange(OpTy op, VPTOMemoryAccess &access) {
     return;
   }
   int64_t byteOffset;
-  if (llvm::MulOverflow(*elementOffset, *elementByteSize, byteOffset)) {
+  if (llvm::MulOverflow(*elementOffset, *elementByteSize, byteOffset) != 0) {
     return;
   }
   access.byteOffset = byteOffset;
@@ -124,7 +127,7 @@ static void setStaticVectorRange(Value pointer, Value offset,
     return;
   }
   int64_t byteOffset;
-  if (llvm::MulOverflow(*elementOffset, *elementByteSize, byteOffset)) {
+  if (llvm::MulOverflow(*elementOffset, *elementByteSize, byteOffset) != 0) {
     return;
   }
   access.byteOffset = byteOffset;
@@ -144,7 +147,7 @@ static int64_t getVstsByteSize(VstsOp store) {
       return *elementByteSize;
     }
   }
-  return 256;
+  return kVectorRegisterBytes;
 }
 
 static void setStaticAccessRange(Operation *op, VPTOMemoryAccess &access) {
@@ -167,7 +170,7 @@ static void setStaticAccessRange(Operation *op, VPTOMemoryAccess &access) {
     return setStaticIndexedRange(store, access);
   }
   if (auto load = dyn_cast<VldsOp>(op)) {
-    return setStaticVectorRange(load.getSource(), load.getOffset(), 256,
+    return setStaticVectorRange(load.getSource(), load.getOffset(), kVectorRegisterBytes,
                                 access);
   }
   if (auto store = dyn_cast<VstsOp>(op)) {
@@ -175,11 +178,11 @@ static void setStaticAccessRange(Operation *op, VPTOMemoryAccess &access) {
                                 getVstsByteSize(store), access);
   }
   if (auto load = dyn_cast<Vldsx2Op>(op)) {
-    return setStaticVectorRange(load.getSource(), load.getOffset(), 512,
+    return setStaticVectorRange(load.getSource(), load.getOffset(), kVectorRegisterPairBytes,
                                 access);
   }
   if (auto store = dyn_cast<Vstsx2Op>(op)) {
-    return setStaticVectorRange(store.getDestination(), store.getOffset(), 512,
+    return setStaticVectorRange(store.getDestination(), store.getOffset(), kVectorRegisterPairBytes,
                                 access);
   }
 }
@@ -189,36 +192,37 @@ static void setStaticAccessRange(Operation *op, VPTOMemoryAccess &access) {
 /// Pure: vector-memory barriers and register-state effects must remain visible
 /// to the scheduler and to general IR transformations.
 static bool hasKnownNoOrdinaryMemoryAccess(Operation *op) {
-  return isa<MemBarOp, SprclrOp, GetCtrlOp, SetCtrlOp>(op);
+    // VSQZ only writes the implicit SQZN register; its state effects are
+    // modeled in getDefaultVPTOSchedulingSemantics below. It must not degrade
+    // into the conservative unknown ordinary memory write classification
+    // just because it is no longer Pure.
+    return isa<MemBarOp, SprclrOp, GetCtrlOp, SetCtrlOp, VsqzOp>(op);
 }
 
-static void collectMemoryAccesses(Operation *op,
-                                  VPTOSchedulingSemantics &semantics) {
-  SmallVectorImpl<VPTOMemoryAccess> &accesses = semantics.memoryAccesses;
-  if (hasKnownNoOrdinaryMemoryAccess(op)) {
+// Handle ops that lack a MemoryEffectOpInterface: memory-effect-free ops have
+// no ordinary access; anything else is a conservative unknown write.
+static void classifyWithoutMemoryEffects(
+    Operation *op, VPTOSchedulingSemantics &semantics,
+    SmallVectorImpl<VPTOMemoryAccess> &accesses) {
+  if (isMemoryEffectFree(op)) {
     semantics.memoryBehavior = VPTOMemoryBehavior::None;
     return;
   }
+  semantics.memoryBehavior = VPTOMemoryBehavior::Unknown;
+  VPTOMemoryAccess access;
+  access.writes = true;
+  access.ordered = true;
+  access.unknown = true;
+  accesses.push_back(access);
+}
 
-  auto memoryEffects = dyn_cast<MemoryEffectOpInterface>(op);
-  if (!memoryEffects) {
-    if (isMemoryEffectFree(op)) {
-      semantics.memoryBehavior = VPTOMemoryBehavior::None;
-      return;
-    }
-    semantics.memoryBehavior = VPTOMemoryBehavior::Unknown;
-    VPTOMemoryAccess access;
-    access.writes = true;
-    access.ordered = true;
-    access.unknown = true;
-    accesses.push_back(access);
-    return;
-  }
-
-  semantics.memoryBehavior = VPTOMemoryBehavior::Explicit;
+// Populate `accesses` from op's explicit memory effects.
+static void collectExplicitAccesses(
+    Operation *op, bool storeLike,
+    SmallVectorImpl<VPTOMemoryAccess> &accesses) {
+  auto memoryEffects = cast<MemoryEffectOpInterface>(op);
   SmallVector<MemoryEffects::EffectInstance> effects;
   memoryEffects.getEffects(effects);
-  bool storeLike = isStoreLikeName(op->getName().getStringRef());
   for (const MemoryEffects::EffectInstance &effect : effects) {
     Value value = effect.getValue();
     if (value && !isMemoryAddress(value))
@@ -236,7 +240,12 @@ static void collectMemoryAccesses(Operation *op,
     setStaticAccessRange(op, access);
     accesses.push_back(access);
   }
+}
 
+// Mark all accesses ordered when the op has atomic/volatile effects,
+// synthesizing a conservative access if none were found.
+static void finalizeOrdering(VPTOSchedulingSemantics &semantics,
+                             SmallVectorImpl<VPTOMemoryAccess> &accesses) {
   bool ordered =
       llvm::any_of(semantics.effects, [](const VPTOSchedulingEffect &effect) {
         return effect.kind == VPTOSchedulingEffectKind::AtomicMemory ||
@@ -258,7 +267,110 @@ static void collectMemoryAccesses(Operation *op,
   for (VPTOMemoryAccess &access : accesses)
     access.ordered = true;
 }
+
+static void collectMemoryAccesses(Operation *op,
+                                  VPTOSchedulingSemantics &semantics) {
+  SmallVectorImpl<VPTOMemoryAccess> &accesses = semantics.memoryAccesses;
+  if (hasKnownNoOrdinaryMemoryAccess(op)) {
+    semantics.memoryBehavior = VPTOMemoryBehavior::None;
+    return;
+  }
+
+  if (!isa<MemoryEffectOpInterface>(op)) {
+    classifyWithoutMemoryEffects(op, semantics, accesses);
+    return;
+  }
+
+  semantics.memoryBehavior = VPTOMemoryBehavior::Explicit;
+  bool storeLike = isStoreLikeName(op->getName().getStringRef());
+  collectExplicitAccesses(op, storeLike, accesses);
+  finalizeOrdering(semantics, accesses);
+}
+
+// Post-update ops carry an optional updated base address. Try one op type;
+// return true when it matched (so callers can stop probing further types).
+template <typename OpTy>
+static bool tryAddPostUpdate(Operation *op,
+                             SmallVectorImpl<VPTOSchedulingEffect> &effects) {
+  auto typedOp = dyn_cast<OpTy>(op);
+  if (!typedOp)
+    return false;
+  if (Value updatedBase = typedOp.getUpdatedBase())
+    effects.push_back(
+        {VPTOSchedulingEffectKind::PostUpdate, "updated-address", updatedBase});
+  return true;
+}
+
+static void collectPostUpdateEffects(
+    Operation *op, SmallVectorImpl<VPTOSchedulingEffect> &effects) {
+  (void)(tryAddPostUpdate<VldsOp>(op, effects) ||
+         tryAddPostUpdate<Vldsx2Op>(op, effects) ||
+         tryAddPostUpdate<SprstiOp>(op, effects) ||
+         tryAddPostUpdate<SprstsOp>(op, effects) ||
+         tryAddPostUpdate<VldusOp>(op, effects) ||
+         tryAddPostUpdate<PldsOp>(op, effects) ||
+         tryAddPostUpdate<PldiOp>(op, effects) ||
+         tryAddPostUpdate<PstiOp>(op, effects) ||
+         tryAddPostUpdate<VstsOp>(op, effects) ||
+         tryAddPostUpdate<PstsOp>(op, effects) ||
+         tryAddPostUpdate<VsldbOp>(op, effects) ||
+         tryAddPostUpdate<VsstbOp>(op, effects) ||
+         tryAddPostUpdate<VstasOp>(op, effects));
+}
 } // namespace
+
+// Derive the ctrl scheduling effect from StateAccessOpInterface so every
+// consumer (raw MAD Consume, acc-store copy-out) is ordered against the
+// set_ctrl that installs a configuration and the restore that follows it.
+// Without these edges the scheduler could hoist a mad_raw above its
+// configuration. The explicit get_ctrl/set_ctrl ops are covered too: they
+// declare the interface as Query / Write respectively.
+static void collectCtrlStateEffects(Operation *op,
+                                    SmallVectorImpl<VPTOSchedulingEffect>
+                                        &effects) {
+  auto access = dyn_cast<StateAccessOpInterface>(op);
+  if (!access || access.getStateResource() != StateResource::Ctrl) {
+    return;
+  }
+  switch (access.getStateAccessKind()) {
+  case StateAccessKind::Query:
+  case StateAccessKind::Consume:
+    effects.push_back(
+        {VPTOSchedulingEffectKind::ImplicitRead, "ctrl", Value()});
+    break;
+  case StateAccessKind::Write:
+  case StateAccessKind::Clobber:
+    effects.push_back(
+        {VPTOSchedulingEffectKind::ImplicitWrite, "ctrl", Value()});
+    break;
+  }
+}
+
+/// Record the implicit hardware-register effects the scheduler cannot see
+/// through SSA: VSQZ writes SQZN and VSTUR consumes it, and VSTUR/VSTAR both
+/// advance the AR read-modify-write counter that SPRCLR resets.
+static void collectImplicitRegisterEffects(
+    Operation *op, SmallVectorImpl<VPTOSchedulingEffect> &effects)
+{
+    if (isa<VsqzOp>(op)) {
+        effects.push_back(
+            {VPTOSchedulingEffectKind::ImplicitWrite, "SQZN", Value()});
+    }
+    if (isa<VsturOp>(op)) {
+        effects.push_back(
+            {VPTOSchedulingEffectKind::ImplicitRead, "SQZN", Value()});
+        effects.push_back(
+            {VPTOSchedulingEffectKind::ImplicitRead, "AR", Value()});
+        effects.push_back(
+            {VPTOSchedulingEffectKind::ImplicitWrite, "AR", Value()});
+    }
+    if (isa<VstarOp>(op)) {
+        effects.push_back(
+            {VPTOSchedulingEffectKind::ImplicitRead, "AR", Value()});
+        effects.push_back(
+            {VPTOSchedulingEffectKind::ImplicitWrite, "AR", Value()});
+    }
+}
 
 VPTOSchedulingSemantics
 mlir::pto::getDefaultVPTOSchedulingSemantics(Operation *op) {
@@ -268,6 +380,8 @@ mlir::pto::getDefaultVPTOSchedulingSemantics(Operation *op) {
     effects.push_back(
         {VPTOSchedulingEffectKind::Barrier, "memory-order", Value()});
   }
+    // Implicit hardware registers the scheduler cannot see through SSA.
+    collectImplicitRegisterEffects(op, effects);
   if (isa<AtomicCasOp, AtomicExchOp, AtomicAddOp, AtomicSubOp, AtomicMinOp,
           AtomicMaxOp, AtomicAndOp, AtomicOrOp, AtomicXorOp>(op))
     effects.push_back(
@@ -275,37 +389,7 @@ mlir::pto::getDefaultVPTOSchedulingSemantics(Operation *op) {
   if (op->hasAttr("volatile") || op->hasAttr("is_volatile"))
     effects.push_back(
         {VPTOSchedulingEffectKind::VolatileMemory, "memory", Value()});
-  auto addPostUpdate = [&](Value updatedBase) {
-    if (updatedBase)
-      effects.push_back({VPTOSchedulingEffectKind::PostUpdate,
-                         "updated-address", updatedBase});
-  };
-  if (auto typedOp = dyn_cast<VldsOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<Vldsx2Op>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<SprstiOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<SprstsOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<VldusOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<PldsOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<PldiOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<PstiOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<VstsOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<PstsOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<VsldbOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<VsstbOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
-  if (auto typedOp = dyn_cast<VstasOp>(op))
-    addPostUpdate(typedOp.getUpdatedBase());
+  collectPostUpdateEffects(op, effects);
   if (auto sprclr = dyn_cast<SprclrOp>(op))
     effects.push_back(
         {VPTOSchedulingEffectKind::ImplicitWrite, sprclr.getSpr(), Value()});
@@ -315,12 +399,14 @@ mlir::pto::getDefaultVPTOSchedulingSemantics(Operation *op) {
   if (auto sprsts = dyn_cast<SprstsOp>(op))
     effects.push_back(
         {VPTOSchedulingEffectKind::ImplicitRead, sprsts.getSpr(), Value()});
-  if (isa<GetCtrlOp>(op))
-    effects.push_back(
-        {VPTOSchedulingEffectKind::ImplicitRead, "ctrl", Value()});
-  if (isa<SetCtrlOp>(op))
-    effects.push_back(
-        {VPTOSchedulingEffectKind::ImplicitWrite, "ctrl", Value()});
+  // SQZN is written only by VSQZ and consumed by VSTUR, whose store length is
+  // not an SSA operand. Without this dependency the scheduler may hoist a later
+  // VSQZ above the VSTUR that still has to read the previous SQZN value, which
+  // drops a stored squeeze (issue 1779). The AR register is a read-modify-write
+  // counter: VSTUR advances it, VSTAR drains it, and SPRCLR "AR" resets it.
+  // Modeling the AR effects on VSTUR/VSTAR keeps a later clear after the VSTAR
+  // that must flush the previous AR state.
+  collectCtrlStateEffects(op, effects);
 
   collectMemoryAccesses(op, semantics);
   if (getExecutionPipe(op) || !semantics.effects.empty()) {

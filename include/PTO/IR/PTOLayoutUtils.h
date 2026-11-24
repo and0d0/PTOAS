@@ -1,0 +1,55 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+#ifndef PTO_IR_PTOLAYOUTUTILS_H
+#define PTO_IR_PTOLAYOUTUTILS_H
+
+#include "PTO/IR/PTO.h"
+#include "PTO/Support/CodeConstants.h"
+#include "llvm/ADT/ArrayRef.h"
+
+#include <array>
+#include <optional>
+#include <string>
+
+namespace mlir::pto {
+
+inline constexpr unsigned kPTOLayoutRank = 5;
+
+bool isMxLayout(Layout layout);
+
+/// Valid extents proven by the type or a locally tracked tile descriptor.
+std::array<std::optional<int64_t>, kValue2> getKnownTileValidShapeAt(Value tile, Operation* at);
+
+/// Minimum single-row scratch width for A2/A3 TREM and TREMS. Use the
+/// physical width as the upper bound when the valid width is unknown.
+std::optional<int64_t> getA2A3RemainderScratchCols(Value dst, Operation *at,
+                                                 RemPrecision precision);
+
+std::optional<std::string>
+getNZViewCompatibilityError(ArrayRef<int64_t> shape5D,
+                            ArrayRef<int64_t> stride5D,
+                            unsigned storageElemBytes);
+
+std::optional<std::string>
+getNZSubviewCompatibilityError(ArrayRef<int64_t> sourceShape5D,
+                               ArrayRef<int64_t> offsets5D,
+                               ArrayRef<int64_t> sizes5D);
+
+bool isLayoutCompatible5D(Layout layout, ArrayRef<int64_t> shape,
+                          ArrayRef<int64_t> stride, unsigned storageElemBytes);
+
+std::optional<Layout>
+inferLayout5D(ArrayRef<int64_t> shape, ArrayRef<int64_t> stride,
+              unsigned storageElemBytes,
+              std::optional<Layout> preferredMinor2D = std::nullopt,
+              bool *isMinor2DAmbiguous = nullptr);
+
+} // namespace mlir::pto
+
+#endif // PTO_IR_PTOLAYOUTUTILS_H

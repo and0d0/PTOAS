@@ -34,6 +34,11 @@ def PTOInsertSync : Pass<"pto-insert-sync", "func::FuncOp"> {
   // Declare the constructor function name
   let constructor = "mlir::pto::createPTOInsertSyncPass()";
 
+  let options = [
+    Option<"deduplicateSlotEvents", "deduplicate-slot-events", "bool", "true",
+           "Deduplicate identical slot event protocols without changing their lifetime">
+  ];
+
   let dependentDialects = [
     "mlir::pto::PTODialect",
     "mlir::memref::MemRefDialect",
@@ -84,23 +89,36 @@ def PTOBufidSync : Pass<"pto-bufid-sync", "func::FuncOp"> {
   ];
 }
 
-def ConvertToPTOOp : Pass<"convert-to-pto-op"> {
-  let summary = "Convert Ops from other dialects to PTO Ops";
-  let constructor = "mlir::pto::createConvertToPTOOpPass()";
-  let dependentDialects = ["arith::ArithDialect", "pto::PTODialect",
-                           "tensor::TensorDialect",
+def PTOLowerGenericOps
+    : Pass<"pto-lower-generic-ops", "func::FuncOp"> {
+  let summary = "Lower frontend PTO generic operations to core MLIR dialects";
+  let description = [{
+    Legalizes execution-domain-independent scalar and builtin-vector operations
+    authored as `pto.*` into arith/math/LLVM operations after frontend scope
+    classification. Packed and target-specialized PTO operations remain in the
+    PTO dialect.
+  }];
+  let constructor = "mlir::pto::createPTOLowerGenericOpsPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::math::MathDialect",
+    "mlir::pto::PTODialect"
   ];
 }
 
-def InferPTOLayout : Pass<"pto-infer-layout", "func::FuncOp"> {
-  let summary = "Infer GlobalTensor layout (ND/DN/NZ) for make_tensor_view";
+def InferPTOLayout : Pass<"pto-infer-layout", "ModuleOp"> {
+  let summary = "Infer and propagate GlobalTensor layout (ND/DN/NZ)";
   let description = [{
     For each pto.make_tensor_view with fully static shape/stride, compute layout
-    (ND/DN/NZ) per design rules and attach the optional `layout` attribute.
-    Dynamic stride/shape are left unset.
+    (ND/DN/NZ) per design rules, propagate it through SCF/CF control flow and
+    direct function calls, and diagnose conflicting layouts at merge points.
+    Non-ND layouts are encoded in tensor-view SSA types for backend conversion.
   }];
   let constructor = "mlir::pto::createInferPTOLayoutPass()";
-  let dependentDialects = ["pto::PTODialect", "arith::ArithDialect"];
+  let dependentDialects = ["pto::PTODialect", "arith::ArithDialect",
+                           "cf::ControlFlowDialect", "func::FuncDialect",
+                           "scf::SCFDialect"];
 }
 
 def PTOA5NormalizeTMov : Pass<"pto-a5-normalize-tmov", "func::FuncOp"> {
@@ -111,6 +129,8 @@ def PTOA5NormalizeTMov : Pass<"pto-a5-normalize-tmov", "func::FuncOp"> {
       dst(col_major) -> pto.treshape(row_major)
     This avoids unsupported A5 PTO-ISA vec->vec col_major TMOV paths while
     preserving alias semantics via SSA treshape (no real data movement).
+    Also establishes L0 scale addresses before matching MAT-to-scale TMOV or
+    TEXTRACT operations when the binding can be moved safely.
   }];
   let constructor = "mlir::pto::createPTOA5NormalizeTMovPass()";
   let dependentDialects = ["pto::PTODialect", "func::FuncDialect"];
@@ -179,14 +199,18 @@ def PTOMaterializeImplicitTmp
 
 def PlanMemory : Pass<"pto-plan-memory", "ModuleOp"> {
  let summary = "Plan memory for PTO Ops";
-  let constructor = "mlir::pto::createPlanMemoryPass()";
+  let constructor = "mlir::pto::createPlanMemoryModernPass()";
 
   let options = [
     Option<"memMode", "mem-mode", "std::string", "\"local\"",
            "Planning mode. Supported value today: local">,
     Option<"orderBySize", "order-by-size", "bool", "false",
            "Plan larger buffers first inside one AddressSpace before applying "
-           "SPEC_LEVEL_0 first-fit reuse">
+           "SPEC_LEVEL_0 first-fit reuse">,
+    Option<"enabled", "enabled", "bool", "true",
+           "Run automatic planning. When false the pass does not assign any "
+           "address; it only verifies that every live pto.alloc_tile already "
+           "carries an explicit addr">
   ];
 
   let dependentDialects = [
@@ -395,6 +419,58 @@ def PTOMaterializeTileOpSections
   ];
 }
 
+def VPTOResolveBridgeInstances : Pass<"vpto-resolve-bridge-instances", "ModuleOp"> {
+  let summary = "Resolve registered bridge entries, specialization and core to wrapper instances";
+  let constructor = "mlir::pto::createVPTOResolveBridgeInstancesPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def VPTOPrintDTDataABI : Pass<"vpto-print-dtdata-abi", "ModuleOp"> {
+  let summary = "Wire the print DebugTunnel pointer and lifecycle into printing kernels";
+  let description = [{
+    Appends the hidden trailing DTData argument the CCE device compile needs
+    and calls the print init/finish entries on entry and before each return.
+    The delivery convention is selected explicitly: `implicit` takes the
+    hidden argument the CCE launch machinery fills, `explicit` takes the
+    pointer the host runner passes as the kernel's first argument.
+  }];
+  let constructor = "mlir::pto::createVPTOPrintDTDataABIPass()";
+  let options = [Option<"mode", "mode", "std::string", "\"implicit\"",
+                        "DTData delivery: implicit or explicit">];
+  let dependentDialects = ["mlir::pto::PTODialect", "mlir::func::FuncDialect",
+                           "mlir::cf::ControlFlowDialect",
+                           "mlir::LLVM::LLVMDialect"];
+}
+
+def VPTOBridgeCallLowering : Pass<"vpto-bridge-call-lowering", "ModuleOp"> {
+  let summary = "Lower resolved bridge calls to func.call declarations";
+  let constructor = "mlir::pto::createVPTOBridgeCallLoweringPass()";
+  let dependentDialects = ["mlir::pto::PTODialect", "mlir::func::FuncDialect",
+                           "mlir::LLVM::LLVMDialect"];
+}
+
+def VPTOBridgeWrapperGen : Pass<"vpto-bridge-wrapper-gen", "ModuleOp"> {
+  let summary = "Render registered bridge instances to per-core C++ sources";
+  let constructor = "mlir::pto::createVPTOBridgeWrapperGenPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def PTOLowerBridgeOps : Pass<"pto-lower-bridge-ops", "ModuleOp"> {
+  let summary = "Lower policy-selected operations to structured bridge IR";
+  let description = [{
+    Holds the typed family lowerings (Pipe, Cube direct, Print) and owns the
+    route policy, which is parsed once when the pass is initialized. The pass
+    is module scoped because the Print family interns its format strings as
+    module-level constants.
+  }];
+  let constructor = "mlir::pto::createPTOLowerBridgeOpsPass()";
+  let options = [Option<"policyPath", "policy-path", "std::string", "\"\"",
+                        "Bridge route policy path">];
+  let dependentDialects = ["mlir::pto::PTODialect", "mlir::arith::ArithDialect",
+                           "mlir::LLVM::LLVMDialect", "mlir::scf::SCFDialect"];
+}
+
+
 def VPTOSplitCVModule : Pass<"vpto-split-cv-module", "ModuleOp"> {
   let summary = "Split a VPTO module with cube/vector sections into kernel modules";
   let description = [{
@@ -422,7 +498,10 @@ def VPTONormalizeContainer : Pass<"vpto-normalize-container", "ModuleOp"> {
   let summary = "Normalize and verify VPTO kernel container shape";
   let description = [{
     Normalizes a VPTO kernel module carrying `pto.kernel_kind` into the canonical
-    outer container form. Existing containers are left in place. The pass
+    outer container form. Existing containers are left in place. A module that
+    carries `pto.kernel_kind` and already contains child modules is rejected:
+    wrapping it would silently add another container level instead of
+    normalizing either shape, so the pass fails on the mixed input. The pass
     verifies that the resulting top-level module contains only child modules and
     that every child module carries `pto.kernel_kind`.
   }];
@@ -621,6 +700,44 @@ def PTOCanonicalizeIR : Pass<"pto-canonicalize-ir", "func::FuncOp"> {
   ];
 }
 
+def PTOArithRangeOptimize : Pass<"pto-arith-range-optimize", ""> {
+  let summary = "Run integer-range-driven arith optimizations on PTO IR";
+  let description = [{
+    Runs the upstream arith integer-range optimizations
+    (mlir::arith::createIntRangeOptimizationsPass and
+    mlir::arith::createArithUnsignedWhenEquivalentPass) followed by a
+    canonicalization round, then rewrites element-offset chains feeding
+    pto.load/pto.store to i32 where a local recursive range
+    evaluation proves every chain value fits in [0, 2^32) (converted back
+    with arith.index_castui/extui at the anchor or at the provable subchain
+    boundary), finishing with canonicalize + CSE.
+
+    The range facts come from InferIntRangeInterface implementations on the
+    hardware ID queries: the VPTO SIMT queries (pto.get_tid_x/y/z,
+    pto.get_block_idx_x/y/z, pto.get_block_dim_x/y/z, pto.get_grid_dim_x/y/z,
+    pto.get_veccoreid, pto.get_laneid) and the PTO-level i64 runtime queries
+    (pto.get_block_idx, pto.get_subblock_idx, pto.get_block_num,
+    pto.get_subblock_num). Non-negative ranges let the upstream passes prove
+    signed-vs-unsigned equivalence and, for example, rewrite
+    arith.floordivsi/remsi by a power of two into unsigned div/rem forms that
+    the LLVM backend folds into shifts/masks.
+
+    Ops whose range cannot be proven are left unchanged.
+    To avoid an LLVM 19 integer-range miscompilation observed in the A5
+    pipeline for mixed integer/floating scf.if results, integer-range rewrites
+    are suppressed only on the affected data/control-flow slice. Unrelated
+    arithmetic in the same A5 function still receives integer-range
+    optimization; other architectures keep the original module-level pipeline.
+    The unsigned-equivalence, canonicalization, and offset-narrowing steps
+    always run.
+  }];
+  let constructor = "mlir::pto::createPTOArithRangeOptimizePass()";
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
 def LowerPTOToUBufOps : Pass<"pto-lower-to-ubuf-ops", "mlir::func::FuncOp"> {
   let summary = "Lower eligible pto.tadd/tsub/tmul/tdiv to pto.ub.vadd/vsub/vmul/vdiv on a2a3 targets";
   let description = [{
@@ -635,6 +752,23 @@ def LowerPTOToUBufOps : Pass<"pto-lower-to-ubuf-ops", "mlir::func::FuncOp"> {
     TileLang path unchanged.
   }];
   let constructor = "mlir::pto::createLowerPTOToUBufOpsPass()";
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::func::FuncDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
+def LowerPTOTensorDump : Pass<"pto-lower-tensor-dump", "mlir::func::FuncOp"> {
+  let summary = "Lower pto.tdump to a metadata header (pto.stg) plus pto.mte_ub_gm";
+  let description = [{
+    Converts pto.tdump to a 64-byte little-endian metadata header written via
+    pto.stg (wrapped in a 1x1x1 pto.section.simt that is later outlined to a
+    blocking simt_launch) followed by a pto.mte_ub_gm copy of the raw tile
+    data. Runs on the VPTO backend before architecture-specific tile lowering.
+  }];
+  let constructor = "mlir::pto::createLowerPTOTensorDumpPass()";
   let dependentDialects = [
     "mlir::pto::PTODialect",
     "mlir::func::FuncDialect",
@@ -698,27 +832,24 @@ def PTOVerifyTFree : Pass<"pto-verify-tfree", "func::FuncOp"> {
   ];
 }
 
-def PTOValidateIntToPtrUses : Pass<"pto-validate-inttoptr-uses", "func::FuncOp"> {
-  let summary = "Validate restricted uses of PTO inttoptr results";
+def PTOMaterializeTileIfResults : Pass<"pto-materialize-tile-if-results", "ModuleOp"> {
+  let summary = "Give dynamic Tile if results independent runtime descriptors";
   let description = [{
-    Verifies that `pto.inttoptr` results do not escape into general pointer IR.
-    The result may only be used directly as the pointer operand of
-    `pto.load_scalar` or `pto.store_scalar`.
+    In functions with validity mutation, insert fresh descriptor captures at
+    each Tile yield, after branch side effects. Captures share payload storage
+    and survive canonicalization/CSE until final EmitC result assignment.
   }];
-
-  let constructor = "mlir::pto::createPTOValidateIntToPtrUsesPass()";
-
-  let dependentDialects = [
-    "mlir::pto::PTODialect",
-    "mlir::func::FuncDialect"
-  ];
+  let constructor = "mlir::pto::createPTOMaterializeTileIfResultsPass()";
+  let dependentDialects = ["mlir::pto::PTODialect", "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
 }
 
 def PTOResolveBufferSelect : Pass<"pto-resolve-buffer-select", "ModuleOp"> {
   let summary = "Resolve tile views and multi-buffer selections to addressed handles";
   let description = [{
     Consumes tile-native `pto.subview` operations rooted at an addressed
-    `pto.alloc_tile` or a runtime-bound `pto.declare_tile`, and
+    `pto.alloc_tile`, a runtime-bound `pto.declare_tile`, or their selected/view
+    descriptors (including scf.if, reshape and bitcast chains), and
     `pto.multi_tile_get %src[%k]` operations. Subviews become zero-copy
     addressed `pto.alloc_tile` handles after folding their physical offset.
 
@@ -1030,6 +1161,29 @@ def PTOInferVPTOVecScope
                            "mlir::scf::SCFDialect"];
 }
 
+def PTOInsertVecScopeMemBar : Pass<"pto-insert-vecscope-membar", "func::FuncOp"> {
+  let summary = "Insert vecscope memory barriers for vector-scope regions";
+  let description = [{
+    Analyzes vector-scope regions and inserts memory barriers at the
+    boundaries where memory footprint ordering is required. Runs after
+    vecscope inference so the regions exist, and before VPTO emission.
+  }];
+  let constructor = "mlir::pto::createPTOInsertVecScopeMemBarPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def PTOInsertVecScopeMemBarAll : Pass<"pto-insert-vecscope-membar-all", "func::FuncOp"> {
+  let summary = "Insert all vecscope memory barriers (conservative mode)";
+  let description = [{
+    Inserts SV_ALL and VV_ALL before each UB vector access, and VS_ALL before
+    each UB scalar access inside vecscopes, without dependence or footprint
+    analysis. Scalar-to-scalar accesses are ordered by the scalar pipeline.
+    This is a conservative correctness mode and preserves existing barriers.
+  }];
+  let constructor = "mlir::pto::createPTOInsertVecScopeMemBarAllPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
 def PTOValidateVPTOIR : Pass<"pto-validate-vpto-ir", "ModuleOp"> {
   let summary =
       "Validate authoring-stage VPTO legality before ptr-boundary canonicalization";
@@ -1098,6 +1252,11 @@ def VMIPreAssignmentCombine
     logical group size into an ordinary contiguous `load`. It also rewrites
     the semantic pattern `group_broadcast(group_slot_load(...))` into the
     equivalent `group_broadcast_load` operation.
+
+    With VMI fastmath enabled, a single-use FP32 `vmul` followed by `vadd`
+    becomes `vmula`. Both operations must have identical masks and zero
+    inactive-lane behavior. Contraction uses one rounding instead of two;
+    `--vmi-fastmath=false` disables it.
   }];
   let constructor = "mlir::pto::createVMIPreAssignmentCombinePass()";
   let dependentDialects = ["mlir::func::FuncDialect",
@@ -1118,6 +1277,31 @@ def VMILayoutAssignment : Pass<"vmi-layout-assignment", "ModuleOp"> {
                            "mlir::pto::PTODialect",
                            "mlir::memref::MemRefDialect",
                            "mlir::scf::SCFDialect"];
+}
+
+def VMISetFastmathState : Pass<"vmi-set-fastmath", "ModuleOp"> {
+  let summary = "Record the VMI fastmath pipeline state on the module";
+  let description = [{
+    Records the VMI conversion state once on the module as
+    `pto.vmi_fastmath`.  That attribute is the single source of truth for
+    every VMI pass whose layout decisions depend on the lowering state (a dense
+    same-layout BF16 narrowing relation is only real when fastmath is enabled
+    and the cast rounds with Z and does not saturate), so those passes read it
+    back instead of taking their own option and cannot disagree.
+
+    The ptoas driver records `--vmi-fastmath` here.  Test pipelines that need a
+    specific state pin it with `-vmi-set-fastmath=vmi-fastmath=false`.
+  }];
+  let constructor = "mlir::pto::createVMISetFastmathStatePass()";
+  let options = [
+    Option<"enableVmiFastmath", "vmi-fastmath", "bool",
+           /*default=*/"true",
+           "The state to record. The default is true because enabled is the "
+           "historical conversion state and the state every benchmark baseline "
+           "uses; it is a recording knob, not a second user-facing switch - the "
+           "driver always records the value of --vmi-fastmath here, and test "
+           "pipelines should pass the value they mean explicitly.">,
+  ];
 }
 
 def VMILayoutRematerializeWeakProducers
@@ -1232,11 +1416,14 @@ def VMINormalizeSignlessIntToUnsigned :
       "Normalize signless integer element types on whitelisted VMI ops to "
       "unsigned by wrapping their vreg operands/results in pto.vmi.bitcast";
   let description = [{
-    Walks whitelisted VMI ops (currently pto.vmi.vdhist / pto.vmi.vchist)
-    and rewrites any VMIVReg operand or result whose element type is a
-    signless integer into the equivalent unsigned integer at the op's
-    boundary, using pto.vmi.bitcast to preserve the surrounding IR's type
-    contract. Downstream verifiers and lowerings therefore see only
+    Walks whitelisted VMI ops (min/max, right shifts, selected conversions,
+    integer min/max reductions, and vdhist/vchist) and rewrites any VMIVReg
+    operand or result whose element type is a signless integer into the
+    equivalent unsigned integer at the op's boundary, using pto.vmi.bitcast
+    to preserve the surrounding IR's type contract. For pto.vmi.vmaxs/vmins,
+    matching signless integer scalar operands are also converted to the same-
+    width unsigned type with bit-preserving unrealized_conversion_cast
+    operations. Downstream verifiers and lowerings therefore see only
     unsigned-typed whitelisted ops, matching the "signless == unsigned"
     convention at the VMI layer while leaving non-whitelisted IR untouched.
   }];
@@ -1263,12 +1450,29 @@ def VMILowerUnifiedToLegacy : Pass<"vmi-lower-unified-to-legacy", "ModuleOp"> {
       C6: vcadd/vcmax/vcmin  →  legacy reduce variants
 
     Ops NOT lowered (no legacy equivalent — require direct VMIToVPTO 1:N patterns):
-      plt, vadds, vmuls, vmaxs, vmins, vshls, vshrs, vhist, vintlv, vdintlv, vselr,
+      plt, vadds, vmuls, vmaxs, vmins, vshls, vshrs, vhist, standalone vintlv/vdintlv, vselr,
       vgather, vgatherb, vscatter,
       vexpdif, vaxpy, vlrelu, vprelu, vmull, vmula
   }];
   let constructor = "mlir::pto::createVMILowerUnifiedToLegacyPass()";
   let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def VMIExpandImplicitEnsureLayouts
+    : Pass<"vmi-expand-implicit-ensure-layouts", "ModuleOp"> {
+  let summary = "Expand implicit E2B group_broadcast_load layout conversions";
+  let description = [{
+    Rewrites each group_broadcast_load whose materialized result layout is
+    contiguous but that direct E2B lowering can serve with a deinterleaved
+    (d2/d4) result layout. The load result vreg is retyped to the E2B
+    deinterleaved layout and an ensure_layout d2/d4 -> contiguous is inserted
+    immediately after the load, so vmi-to-vpto lowers the broadcast as a
+    single E2B packet per part and converts to contiguous internally instead
+    of failing or falling back to the slower vselr broadcast path.
+  }];
+  let constructor = "mlir::pto::createVMIExpandImplicitEnsureLayoutsPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect"];
 }
 
 def VMIToVPTO : Pass<"vmi-to-vpto", "ModuleOp"> {
@@ -1282,17 +1486,56 @@ def VMIToVPTO : Pass<"vmi-to-vpto", "ModuleOp"> {
   }];
   let constructor = "mlir::pto::createVMIToVPTOPass()";
   let options = [
+    Option<"deprecatedVmiFastmath", "vmi-fastmath", "bool",
+           /*default=*/"false",
+           "Removed. This option used to select the VMI conversion state for "
+           "this pass alone, which is exactly the drift the state attribute "
+           "removes. Passing it is an error: use --vmi-fastmath on the driver, "
+           "or record the state with "
+           "-vmi-set-fastmath=vmi-fastmath=<bool> before the VMI passes.">,
     Option<"enableStableGatherMaskedLoad",
            "enable-stable-gather-masked-load", "bool",
            /*default=*/"false",
            "Reserve the stable VGATHER-based lowering path for VMI masked "
-           "loads; currently emits a TODO diagnostic when used.">
+           "loads; currently emits a TODO diagnostic when used.">,
+    Option<"loadSafety", "load-safety", "std::string",
+           /*default=*/"\"policy\"",
+           "Physical read safety policy for VMI loads. 'policy' (default) "
+           "accepts an unproven full-chunk read and reports it as a remark, "
+           "'warn' reports it as a warning, 'error' requires the safety proof "
+           "to succeed.">
   ];
   let dependentDialects = ["mlir::cf::ControlFlowDialect",
                            "mlir::func::FuncDialect",
                            "mlir::pto::PTODialect",
                            "mlir::memref::MemRefDialect",
                            "mlir::scf::SCFDialect"];
+}
+
+def VPTOPack4StoreMaskNormalize
+    : Pass<"vpto-normalize-packed-store-mask", "ModuleOp"> {
+  let summary = "Normalize packed 4-bit store predicates to their byte granular spelling";
+  let description = [{
+    Rewrites the predicate of a `pto.vsts` operation that stores 4-bit packed
+    values with the `PK4_B32` distribution from the 32-bit granular spelling
+    into the byte granular spelling that covers exactly the same bytes.
+
+    Run this immediately after VMI-to-VPTO lowering. The lowering describes a
+    PK4_B32 store with a b32 predicate whose lanes are the 32-bit store groups,
+    but the A5 model executes such a store at full rate only when the predicate
+    is byte granular: four consecutive b8 lanes hold the four bytes of one
+    32-bit group. A static b32 prefix of N lanes therefore becomes a static b8
+    prefix of 4*N lanes (`PAT_VL64` becomes `PAT_ALL`, `PAT_VL32` becomes
+    `PAT_VL128`, and so on), and `pto.pbitcast` reinterprets the result back
+    to the b32 mask type of the store distribution.
+
+    Only a b32 mask that is directly produced by a static `pto.pset_b32`
+    prefix with a byte granular spelling is rewritten. Runtime `pto.plt_b32`
+    predicates, patterns without a legal byte spelling such as `PAT_VL3`,
+    non-packed element types, and non-PK4_B32 stores keep their original form.
+  }];
+  let constructor = "mlir::pto::createVPTOPack4StoreMaskNormalizePass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
 }
 
 def VPTOStatefulStreamFusion : Pass<"vpto-stateful-stream-fusion", "ModuleOp"> {
@@ -1362,13 +1605,24 @@ def VPTOScheduler : Pass<"pto-vpto-scheduler", "ModuleOp"> {
     retains verified pressure-driven advancement when all ready candidates
     exceed a limit. Validation and fresh replay precede application of each
     verified result.
+    The opt-in `rematerialize` path runs that scheduler first, then considers
+    only over-limit regions for bounded cloning of loop-carried cheap producer
+    DAGs approved by the target scheduling model. It limits recursive vector
+    predecessor depth, groups nearby equivalent consumers, accounts for static
+    loop trip counts, anchors clones near their first use, rebuilds all
+    scheduling analyses, and runs the scheduler once more. The first schedule
+    is restored if the second schedule fails or does not reduce modeled vector
+    pressure.
   }];
   let constructor = "mlir::pto::createVPTOSchedulerPass()";
   let options = [
     Option<"mode", "mode", "std::string", "\"off\"",
            "Scheduler mode: off, analyze, or on">,
     Option<"trace", "trace", "bool", "false",
-           "Print detailed on-mode schedule results">
+           "Print detailed on-mode schedule results">,
+    Option<"rematerialize", "rematerialize", "bool", "false",
+           "Enable one bounded high-pressure rematerialization and reschedule step; "
+           "ptoas exposes this pass option as --vpto-scheduler-remat">
   ];
   let dependentDialects = ["mlir::func::FuncDialect",
                            "mlir::pto::PTODialect",
@@ -1460,6 +1714,10 @@ def PTOPrintAddressAnalysis
                            "mlir::pto::PTODialect",
                            "mlir::arith::ArithDialect",
                            "mlir::scf::SCFDialect"];
+  let options = [
+    Option<"memoryQueries", "memory-queries", "bool", "false",
+           "Print contextual range and memory overlap queries">
+  ];
 }
 
 def PTOVPTOPtrBoundary
@@ -1614,10 +1872,46 @@ def VPTOOptimizeVcvt
     conversions with `pto.vbitcast` when a canonical zero-filling producer --
     an unpack load, `pto.vzunpack` chain, or aligned narrowing `pto.vcvt` --
     proves that every widened carrier's high bits are zero. A following CSE
-    pass can then merge duplicate conversions and remove dead masks.
+    pass can then merge duplicate conversions and remove dead masks. It also
+    lowers the even-part u32 -> u16 narrowing to vdintlv when the source is
+    `vshrs(x, 16)` or `vand(x, 0xffff)`. The former selects the high sublanes
+    and the latter the low sublanes of each u32, so one vdintlv on the
+    reinterpreted u16 view exposes both streams without materializing the
+    shift/and results.
   }];
   let constructor = "mlir::pto::createVPTOOptimizeVcvtPass()";
   let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def VPTOOptimizeCtrlState
+    : Pass<"vpto-optimize-ctrl-state", "func::FuncOp"> {
+  let summary =
+      "Materialize minimal CTRL accesses from ctrl_state_guard requirements";
+  let description = [{
+    Lowers pto.ctrl_state_guard ops produced by MAD semantic-to-raw expansion
+    into the minimal set of pto.get_ctrl/pto.sbitset*/pto.set_ctrl accesses.
+    The pass first summarizes every scf.for subtree bottom-up: CTRL
+    cleanliness (no CTRL-observing or changing operation other than guards),
+    a unique guard requirement, and a statically proven at-least-once trip
+    count. One shared configuration is then hoisted to the entry of the
+    outermost loop whose entire chain down to every guard is statically
+    positive and CTRL-clean, all covered guards in that subtree are unwrapped
+    to run under the installed state, and the logical state is restored once
+    after the loop. Loops with a dynamic or possibly zero trip count, mixed
+    requirements, or explicit CTRL accesses inside are not hoisted; their
+    guards fall through to a per-block forward scan that shares one logical
+    CTRL entry read across compatible guards, reuses the installed active
+    state when the next guard has the same requirement, and defers the
+    restore write to the first real observation point: an explicit
+    get_ctrl/set_ctrl, a CTRL consumer outside a guard, an unknown operation,
+    or the block end. Guards inside scf.if regions are materialized
+    branch-locally. The pass always removes every ctrl_state_guard op.
+  }];
+  let constructor = "mlir::pto::createVPTOOptimizeCtrlStatePass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
 }
 
 def VPTOCombineReductions
@@ -1627,8 +1921,11 @@ def VPTOCombineReductions
     Reassociates conservative physical reduction trees emitted by VMI-to-VPTO
     lowering. When every chunk reduction uses an equivalent mask, the pass
     combines the source chunks first and emits one vcadd/vcmax/vcmin or
-    vcgadd/vcgmax/vcgmin operation. Run this after mask simplification, LICM,
-    and CSE so equivalent predicates have stable VPTO producers.
+    vcgadd/vcgmax/vcgmin operation. Native 16-bit integer vcgadd is excluded:
+    it produces widened sums despite retaining an input-shaped register type,
+    so source-type arithmetic cannot be distributed across that boundary.
+    Run this after mask simplification, LICM, and CSE so equivalent predicates
+    have stable VPTO producers.
   }];
   let constructor = "mlir::pto::createVPTOCombineReductionsPass()";
   let dependentDialects = ["mlir::pto::PTODialect"];
@@ -1646,6 +1943,168 @@ def VPTOMaskSimplify
   }];
   let constructor = "mlir::pto::createVPTOMaskSimplifyPass()";
   let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def PTOCheckSyncIds : Pass<"pto-check-sync-ids", "func::FuncOp"> {
+  let summary = "Oracle gate G3: device-id legality of the emitted synchronization";
+  let description = [{
+    Read-only apart from diagnostics. Checks that every static synchronization id
+    in the function is one the target permits: intra-core event ids inside their
+    per-direction pool, honouring the reserved tail, and buffer ids inside both the
+    hardware field and the arch's exposed buffer-id capacity, which the pass receives
+    from its caller and defaults to zero. Rotating ids on `set_flag_dyn` /
+    `wait_flag_dyn` resolve at runtime and are not checked. Fails the pass on any
+    violation.
+  }];
+
+  let constructor = "mlir::pto::createPTOCheckSyncIdsPass()";
+}
+
+def PTOCheckSyncInterference : Pass<"pto-check-sync-interference", "func::FuncOp"> {
+  let summary = "Oracle gate G2: no two overlapping intervals may share a sync id";
+  let description = [{
+    Read-only apart from diagnostics. Generalizes
+    `BufidSyncIdAlloc::validateNoSamePhysicalIdNesting` from buffer ids to every
+    id class: for each id key the live intervals must be pairwise disjoint.
+    Event ids are keyed by (srcPipe, dstPipe, eventId) because event flags are
+    per-direction disjoint hardware; buffer ids are keyed by buf_id alone
+    because that pool is global. Fails the pass on any nesting, on a close
+    without an open, or on a leaked id.
+  }];
+
+  let constructor = "mlir::pto::createPTOCheckSyncInterferencePass()";
+}
+
+def PTOCheckSyncSelfCoverage
+    : Pass<"pto-check-sync-self-coverage", "func::FuncOp"> {
+  let summary = "Oracle gate G1-self: every analysed dependency must be ordered by emitted sync";
+  let description = [{
+    ABSOLUTE, not differential -- there is no reference file. Rebuilds the
+    front-end SyncIR (`PTOIRTranslator`) and calls
+    `MemoryDependentAnalyzer::DepBetween` over the resulting def/use vectors
+    directly, then asserts that every dependency it reports is ordered by the
+    emitted sync, using the transitive closure of `computeCoverage`'s edge set
+    (loop-carried dependencies are checked against carried edges at d=1).
+
+    The expected set reads none of the sync pass's decisions -- not its hazard
+    selection, mechanism choice, ids, or emitted ops -- so a green result is
+    independent of them. It is NOT a proof of correctness: pairs on mutually
+    exclusive `scf.if` arms are excluded; `PIPE_S`->`PIPE_S` pairs are excluded on
+    every arch, on compiler behaviour rather than a stated guarantee; and on A5
+    `PIPE_V`->`PIPE_V` pairs are credited to the target's intra-pipe ordering
+    guarantee. All three exclusions are counted and reported rather than dropped.
+    `InsertSyncAnalysis::IsMemInfoHasDependency`, which layers policy on top of
+    `DepBetween`. It cannot, however, catch a dependency the front-end alias
+    analysis itself misses; see SyncOracleGates.h for that limit.
+
+    Dependencies whose endpoint op is not an anchor are reported as `unmappable`
+    rather than dropped.
+  }];
+
+  let constructor = "mlir::pto::createPTOCheckSyncSelfCoveragePass()";
+}
+
+def PTODumpSyncCoverage : Pass<"pto-dump-sync-coverage", "func::FuncOp"> {
+  let summary = "Dump the happens-before edges the emitted sync induces (oracle gate G1, reference side)";
+  let description = [{
+    Read-only. Numbers every op that carries a pipe and a memory effect, then
+    emits the set of ordered anchor pairs the emitted synchronization
+    establishes, including the buffer-token ordering `rls_buf` precedes
+    `get_buf` for the same buffer id.
+  }];
+
+  let constructor = "mlir::pto::createPTODumpSyncCoveragePass()";
+}
+
+def PTOCheckSyncCoverage : Pass<"pto-check-sync-coverage", "func::FuncOp"> {
+  let summary = "Oracle gate G1: the new sync mode must establish every ordering InsertSync does";
+  let description = [{
+    Differential. Reads a reference profile produced by `pto-dump-sync-coverage`
+    on an InsertSync run and asserts, per function, that the current run's
+    happens-before edge set is a superset of the reference's. A differing anchor
+    signature, or a missing reference profile, is a violation. Fails the pass on
+    any missing ordering.
+  }];
+
+  let constructor = "mlir::pto::createPTOCheckSyncCoveragePass(\"\")";
+}
+
+def PTODumpSyncCounts : Pass<"pto-dump-sync-counts", "func::FuncOp"> {
+  let summary = "Dump kernel-body sync-op counts (oracle gate G4, reference side)";
+  let description = [{
+    Read-only. Emits one `[sync-count]` line per function counting the emitted
+    `pto.set_flag` / `pto.wait_flag` / `pto.get_buf` / `pto.rls_buf` /
+    `pto.barrier` ops in the function body. These are IR ops, so the emitted
+    `ptoas_auto_sync_tail` C++ boilerplate cannot contaminate the count.
+  }];
+
+  let constructor = "mlir::pto::createPTODumpSyncCountsPass()";
+}
+
+def PTOCheckSyncCountFloor : Pass<"pto-check-sync-count-floor", "func::FuncOp"> {
+  let summary = "Oracle gate G4: the new sync mode must not synchronize more than InsertSync";
+  let description = [{
+    Differential. Reads a reference profile produced by `pto-dump-sync-counts`
+    on an InsertSync run and asserts, per function, that the current run does not
+    increase (a) the total sync-op count, (b) the barrier count, or (c) the
+    PIPE_ALL barrier count. A missing reference profile is a violation. Fails the
+    pass on any regression.
+  }];
+
+  let constructor = "mlir::pto::createPTOCheckSyncCountFloorPass(\"\")";
+}
+
+def PTOUnifiedSync : Pass<"pto-unified-sync", "func::FuncOp"> {
+  let summary = "Unified intra-core sync allocator (event-ID + buffer-ID + barrier)";
+  let description = [{
+    Allocates intra-core synchronization for one function across all three
+    mechanisms from a single model, instead of committing to a mechanism before
+    the cost of that choice is known: event ids, drawn from a pool per
+    (src, dst) pipe direction; buffer-id tokens, drawn from one pool of K and
+    available only where K is non-zero; and PIPE_ALL barriers, the fallback that
+    always succeeds and orders everything.
+
+    The dependence analysis is shared with pto-insert-sync rather than
+    reimplemented, so both passes see the same program and the same hazards.
+    Only the assignment of mechanisms and ids differs. Hazards whose direction
+    would overflow its event pool are routed to buffer-id tokens where the buffer
+    is eligible; what remains is coloured into the event pools by live interval,
+    and anything that still does not fit spills to a barrier. A hazard always
+    ends on some mechanism.
+
+    Functions that already contain explicit synchronization are left untouched.
+
+    Macro ops are supported. They lower to library calls that consume fixed
+    internal event ids which no operation in the IR names, so those (direction, id)
+    pairs are reserved over the call's span before any id is allocated; an id
+    already taken is never offered. A gate checks the result on every run, since a
+    collision with a library-internal id is otherwise invisible.
+  }];
+
+  let constructor = "mlir::pto::createPTOUnifiedSyncPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def PTODumpSyncExtract : Pass<"pto-dump-sync-extract", "func::FuncOp"> {
+  let summary = "Dump the oracle's structured extraction of emitted sync ops";
+  let description = [{
+    Read-only. Walks the emitted `pto.set_flag` / `pto.wait_flag` /
+    `pto.get_buf` / `pto.rls_buf` / `pto.barrier` ops and renders one record per
+    line (pipes, event_id / buf_id, program order). This is the shared IR-view
+    surface the differential oracle gates (coverage superset, sync-count floor)
+    read from each compiler run.
+  }];
+
+  let constructor = "mlir::pto::createPTODumpSyncExtractPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect"
+  ];
 }
 
 #endif // MLIR_DIALECT_PTO_PASSES

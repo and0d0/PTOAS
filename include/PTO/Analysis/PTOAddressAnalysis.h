@@ -83,7 +83,7 @@ public:
 
   PTOAnalysisResult<PTOTypedExprRef>
   convertDeltaToUnit(const PTOTypedExprRef &deltaBytes,
-                     int64_t targetUnitBytes);
+                     int64_t targetUnitBytes) const;
 
   PTOAnalysisResult<PTOTypedExprRef>
   getDeltaInUnit(const PTOAddressExpr &address, scf::ForOp loop,
@@ -95,7 +95,7 @@ public:
   /// value-preservation proof. Unproven source operations stay opaque.
   PTOAnalysisResult<PTOTypedExprRef>
   getDifferenceBytes(const PTOAddressExpr &from,
-                     const PTOAddressExpr &to);
+                     const PTOAddressExpr &to, bool retainCastBoundaries = false);
 
   PTOValueEvolutionAnalysis &getValueEvolution() { return valueEvolution; }
 
@@ -104,7 +104,15 @@ private:
                                                      scf::ForOp loop);
   PTOAnalysisResult<PTOTypedExprRef>
   getPointerDifference(const PTOAddressExpr &from,
-                       const PTOAddressExpr &to);
+                       const PTOAddressExpr &to, bool retainCastBoundaries = false);
+  // Byte delta contributed by an address's post-update offset across `loop`;
+  // returns constant zero when the address has no offset.
+  PTOAnalysisResult<PTOTypedExprRef>
+  getOffsetEvolutionDeltaBytes(const PTOAddressExpr &address, scf::ForOp loop);
+  // Byte value of a post-update offset as a domain-free point expression;
+  // returns constant zero when `offset` is absent.
+  PTOAnalysisResult<PTOTypedExprRef>
+  getOffsetPointBytes(const std::optional<PTOTypedAddressOffset> &offset, bool retainCastBoundaries);
 
   func::FuncOp func;
   PTOValueEvolutionAnalysis &valueEvolution;

@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -33,26 +34,123 @@ class _SoftLibTraceRuntime(CallbackTracingRuntime):
         self._result = unwrap_surface_value(self._callback(*args))
 
 
+_INTEGER_VDIV_DTYPES = {"i16", "si16", "ui16", "i32", "si32", "ui32"}
+
+
+def _integer_vdiv_dtype(dtype):
+    resolved = getattr(pto, dtype, None)
+    if resolved is None:
+        raise ValueError(f"no PTODSL element type named {dtype!r} for integer vdiv")
+    return resolved
+
+
+def _resolve_integer_vdiv_request(specs):
+    dtype = specs["dtype"]
+    is_16bit = dtype in {"i16", "si16", "ui16"}
+    lanes = int(specs.get("lanes", 128 if is_16bit else 64))
+    mask_bits = specs.get("mask", "b16" if is_16bit else "b32")
+    helper_dtype = dtype.replace("si", "i")
+    module_name = f"div_{helper_dtype}_soft"
+    # Resolved from the hosting submodule, like the div_vector helper below, so
+    # that lib/SoftOps/__init__.py only re-exports the long-standing helpers.
+    source = "div_uint" if helper_dtype.startswith("ui") else "div_int"
+    helper = getattr(importlib.import_module(f"SoftOps.{source}"), module_name)
+    vreg = vreg_type(lanes, _integer_vdiv_dtype(dtype))
+    arg_types = [vreg, vreg, mask_type(mask_bits)]
+    return module_name, helper, arg_types, [vreg]
+
+
+_F32_DIV_ALGO_HELPERS = {
+    # DIFF_COMPENSATION maps to the compensated DivPrecisionImpl in the FTZ
+    # build of the AscendC reference, i.e. the same sequence as 0-ULP FTZ-true.
+    "diff_compensation": "div_vf32_soft",
+    "precision_0ulp_ftz_true": "div_vf32_soft",
+    "precision_0ulp_ftz_false": "div_vf32_ulp0_ftz_false",
+    "precision_1ulp_ftz_false": "div_vf32_ulp1_ftz_false",
+}
+
+
+# Canonical IR mnemonics. Only the ULP variants carry a ``precision_`` prefix.
+_DIV_ALGO_TOKENS = frozenset({
+    "intrinsic",
+    "diff_compensation",
+    "precision_1ulp_ftz_true",
+    "precision_0ulp_ftz_true",
+    "precision_0ulp_ftz_false",
+    "precision_1ulp_ftz_false",
+})
+
+# Accepted shorthands -> canonical mnemonic.
+_DIV_ALGO_SHORTHANDS = {
+    "0ulp_ftz_true": "precision_0ulp_ftz_true",
+    "0ulp_ftz_false": "precision_0ulp_ftz_false",
+    "1ulp_ftz_true": "precision_1ulp_ftz_true",
+    "1ulp_ftz_false": "precision_1ulp_ftz_false",
+    "ulp0_ftz_true": "precision_0ulp_ftz_true",
+    "ulp0_ftz_false": "precision_0ulp_ftz_false",
+    "ulp1_ftz_true": "precision_1ulp_ftz_true",
+    "ulp1_ftz_false": "precision_1ulp_ftz_false",
+}
+
+
+def _normalize_algo_token(token):
+    """Return the IR mnemonic for a DivAlgo token or one of its shorthands."""
+    text = str(token).strip().lower().replace("-", "_")
+    if text in _DIV_ALGO_TOKENS:
+        return text
+    return _DIV_ALGO_SHORTHANDS.get(text, text)
+
+
+def _resolve_software_vdiv_request(target, specs):
+    algo = _normalize_algo_token(specs.get("precision"))
+    if target != "a5" or specs.get("dtype") != "f32" or specs.get("mask") != "b32":
+        raise ValueError(
+            f"{algo} vector division currently requires A5 f32 with b32 mask"
+        )
+    helper_name = _F32_DIV_ALGO_HELPERS.get(algo)
+    if helper_name is None:
+        raise ValueError(f"unsupported vector division algorithm: {algo!r}")
+    module = importlib.import_module("SoftOps.div_vector")
+    helper = getattr(module, helper_name)
+
+    vector = vreg_type(int(specs["lanes"]), pto.f32)
+    return helper_name, helper, [vector, vector, mask_type("b32")], [vector]
+
+
+# Scalar division only supports the native divide and the correctly-rounded
+# SoftOps path; the vector FTZ-false algorithms have no scalar counterpart.
+_SCALAR_DIV_ALGOS = {"precision_0ulp_ftz_true": "div_f32_soft"}
+
+
+def _resolve_scalar_div_request(target, specs):
+    algo = _normalize_algo_token(specs.get("precision"))
+    if target != "a5":
+        raise ValueError("scalar precision division requires target A5")
+    helper_name = _SCALAR_DIV_ALGOS.get(algo)
+    if helper_name is None:
+        raise ValueError(
+            f"{algo} is not supported for scalar division; use intrinsic or "
+            "precision_0ulp_ftz_true"
+        )
+    helper = getattr(importlib.import_module("SoftOps"), helper_name)
+    return helper_name, helper, [pto.f32, pto.f32], [pto.f32]
+
+
+def _resolve_trig_request(op):
+    module_name = "sin_f32_soft" if op == "pto.sin" else "cos_f32_soft"
+    helper = getattr(importlib.import_module("SoftOps"), module_name)
+    return module_name, helper, [pto.f32], [pto.f32]
+
+
 def _resolve_softlib_request(target, op, specs):
-    if op == "pto.vdiv" and specs.get("dtype") in {"i16", "si16", "i32", "si32"}:
-        dtype = specs["dtype"]
-        lanes = int(specs.get("lanes", 128 if dtype in {"i16", "si16"} else 64))
-        mask_bits = specs.get("mask", "b16" if dtype in {"i16", "si16"} else "b32")
-        module_name = "div_i16_soft" if dtype in {"i16", "si16"} else "div_i32_soft"
-        helper = getattr(importlib.import_module("SoftOps"), module_name)
-        integer_dtype = pto.si16 if dtype == "si16" else pto.i16
-        if dtype in {"i32", "si32"}:
-            integer_dtype = pto.si32 if dtype == "si32" else pto.i32
-        arg_types = [
-            vreg_type(lanes, integer_dtype),
-            vreg_type(lanes, integer_dtype),
-            mask_type(mask_bits),
-        ]
-        return module_name, helper, arg_types, [arg_types[0]]
+    if op == "pto.vdiv" and specs.get("dtype") in _INTEGER_VDIV_DTYPES:
+        return _resolve_integer_vdiv_request(specs)
+    if op == "pto.vdiv" and _normalize_algo_token(specs.get("precision")) in _F32_DIV_ALGO_HELPERS:
+        return _resolve_software_vdiv_request(target, specs)
+    if op == "pto.divf" and specs.get("precision"):
+        return _resolve_scalar_div_request(target, specs)
     if op in {"pto.sin", "pto.cos"}:
-        module_name = "sin_f32_soft" if op == "pto.sin" else "cos_f32_soft"
-        helper = getattr(importlib.import_module("SoftOps"), module_name)
-        return module_name, helper, [pto.f32], [pto.f32]
+        return _resolve_trig_request(op)
     raise ValueError(f"no SoftOps implementation registered for {target}:{op}:{specs}")
 
 

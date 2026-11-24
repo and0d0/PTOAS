@@ -76,7 +76,10 @@ tool_dirs = [config.ptoir_tools_dir, config.ptoir_test_tools_dir,
 tools = [
     'ptoas',
     'pto-test-opt',
+    'pto-uf-token-model-test',
     'pto-vpto-scheduler-tracker-test',
+    'pto-bisheng-scheduler-test',
+    'pto-slot-sync-dedup-test',
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)

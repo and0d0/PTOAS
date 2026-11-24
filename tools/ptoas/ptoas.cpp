@@ -6,94 +6,16 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-#include "ptoas.h"
-
 #include "ptoas_internal.h"
+#include "PTO/Transforms/VMILayoutPlanner.h"
 
-#include "PTO/IR/PTO.h"
-#include "PTO/IR/PTOMultiBuffer.h"
-#include "PTO/IR/VMIUtils.h"
-#include "PTO/Transforms/BufferizableOpInterfaceImpl.h"
-#include "PTO/Transforms/CppPostprocess.h"
-#include "PTO/Transforms/Passes.h"
-#include "PTO/Transforms/VPTOLLVMEmitter.h"
-#include "VPTOHostStubEmission.h"
-#include "mlir/AsmParser/AsmParserState.h"
-#include "mlir/Conversion/Passes.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
-#include "mlir/Dialect/Arith/Transforms/Passes.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
-#include "mlir/Dialect/EmitC/IR/EmitC.h"
-#include "mlir/Dialect/EmitC/Transforms/Transforms.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Func/Transforms/Passes.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/Math/Transforms/Passes.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/MemRef/Transforms/Passes.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/SCF/Transforms/Passes.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
-#include "mlir/Dialect/Tensor/Transforms/Passes.h"
-#include "mlir/Dialect/Utils/StaticValueUtils.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/DialectInterface.h"
-#include "mlir/IR/IRMapping.h"
-#include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/Parser/Parser.h"
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Target/Cpp/CppEmitter.h"
-#include "mlir/Transforms/InliningUtils.h"
-#include "mlir/Transforms/Passes.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallString.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/StringSwitch.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/Path.h"
-#include "llvm/Support/Program.h"
-#include "llvm/Support/Regex.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/ToolOutputFile.h"
-#include "llvm/Support/raw_ostream.h"
-#include "ptobc/ptobc_decode.h"
-
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <csignal>
-#include <cstdlib>
-#include <cstring>
-#include <memory>
-#include <optional>
-#include <set>
-#include <string>
-#include <thread>
-
-#include <sys/types.h>
-#include <unistd.h>
 
 using namespace mlir;
 using namespace pto;
 
 namespace {
-
-
-
 
 /// LLVM 19's Func inliner interface accepts every call and callable, including
 /// operations carrying the standard `no_inline` attribute. Keep the upstream
@@ -214,23 +136,171 @@ llvm::cl::opt<bool> vptoSchedulerTrace(
     llvm::cl::desc("Print detailed VPTO on-mode scheduling results"),
     llvm::cl::init(false));
 
+llvm::cl::opt<std::string> vptoBridgePolicy(
+    "vpto-bridge-policy",
+    llvm::cl::desc("Path to a VPTO bridge route policy YAML file; selects "
+                   "which families and operations use the C++ bridge. "
+                   "Defaults to the built-in policy."),
+    llvm::cl::init(""));
+
+llvm::cl::opt<std::string> vptoPrintDTData(
+    "vpto-print-dtdata",
+    llvm::cl::desc("How a printing kernel receives its DebugTunnel pointer: "
+                   "'implicit' takes the hidden argument the CCE launch "
+                   "machinery fills (real NPU), 'explicit' takes the pointer "
+                   "the host runner passes as the first kernel argument "
+                   "(simulator)."),
+    llvm::cl::init("implicit"));
+
+llvm::cl::opt<bool> vptoSchedulerRemat(
+    "vpto-scheduler-remat",
+    llvm::cl::desc(
+        "Enable bounded high-pressure VPTO rematerialization and rescheduling "
+        "(defaults to on with the A5 scheduler; use =false to disable)"),
+    llvm::cl::init(false));
+
+llvm::cl::opt<bool> dumpSyncExtract("dump-sync-extract",
+                                    llvm::cl::desc("Render the structured extraction of whatever sync the selected "
+                                                   "mode emitted. Read-only"),
+                                    llvm::cl::init(false));
+
+llvm::cl::opt<bool> enableUnifiedSync("enable-unified-sync",
+                                      llvm::cl::desc("Enable the unified intra-core sync allocator: event ids, buffer "
+                                                     "ids and barriers as three resource classes over one "
+                                                     "interval-colouring problem"),
+                                      llvm::cl::init(false));
+
+llvm::cl::opt<bool>
+    enableUnifiedSyncDebug("enable-unified-sync-debug",
+                           llvm::cl::desc("Print the unified allocator's model, routing, colouring and "
+                                          "emission reports to stderr. Off by default; gate violations are "
+                                          "reported either way"),
+                           llvm::cl::init(false));
+
+llvm::cl::opt<std::string>
+    unifiedSyncForceMechanism("unified-sync-force-mechanism",
+                              llvm::cl::desc("Test-only: route hazard group 0 off its TYPE-derived mechanism "
+                                             "(bufid | bufid-spill), so the buffer-id path and the "
+                                             "resource-exhaustion downgrade can be exercised on a kernel the "
+                                             "router would otherwise leave alone"),
+                              llvm::cl::init(""), llvm::cl::Hidden);
+
+llvm::cl::opt<bool> checkAddrReuseWar("check-addr-reuse-war",
+                                      llvm::cl::desc("List the synchronization orderings whose two endpoints are "
+                                                     "distinct tile allocations placed at the same physical "
+                                                     "address in one scope. Reports; never fails"),
+                                      llvm::cl::init(false));
+
+llvm::cl::opt<bool> dumpSyncCoverage("dump-sync-coverage",
+                                     llvm::cl::desc("Write the happens-before edges this run's emitted sync induces, "
+                                                    "as the reference profile for --check-sync-coverage"),
+                                     llvm::cl::init(false));
+
+llvm::cl::opt<std::string>
+    checkSyncCoverage("check-sync-coverage",
+                      llvm::cl::desc("Run oracle gate G1: assert this run establishes every ordering "
+                                     "in the given file (a prior --dump-sync-coverage run). "
+                                     "DIFFERENTIAL -- its strength is bounded by that reference"),
+                      llvm::cl::init(""), llvm::cl::value_desc("profile-file"));
+
+llvm::cl::opt<bool> dumpSyncCounts("dump-sync-counts",
+                                   llvm::cl::desc("Write this run's kernel-body sync-op counts, one line per "
+                                                  "function, as the reference for --check-sync-count-floor"),
+                                   llvm::cl::init(false));
+
+llvm::cl::opt<std::string>
+    checkSyncCountFloor("check-sync-count-floor",
+                        llvm::cl::desc("Run oracle gate G4: assert this run does not synchronize more "
+                                       "than the given reference profile, per class (total, barriers, "
+                                       "PIPE_ALL barriers). DIFFERENTIAL"),
+                        llvm::cl::init(""), llvm::cl::value_desc("profile-file"));
+
+llvm::cl::opt<bool> checkSyncIds("check-sync-ids",
+                                 llvm::cl::desc("Run oracle gate G3: verify every static emitted sync id is "
+                                                "legal for its direction, op and arch. Rotating set_flag_dyn / "
+                                                "wait_flag_dyn ids resolve at runtime and are not checked "
+                                                "(fails on violation)"),
+                                 llvm::cl::init(false));
+
+llvm::cl::opt<std::string>
+    checkSyncIdsInjectFault("check-sync-ids-inject-fault",
+                            llvm::cl::desc("Gate self-test: feed G3 a synthetic illegal id "
+                                           "(event-oor | block-all-stomp | bufid-oor). Appended to the "
+                                           "gate's own record list after extraction, never to the IR, "
+                                           "because an out-of-range event id is unrepresentable in IR"),
+                            llvm::cl::init(""), llvm::cl::Hidden);
+
+llvm::cl::opt<std::string>
+    checkSyncInterferenceInjectFault("check-sync-interference-inject-fault",
+                                     llvm::cl::desc("Gate self-test: judge a synthetic pre-codegen shape "
+                                                    "(comp-conflict | multi-id-conflict) on its own record list. "
+                                                    "Never added to the IR, so it cannot reach codegen"),
+                                     llvm::cl::init(""), llvm::cl::Hidden);
+
+llvm::cl::opt<bool> checkSyncInterference("check-sync-interference",
+                                          llvm::cl::desc("Run oracle gate G2: assert no two overlapping intervals "
+                                                         "share a sync id (fails on nesting / leak)"),
+                                          llvm::cl::init(false));
+
+llvm::cl::opt<bool>
+    checkSyncSelfCoverage("check-sync-self-coverage",
+                          llvm::cl::desc("Run oracle gate G1-self: assert every dependency the "
+                                         "front-end analysis (DepBetween) reports is ordered by the "
+                                         "emitted sync, except pairs on mutually exclusive scf.if arms, "
+                                         "PIPE_S->PIPE_S pairs on every arch, and, on A5, "
+                                         "PIPE_V->PIPE_V pairs the target orders itself; all three "
+                                         "exclusions are counted and reported. ABSOLUTE -- no "
+                                         "reference profile and nothing inherited from the sync pass"),
+                          llvm::cl::init(false));
+
 llvm::cl::opt<bool> enableInsertSync("enable-insert-sync",
                                             llvm::cl::desc("Enable automatic synchronization insertion pass"),
                                             llvm::cl::init(false));
+
+llvm::cl::opt<bool> deduplicateSlotEvents(
+    "pto-deduplicate-slot-events",
+    llvm::cl::desc("Deduplicate identical slot event protocols without changing their lifetime"),
+    llvm::cl::init(true));
+
+llvm::cl::opt<bool> enableVmiFastmath(
+    "vmi-fastmath",
+    llvm::cl::desc("Select the VMI conversion state for the whole pipeline: it "
+                   "enables the conversion fast paths that may change NaN "
+                   "results, including f32-to-bf16 narrowing, and lets layout "
+                   "assignment offer the dense same-layout relation for those "
+                   "casts. Also contracts FP32 vmul + vadd into fused vmula, "
+                   "using a single rounding. Enabled by default; pass --vmi-fastmath=false to "
+                   "disable"),
+    llvm::cl::init(true));
+
+llvm::cl::opt<unsigned> vmiLayoutMaxFrontierEntries(
+    "vmi-layout-max-frontier-entries",
+    llvm::cl::desc("Maximum VMI layout search frontier entries per component "
+                   "(must be positive)"),
+    llvm::cl::init(VMILayoutPlannerOptions{}.maxFrontierEntriesPerComponent));
+
+llvm::cl::opt<unsigned> vmiLayoutMaxTransitions(
+    "vmi-layout-max-transitions",
+    llvm::cl::desc("Maximum VMI layout search transitions per component "
+                   "(must be positive)"),
+    llvm::cl::init(VMILayoutPlannerOptions{}.maxTransitionsPerComponent));
 
 llvm::cl::opt<bool> planMemoryOrderBySize(
     "plan-memory-order-by-size",
     llvm::cl::desc("Plan larger local buffers first inside one AddressSpace "
                    "before applying the basic SPEC_LEVEL_0 reuse strategy. "
-                   "Defaults to true when --plan-memory-impl=modern is "
-                   "explicitly selected"),
+                   "Defaults to false to match the previous default pipeline "
+                   "(largest-first ordering is opt-in)"),
     llvm::cl::init(false));
 
-llvm::cl::opt<std::string> planMemoryImpl(
-    "plan-memory-impl",
-    llvm::cl::desc("Select local memory planner implementation: legacy or "
-                   "modern"),
-    llvm::cl::init("legacy"));
+llvm::cl::opt<bool> enablePlanMemory(
+    "enable-plan-memory",
+    llvm::cl::desc("Enable automatic local memory planning (pto-plan-memory) "
+                   "for pto.alloc_tile without an explicit addr. On by "
+                   "default; disable with --enable-plan-memory=false. "
+                   "--pto-level=level3 always skips planning because there the "
+                   "user supplies every address explicitly."),
+    llvm::cl::init(true));
 
 llvm::cl::opt<bool> enableBufidSync(
     "enable-bufid_sync",
@@ -246,6 +316,15 @@ llvm::cl::opt<bool> enableInjectBarrierAllSync(
     "enable-inject-barrier-all-sync",
     llvm::cl::desc("Enable conservative synchronization by inserting "
                    "pto.barrier PIPE_ALL before memory-effecting PTO pipe ops"),
+    llvm::cl::init(false));
+
+llvm::cl::opt<bool> enableVecScopeMemBar(
+    "enable-vecscope-mem-bar", llvm::cl::desc("Insert memory barriers for VPTO vecscope hazards"),
+    llvm::cl::init(true));
+
+llvm::cl::opt<bool> enableVecScopeMemBarAll(
+    "enable-vecscope-mem-bar-all",
+    llvm::cl::desc("Insert family-wide barriers before vecscope UB vector and scalar accesses"),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> enableTileOpExpand(
@@ -321,8 +400,8 @@ llvm::cl::opt<bool> mlir::pto::emitMlirIR(
 
 llvm::cl::opt<std::string> mlir::pto::ptoTargetArch(
     "pto-arch",
-    llvm::cl::desc("Target Ascend architecture for codegen: a2, a3, or a5 (default: a3)"),
-    llvm::cl::value_desc("a2|a3|a5"),
+    llvm::cl::desc("Target architecture: a2, a3, a5, or linx (default: a3)"),
+    llvm::cl::value_desc("a2|a3|a5|linx"),
     llvm::cl::init("a3"));
 
 llvm::cl::opt<std::string> ptoBuildLevel(
@@ -345,6 +424,21 @@ llvm::cl::opt<bool> mlir::pto::emitVPTOLLVMDialect(
     "emit-vpto-llvm-ir",
     llvm::cl::desc("Write translated VPTO LLVM IR to -o"),
     llvm::cl::init(false));
+
+llvm::cl::opt<bool> mlir::pto::emitVPTODeviceObject(
+    "emit-vpto-device-object",
+    llvm::cl::desc(
+        "Write the merged relocatable AI Core device object to -o instead of "
+        "packaging a host fatobj; skips host-stub compilation; requires "
+        "--pto-backend=vpto and an explicit -o path"),
+    llvm::cl::init(false));
+
+llvm::cl::opt<std::string> mlir::pto::cannOutputVersion(
+    "cann-output-version",
+    llvm::cl::desc(
+        "Override the CANN version the VPTO backend lowers for, instead of the "
+        "toolchain-detected one (e.g. 9.0.0-beta.1); mainly for tests"),
+    llvm::cl::value_desc("x.y.z[-beta.N]"), llvm::cl::init(""));
 
 static llvm::cl::opt<bool> vptoPrintIR(
     "vpto-print-ir",
@@ -373,11 +467,6 @@ llvm::cl::opt<std::string> mlir::pto::ptoSeamIRFile(
     llvm::cl::value_desc("path"),
     llvm::cl::init(""));
 
-llvm::cl::opt<std::string> mlir::pto::cannOutputVersion(
-    "cann-output-version",
-    llvm::cl::desc("Override the CANN version used for lowering and public ABI output selection; examples: 9.0.0, 9.0.0-beta.1"),
-    llvm::cl::value_desc("version"), llvm::cl::init(""));
-
 llvm::cl::opt<mlir::pto::VFSIMTSizeFixMode> mlir::pto::vptoFixVFSIMTSize(
     "vpto-fix-vfsimt-size",
     llvm::cl::desc("Validate or repair VF_SIMT code sizes in VPTO vector objects"),
@@ -390,3 +479,22 @@ llvm::cl::opt<mlir::pto::VFSIMTSizeFixMode> mlir::pto::vptoFixVFSIMTSize(
         clEnumValN(mlir::pto::VFSIMTSizeFixMode::Verify, "verify",
                    "Validate VF_SIMT sizes without repairing them")),
     llvm::cl::init(mlir::pto::VFSIMTSizeFixMode::Auto));
+
+llvm::cl::opt<bool> mlir::pto::enableBishengVecMISched(
+    "enable-bisheng-vec-misched",
+    llvm::cl::desc(
+        "Use Bisheng's default vector MI scheduler behavior for "
+        "VPTO device compilation instead of explicitly disabling "
+        "the scheduler"),
+    llvm::cl::init(false));
+
+llvm::cl::opt<mlir::pto::BishengSchedulerMode> mlir::pto::bishengSchedulerMode(
+    "bisheng-vec-misched", llvm::cl::desc("Bisheng vector scheduling policy for device LLVM compilation"),
+    llvm::cl::value_desc("auto|on|off"),
+    llvm::cl::values(
+        clEnumValN(
+            BishengSchedulerMode::Auto, "auto",
+            "Retry off on compilation failure or nonzero VF stack; prefer the smaller stack (default)"),
+        clEnumValN(BishengSchedulerMode::On, "on", "Keep Bisheng default scheduling without retry"),
+        clEnumValN(BishengSchedulerMode::Off, "off", "Disable Bisheng vector scheduling without retry")),
+    llvm::cl::init(BishengSchedulerMode::Auto));

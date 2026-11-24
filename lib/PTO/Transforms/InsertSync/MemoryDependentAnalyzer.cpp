@@ -14,10 +14,7 @@
 #include "PTO/Transforms/InsertSync/MemoryDependentAnalyzer.h"
 #include "PTO/Transforms/InsertSync/InsertSyncDebug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "llvm/Support/Debug.h"
- 
-#define DEBUG_TYPE "pto-inject-sync"
- 
+
 using namespace mlir;
 using namespace mlir::pto;
 
@@ -51,24 +48,18 @@ static Value GetRealRoot(Value v) {
     llvm::errs() << "  [Trace] GetRealRoot Start:\n";
     printValueDebug("    Current", v);
   }
-  
-  int depth = 0;
-  const int maxDepth = 20;
- 
-  while (v && depth++ < maxDepth) {
-    Operation *defOp = v.getDefiningOp();
-    if (!defOp) {
-      if (trace) {
-        llvm::errs() << "    -> Reached BlockArgument. Stop.\n";
-      }
-        break; 
+
+  Operation *defOp = v ? v.getDefiningOp() : nullptr;
+  if (!defOp) {
+    if (trace && v) {
+      llvm::errs() << "    -> Reached BlockArgument. Stop.\n";
     }
- 
-    if (trace) {
-      llvm::errs() << "    -> Hit Alloc/Other [" << defOp->getName()
-                   << "]. Stop.\n";
-    }
-    break;
+    return v;
+  }
+
+  if (trace) {
+    llvm::errs() << "    -> Hit Alloc/Other [" << defOp->getName()
+                 << "]. Stop.\n";
   }
   return v;
 }
@@ -159,7 +150,7 @@ static bool isLocalBufferOverlapCrossRoot(const BaseMemInfo *a,
 bool MemoryDependentAnalyzer::DepBetween(
     const SmallVector<const BaseMemInfo *> &a,
     const SmallVector<const BaseMemInfo *> &b,
-    DepBaseMemInfoPairVec &depBaseMemInfosVec) {
+    DepBaseMemInfoPairVec &depBaseMemInfosVec) const {
   // [Debug Log] 关键入口信息
   if (isTraceEnabled()) {
     llvm::errs() << "\n[DepBetween] Checking dependency...\n";
@@ -180,7 +171,7 @@ bool MemoryDependentAnalyzer::DepBetween(
 }
  
 bool MemoryDependentAnalyzer::MemAlias(const BaseMemInfo *a,
-                                       const BaseMemInfo *b) {
+                                       const BaseMemInfo *b) const {
   pto::AddressSpace as = a->scope;
   pto::AddressSpace bs = b->scope;
  
@@ -200,19 +191,35 @@ bool MemoryDependentAnalyzer::MemAlias(const BaseMemInfo *a,
     return false;
   }
 
-  if (a->aliasesUnknownRange || b->aliasesUnknownRange) {
+  // An unknown physical address cannot establish independence across roots.
+  // Views of the same tile allocation can still have disjoint relative ranges.
+  // Keep integer-to-pointer casts conservative even when their roots match.
+  const bool hasUnknownRange = a->aliasesUnknownRange || b->aliasesUnknownRange;
+  const bool sharesTileRoot = a->rootBuffer && a->rootBuffer == b->rootBuffer &&
+                              a->rootBuffer.getDefiningOp<pto::AllocTileOp>();
+  if (hasUnknownRange && !sharesTileRoot) {
     if (isTraceEnabled()) {
       llvm::errs() << "    -> Unknown range in same scope. True.\n";
     }
     return true;
   }
- 
+
   // 1. GM 内存
   if (as == pto::AddressSpace::GM) {
     return isGMBufferOverlap(a, b);
   }
- 
+
   // 2. Local Memory (UB/L1)
+  // TWO SOURCES set these addresses, not one. PTOPlanMemory writes them back to
+  // allocation roots; and under --pto-level=level3 the caller writes them itself as a
+  // constant `addr` operand on alloc_tile, which PTOIRTranslator records with the flag
+  // set. "Known" means the analyzer can trust the address is real and stable, NOT that a
+  // particular pass produced it.
+  //
+  // Comparing these ranges is also the only way two DISTINCT roots at partially
+  // overlapping addresses are seen to alias, which is what makes aliasing non-transitive
+  // and lets a buffer clique hold more than one tile.
+  //
   // PTOPlanMemory writes physical addresses back to allocation roots. Once an
   // async MTE3 store has consumed the source SSA, a later allocation can reuse
   // the same physical range with a different alloc_tile root. Compare those
@@ -284,7 +291,7 @@ bool MemoryDependentAnalyzer::MemAlias(const BaseMemInfo *a,
 }
  
 bool MemoryDependentAnalyzer::isGMBufferOverlap(const BaseMemInfo *a,
-                                                const BaseMemInfo *b) {
+                                                const BaseMemInfo *b) const {
   if (a->baseAddresses.empty() || b->baseAddresses.empty()) {
     return true;
   }
@@ -300,15 +307,135 @@ bool MemoryDependentAnalyzer::isGMBufferOverlap(const BaseMemInfo *a,
     return isBufferAddressRangeOverlap(a, b);
   }
 
+  // Window offsets are relative to the root, so they are only comparable on a
+  // shared root. A proof here is the only way the interleaved column slices of
+  // one tensor are seen as independent: their flat ranges always overlap, and
+  // the allocateSize == 0 short circuit below would answer "overlap" anyway for
+  // a bare !pto.ptr kernel argument, whose byte size is never modelled.
+  if (isGMWindowProvenDisjoint(a, b)) {
+    return false;
+  }
+
   if (a->allocateSize == 0 || b->allocateSize == 0) {
     return true;
   }
 
   return isBufferAddressRangeOverlap(a, b);
 }
+
+// Inflates a window's contiguous run to whole access granules. Sound only when
+// the strides are granule multiples, which the caller checks: otherwise an
+// inflated run could reach into a neighbouring run of the same window and the
+// per-run reasoning below would no longer describe the access.
+static GMWindow inflateToGranule(const GMWindow &window) {
+  constexpr uint64_t granule = kGmAccessGranuleBytes;
+  GMWindow inflated = window;
+  uint64_t end = window.byteOffset + window.contigBytes;
+  inflated.byteOffset = window.byteOffset / granule * granule;
+  inflated.contigBytes =
+      (end + granule - 1) / granule * granule - inflated.byteOffset;
+  return inflated;
+}
+
+// (b) of isGMWindowProvenDisjoint: same lattice of run starts, and the two
+// runs never meet inside one period. This is the column-slice case, where the
+// bounding-interval check (a) can never succeed.
+// With identical outerDims the run starts are offA + L and offB + L for a
+// common lattice L. Let d0 = (offA - offB) mod S for the innermost stride S.
+// A byte of window A at intra-run position i (0 <= i < contigA) and a byte of
+// window B at position j (0 <= j < contigB) collide iff their run-start
+// difference plus i - j is a multiple of S, i.e. iff some t with
+// -(contigB - 1) <= t <= contigA - 1 satisfies d0 + t = 0 (mod S). The set of
+// achievable -t mod S is {0 .. contigB - 1} ∪ {S - contigA + 1 .. S - 1}, so
+// the windows are disjoint iff contigB <= d0 <= S - contigA. Requiring
+// contigA + contigB <= S keeps both sides of that interval from overlapping,
+// and it also follows from the caller's granule-alignment precondition that
+// the inflated runs stay inside one period.
+static bool gmWindowRunsNeverMeet(const GMWindow &windowA,
+                                  const GMWindow &windowB) {
+  if (windowA.outerDims != windowB.outerDims || windowA.outerDims.empty()) {
+    return false;
+  }
+  uint64_t innerStride = windowA.outerDims.back().first;
+  if (innerStride == 0) {
+    return false;
+  }
+  if (llvm::any_of(windowA.outerDims, [&](std::pair<uint64_t, uint64_t> dim) {
+        return dim.first % innerStride != 0;
+      })) {
+    return false;
+  }
+  if (windowA.contigBytes + windowB.contigBytes > innerStride) {
+    return false;
+  }
+
+  uint64_t startDelta = (windowA.byteOffset % innerStride + innerStride -
+                         windowB.byteOffset % innerStride) %
+                        innerStride;
+  // Disjoint iff B's first run starts at or after A's run end (d0 >= contigB)
+  // and A's first run starts at or after B's run end of the previous period
+  // (d0 <= innerStride - contigA). A narrower window nested inside a wider one
+  // fails one of the two, exactly as it must.
+  if (startDelta < windowB.contigBytes ||
+      startDelta > innerStride - windowA.contigBytes) {
+    return false;
+  }
+
+  if (isTraceEnabled()) {
+    llvm::errs() << "    -> GM windows disjoint: runs of "
+                 << windowA.contigBytes << "B and " << windowB.contigBytes
+                 << "B at start delta " << startDelta << " of stride "
+                 << innerStride << "\n";
+  }
+  return true;
+}
+
+bool MemoryDependentAnalyzer::isGMWindowProvenDisjoint(
+    const BaseMemInfo *a, const BaseMemInfo *b) const {
+  if (!a->gmWindow || !b->gmWindow) {
+    return false;
+  }
+  const GMWindow &rawA = *a->gmWindow;
+  const GMWindow &rawB = *b->gmWindow;
+  if (rawA.contigBytes == 0 || rawB.contigBytes == 0) {
+    return false;
+  }
+
+  // Every stride must be a granule multiple, both so inflating a run cannot
+  // spill into the next one and so the lattice of run starts stays
+  // granule-aligned.
+  auto stridesAreGranuleAligned = [](const GMWindow &window) {
+    return llvm::all_of(window.outerDims, [](std::pair<uint64_t, uint64_t> dim) {
+      return dim.first != 0 && dim.first % kGmAccessGranuleBytes == 0;
+    });
+  };
+  if (!stridesAreGranuleAligned(rawA) || !stridesAreGranuleAligned(rawB)) {
+    return false;
+  }
+
+  const GMWindow windowA = inflateToGranule(rawA);
+  const GMWindow windowB = inflateToGranule(rawB);
+
+  // (a) Bounding intervals do not meet. Covers the common row-block tiling,
+  // where two views take different row ranges of the same tensor.
+  uint64_t endA = windowA.byteOffset + windowA.spanBytes();
+  uint64_t endB = windowB.byteOffset + windowB.spanBytes();
+  if (endA <= windowB.byteOffset || endB <= windowA.byteOffset) {
+    if (isTraceEnabled()) {
+      llvm::errs() << "    -> GM windows disjoint: bounding ranges ["
+                   << windowA.byteOffset << ", " << endA << ") vs ["
+                   << windowB.byteOffset << ", " << endB << ")\n";
+    }
+    return true;
+  }
+
+  // (b) Same lattice of run starts, and the two runs never meet inside one
+  // period. This is the column-slice case, where (a) can never succeed.
+  return gmWindowRunsNeverMeet(windowA, windowB);
+}
  
 bool MemoryDependentAnalyzer::isBufferAddressRangeOverlap(
-    const BaseMemInfo *a, const BaseMemInfo *b) {
+    const BaseMemInfo *a, const BaseMemInfo *b) const {
   int aBaseAddressesSize = static_cast<int>(a->baseAddresses.size());
   int bBaseAddressesSize = static_cast<int>(b->baseAddresses.size());
   
@@ -324,7 +451,7 @@ bool MemoryDependentAnalyzer::isBufferAddressRangeOverlap(
  
 bool MemoryDependentAnalyzer::isBufferOverlap(const BaseMemInfo *a,
                                               const BaseMemInfo *b, int aIndex,
-                                              int bIndex) {
+                                              int bIndex) const {
   uint64_t aStart = a->baseAddresses[aIndex];
   uint64_t bStart = b->baseAddresses[bIndex];
   uint64_t aEnd = aStart + a->allocateSize;

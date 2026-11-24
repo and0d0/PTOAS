@@ -7,7 +7,29 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 #include "PTO/Support/CodeConstants.h"
+
+// The online-build forward declaration below uses std::vector/std::string
+// before ptoas.h (which would provide them) is conditionally included.
+#include <string>
+#include <vector>
+
+#ifdef PTOAS_ONLINE_BUILD
+// Online fallback build. `ptoas.h` transitively pulls the whole compiler-driver
+// closure (CompilerApi.h / VPTOLLVMEmitter.h / ObjectEmission.h -> the entire
+// PTO dialect + llvm/IR C++ header tree), which the shipped online header
+// closure deliberately does not carry. The only `ptoas.h` symbol this TU uses
+// is runPTOAS; declare it here and let the link resolve it from the shipped
+// libPTOASCompiler DSO (it exports runPTOAS / TileLibRuntime / SoftLibRuntime).
+namespace mlir {
+class MLIRContext;
+namespace pto {
+int runPTOAS(const std::vector<std::string> &args,
+             MLIRContext &borrowedContext);
+} // namespace pto
+} // namespace mlir
+#else
 #include "ptoas.h"
+#endif
 
 #include "PTO/Transforms/SoftLibService.h"
 #include "PTO/Transforms/TileLibService.h"
@@ -15,13 +37,11 @@
 
 #include "mlir/Bindings/Python/PybindAdaptors.h"
 #include "mlir/CAPI/IR.h"
+#include "mlir/IR/Diagnostics.h"
 
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 #include "llvm/Support/raw_ostream.h"
-
-#include <string>
-#include <vector>
 
 namespace py = pybind11;
 
@@ -180,22 +200,28 @@ void destroyRuntimeRegistration(PyObject *capsule) {
 }
 
 int runPTOASFromPython(const std::vector<std::string> &arguments) {
-  std::vector<std::string> storage = arguments;
-  std::vector<char *> argv;
-  argv.reserve(storage.size());
-  for (std::string &argument : storage) {
-    argv.push_back(argument.data());
-  }
-
   py::object contextOwner =
       py::module_::import("ptoas.mlir.ir").attr("Context")();
   MlirContext rawContext = py::cast<MlirContext>(contextOwner);
 
+  // This entry point owns the CLI context. Compiler passes must leave an
+  // embedding application's diagnostic handlers intact.
+  mlir::ScopedDiagnosticHandler diagnostics(
+      unwrap(rawContext), [](mlir::Diagnostic &diagnostic) {
+        const bool isWarning =
+            diagnostic.getSeverity() == mlir::DiagnosticSeverity::Warning;
+        if (!isWarning) {
+          return mlir::failure();
+        }
+        llvm::errs() << diagnostic.getLocation() << ": warning: "
+                     << diagnostic << '\n';
+        return mlir::success();
+      });
+
   int result;
   {
     py::gil_scoped_release release;
-    result = mlir::pto::runPTOAS(static_cast<int>(argv.size()), argv.data(),
-                                 *unwrap(rawContext));
+    result = mlir::pto::runPTOAS(arguments, *unwrap(rawContext));
   }
   return result;
 }

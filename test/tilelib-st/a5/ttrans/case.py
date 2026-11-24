@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -33,6 +34,20 @@ CASE_SHAPES = [
     ("f32_32x32", pto.f32, 32, 32),  # square b32
     ("i32_8x64", pto.i32, 8, 64),
     ("f16_64x16", pto.f16, 64, 16),  # tall b16 (16*2=32 aligned)
+    ("f16_16x32", pto.f16, 16, 32),  # wide b16: RowWise path (32*2=64 aligned)
+    ("i16_16x32", pto.i16, 16, 32),  # wide b16
+    ("i8_32x32", pto.i8, 32, 32),    # tall b8: ColWise PK_B16 path (32*1=32 aligned)
+    ("ui8_32x32", pto.ui8, 32, 32),  # tall b8
+    ("i8_32x64", pto.i8, 32, 64),    # wide b8: RowWise UNPK_B8 path (64*1=64 aligned)
+    ("ui8_32x64", pto.ui8, 32, 64),  # wide b8
+    # issue #1604 reopen: b8 tiles beyond 2**16 elements overflow the 16-bit
+    # vgather2/vscatter offset span; every b8 chunk now gathers/scatters
+    # through an addptr-rebased base pointer.
+    ("i8_2624x32", pto.i8, 2624, 32),    # tall b8 ubmax
+    ("ui8_2624x32", pto.ui8, 2624, 32),  # tall b8 ubmax
+    ("i8_32x2624", pto.i8, 32, 2624),    # wide b8 ubmax
+    ("ui8_32x2624", pto.ui8, 32, 2624),  # wide b8 ubmax
+    ("i8_2048x32", pto.i8, 2048, 32),    # boundary: exactly 2**16 elements
 ]
 
 
@@ -70,7 +85,8 @@ for _name, _dtype, _rows, _cols in CASE_SHAPES:
 # numpy dtype mapping for input generation + golden
 _PTO_TO_NP = {
     pto.f32: np.float32, pto.f16: np.float16,
-    pto.i32: np.int32,
+    pto.i32: np.int32, pto.i16: np.int16,
+    pto.i8: np.int8, pto.ui8: np.uint8,
 }
 
 

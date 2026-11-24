@@ -5,6 +5,11 @@
 The A3 (`dav-c220-vec`) backend reuses the same top-level VPTO emission pipeline
 as A5 (`dav-c310-vec`) but replaces the TileLang-template expansion path with a
 direct pointer-based lowering of binary tile operations to UB intrinsics.
+A2/A3 dispatch through the same official `VPTOCANN900LLVMEmitter` pipeline as
+A5. The legacy monolithic `VPTOLLVMEmitter.cpp` orchestrator and the
+Beta1-only lowering have been removed; Beta1 is no longer a supported output
+version. C220-specific UB patterns are registered by the shared
+`VPTOCANN900LLVMEmitterUbuf.cpp` component; there is no separate C220 emitter.
 
 ## Pipeline: Shared vs Divergent
 
@@ -138,15 +143,15 @@ Output:
 %ub_s0  = pto.tile_buf_addr %src0 : !pto.ptr<f32, ub>
 %ub_s1  = pto.tile_buf_addr %src1 : !pto.ptr<f32, ub>
 
-%row_dst = pto.addptr %ub_dst, %c0 : !pto.ptr<f32, ub>
-%row_s0  = pto.addptr %ub_s0, %c0 : !pto.ptr<f32, ub>
-%row_s1  = pto.addptr %ub_s1, %c0 : !pto.ptr<f32, ub>
+%row_dst = pto.addptr %ub_dst, %c0 : !pto.ptr<f32, ub>, index
+%row_s0  = pto.addptr %ub_s0, %c0 : !pto.ptr<f32, ub>, index
+%row_s1  = pto.addptr %ub_s1, %c0 : !pto.ptr<f32, ub>, index
 
 scf.for %i = %c0 to %c4 step %c1 {
   %off = arith.index_cast %i : index to i64
-  %rd = pto.addptr %row_dst, %off : !pto.ptr<f32, ub>
-  %r0 = pto.addptr %row_s0, %off : !pto.ptr<f32, ub>
-  %r1 = pto.addptr %row_s1, %off : !pto.ptr<f32, ub>
+  %rd = pto.addptr %row_dst, %off : !pto.ptr<f32, ub>, index
+  %r0 = pto.addptr %row_s0, %off : !pto.ptr<f32, ub>, index
+  %r1 = pto.addptr %row_s1, %off : !pto.ptr<f32, ub>, index
 
   pto.ub.set_mask_count
   pto.ub.vadd %rd, %r0, %r1, %c1, %c1, %c1, %c1, %c8, %c8, %c8
@@ -219,8 +224,8 @@ On A5 targets, `pto.tadd` passes through `LowerPTOToUBufOps` unchanged and is la
 ```mlir
 // VPTO IR (after ExpandTileOp + inlining):
 pto.vecscope {
-  %v0 = pto.vlds %src0_memref : memref<...>
-  %v1 = pto.vlds %src1_memref : memref<...>
+  %v0 = pto.vlds %src0_memref : memref<...>, index
+  %v1 = pto.vlds %src1_memref : memref<...>, index
   %v2 = pto.vadd %v0, %v1 : !pto.vreg<f32>
   pto.vsts %v2, %dst_memref : memref<...>
 }
@@ -287,4 +292,4 @@ Binary:           native AICORE binary
 | **Passes added** | `LowerPTOToUBufOps` (1 new pass) | `ExpandTileOp` + `InlineLibCall` + `FoldTileBufIntrinsics` |
 | **New ops (6)** | `pto.ub.{vadd,vsub,vmul,vdiv,set_mask_count,set_mask_norm}` | none |
 | **Intrinsics** | `llvm.hivm.{VADD,VSUB,VMUL,VDIV}.f32` | `llvm.hivm.{ADD,LOAD,STORE}` |
-| **Relevant files** | `LowerPTOToUBufOps.cpp`, `VPTOUbOps.td`, `VPTOUbOps.cpp`, `VPTOLLVMEmitter.cpp`, `VPTOExpandWrapperOps.cpp`, `ObjectEmission.cpp` | `ExpandTileOp.cpp`, `FoldTileBufIntrinsics.cpp`, `VPTOLLVMEmitter.cpp` |
+| **Relevant files** | `LowerPTOToUBufOps.cpp`, `VPTOUbOps.td`, `VPTOUbOps.cpp`, `VPTOCANN900LLVMEmitterPipeline.cpp`, `VPTOLLVMEmitterDispatcher.cpp`, `VPTOCANN900LLVMEmitterUbuf.cpp`, `VPTOExpandWrapperOps.cpp`, `ObjectEmission.cpp` | `ExpandTileOp.cpp`, `FoldTileBufIntrinsics.cpp`, `VPTOCANN900LLVMEmitterPipeline.cpp`, `VPTOLLVMEmitterDispatcher.cpp` |

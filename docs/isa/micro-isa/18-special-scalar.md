@@ -5,14 +5,15 @@
 
 Special Scalar operations provide the PTO-specific scalar facilities used
 around vector and tile code. They query the current kernel execution instance,
-construct and adjust typed pointers, access one scalar element through the
-scalar pipeline, and perform ordinary AICore GM accesses that bypass the local
-L1 data cache.
+construct and adjust typed pointers, access scalar or packed values through
+the scalar pipeline, and perform ordinary
+AICore GM accesses that bypass the local L1 data cache.
 
-This group does not include shared scalar arithmetic, which remains in
-[Arith](14-shared-arith.md), or SIMT workitem operations, which remain in
-[SIMT Ops](17-simt.md). An operation with a scalar operand but a vector result,
-such as `pto.vadds`, belongs to [Vec-Scalar Ops](08-vec-scalar-ops.md).
+Common scalar value operations are documented in
+[Generic Scalar Operations](14-generic-scalar-ops.md), while SIMT workitem operations
+remain in [SIMT Ops](17-simt.md). An operation with a scalar operand but a
+vector result, such as `pto.vadds`, belongs to
+[Vec-Scalar Ops](08-vec-scalar-ops.md).
 
 ---
 
@@ -20,9 +21,9 @@ such as `pto.vadds`, belongs to [Vec-Scalar Ops](08-vec-scalar-ops.md).
 
 | Family | Operations | Purpose |
 |--------|------------|---------|
-| Kernel execution queries | `pto.get_block_idx`, `pto.get_subblock_idx`, `pto.get_block_num`, `pto.get_subblock_num` | Query the block or subblock identity and launch extent visible to the current kernel instance |
+| Runtime queries | `pto.get_block_idx`, `pto.get_subblock_idx`, `pto.get_block_num`, `pto.get_subblock_num`, `pto.get_l2_cache_offset` | Query the execution identity, launch extent, or runtime L2 cache address offset visible to the current kernel instance |
 | Typed pointer/address operations | `pto.castptr`, `pto.addptr` | Construct, reinterpret, and offset `!pto.ptr` values |
-| Scalar-pipeline memory | `pto.load_scalar`, `pto.store_scalar` | Read or write one element through the general scalar-memory interface |
+| Unified typed memory | `pto.load`, `pto.store` | Read or write one scalar or contiguous packed value through the scalar-memory interface |
 | AICore scalar GM L1-bypass | `pto.ld_dev`, `pto.st_dev` | Read or write one integer GM element while bypassing the local L1 data cache |
 
 ---
@@ -36,8 +37,10 @@ Memory operations in this chapter use the typed pointer form
 - `space` identifies the memory space, such as `gm` or `ub`;
 - a pointer carries an address, element type, and memory-space interpretation,
   but no tensor shape or stride metadata;
-- every `%offset` operand in this chapter has type `index` and is measured in
-  elements of `T`, not bytes.
+- every `%offset` operand in this chapter is an element displacement measured in
+  elements of `T`, not bytes.  It accepts `index`, `i32` or `i64` (the shared
+  `PTO_ElementOffset` constraint): narrower widths (`i1`/`i8`/`i16`), signed and
+  unsigned integer types (`si32`, `ui32`) and widths above 64 bits are rejected.
 
 For a base address `base`, element type `T`, and element offset `offset`, the
 effective byte address is:
@@ -51,12 +54,11 @@ For example, offset `3` on `!pto.ptr<i32, gm>` selects the element beginning
 
 ---
 
-## Kernel Execution Query Operations
+## Runtime Query Operations
 
-These nullary, side-effect-free operations expose the block-level execution
-state visible to the current PTO kernel instance. They return `i64` values and
-do not perform memory access, synchronization, tiling, or work partitioning by
-themselves.
+These nullary, side-effect-free operations expose runtime state visible to the
+current PTO kernel instance. They return `i64` values and do not perform memory
+access, synchronization, tiling, or work partitioning by themselves.
 
 They are distinct from the `pto.get_tid_*`, `pto.get_block_idx_*`, and related
 SIMT workitem queries documented in [SIMT Ops](17-simt.md).
@@ -131,6 +133,27 @@ subblock = current_subblock_index
 - **Semantics:** The result is the subblock count used to interpret
   `pto.get_subblock_idx`.
 
+### `pto.get_l2_cache_offset`
+
+- **Purpose:** Return the runtime-configured offset used for L2 cache address
+  mapping.
+- **Syntax:**
+
+  ```mlir
+  %l2_offset = pto.get_l2_cache_offset
+  ```
+
+- **Operands and attributes:** None.
+- **Result:** One `i64` byte offset.
+- **Semantics:** The result is the address displacement, measured in bytes,
+  supplied to the current kernel instance for L2 cache address mapping. The op
+  only reports the configured value; it does not access memory or modify an
+  address.
+
+```text
+l2_cache_offset_bytes = runtime_l2_cache_address_offset
+```
+
 ### Block Partitioning Example
 
 The following example assigns a disjoint 2048-element GM window to each
@@ -143,9 +166,9 @@ block:
 %block_as_index = arith.index_cast %block : i64 to index
 %block_offset = arith.muli %block_as_index, %block_len : index
 %block_in = pto.addptr %gm_in, %block_offset
-  : !pto.ptr<f32, gm> -> !pto.ptr<f32, gm>
+  : !pto.ptr<f32, gm>, index -> !pto.ptr<f32, gm>
 %block_out = pto.addptr %gm_out, %block_offset
-  : !pto.ptr<f32, gm> -> !pto.ptr<f32, gm>
+  : !pto.ptr<f32, gm>, index -> !pto.ptr<f32, gm>
 ```
 
 The query operations report the launch state; the surrounding arithmetic and
@@ -204,10 +227,13 @@ Examples:
 
   ```mlir
   %result = pto.addptr %ptr, %offset
-    : !pto.ptr<T, space> -> !pto.ptr<T, space>
+    : !pto.ptr<T, space>, index -> !pto.ptr<T, space>
   ```
 
-- **Operands:** `%ptr` is `!pto.ptr<T, space>` and `%offset` is `index`.
+- **Operands:** `%ptr` is `!pto.ptr<T, space>` and `%offset` is `index` or
+  a 32/64-bit signless integer (`i32`, `i64`), declared in the type list right
+  after the pointer type, as in
+  `pto.addptr %ptr, %offset : !pto.ptr<T, space>, index -> !pto.ptr<T, space>`.
 - **Result:** A pointer with exactly the same element type and memory space as
   `%ptr`.
 - **Attributes:** None.
@@ -228,75 +254,82 @@ Example:
 ```mlir
 %c16 = arith.constant 16 : index
 %tail = pto.addptr %base, %c16
-  : !pto.ptr<f32, gm> -> !pto.ptr<f32, gm>
+  : !pto.ptr<f32, gm>, index -> !pto.ptr<f32, gm>
 ```
 
 `%tail` points 16 `f32` elements, or 64 bytes, after `%base`.
 
 ---
 
-## Scalar-Pipeline Memory Operations
+## Unified Typed Memory Operations
 
-`pto.load_scalar` and `pto.store_scalar` access one element through the general
-scalar-memory interface. The pointer element type and memory space determine
-the accessed value type and storage domain.
+`pto.load` and `pto.store` are the single typed-memory interface for scalar and
+contiguous packed values. They execute through the scalar pipeline but are
+execution-domain independent: they may appear in ordinary AICore code or in a
+SIMT body, and their presence does not by itself select SIMT execution.
 
-### `pto.load_scalar`
+### `pto.load`
 
-- **Purpose:** Read one scalar element from a typed PTO pointer.
+- **Purpose:** Read one scalar or contiguous packed value from a PTO pointer or
+  memref.
 - **Syntax:**
 
   ```mlir
-  %value = pto.load_scalar %ptr[%offset]
-    : !pto.ptr<T, space> -> T
+  %value = pto.load %ptr[%offset] : Ptr, index -> T
   ```
 
-- **Operands:** `%ptr` is `!pto.ptr<T, space>` and `%offset` is an element
-  offset of type `index`.
-- **Result:** One scalar value of type `T`.
-- **Attributes:** None.
-- **Semantics:** Read the element at `ptr + offset` through the scalar pipeline.
+- **Operands:** `%ptr` is `!pto.ptr<T, space>` or a memref with element type
+  `T`. `%offset` is an element displacement (`index`, `i32` or `i64`) measured in
+  elements of `T`, not
+  bytes.
+- **Result:** One value of type `T`, which must exactly match the pointer or
+  memref element type.
+- **Semantics:**
 
-```text
-value = memory[ptr.address + offset * sizeof(T)] as T
-```
+  ```text
+  effective_address = ptr.address + offset * sizeof(T)
+  value = memory[effective_address] as T
+  ```
 
-- **Constraints:** The result type must exactly match the pointer element type.
-  This op returns a scalar, not a `!pto.vreg` value, and has no vector load
-  distribution or mask clauses.
+- **Constraints:** The op has no cache-control clauses. For SIMT GM access that
+  requires `l1cache(...)` or `l2cache(...)`, use `pto.ldg`.
 
-### `pto.store_scalar`
+### `pto.store`
 
-- **Purpose:** Write one scalar element through a typed PTO pointer.
+- **Purpose:** Write one scalar or contiguous packed value through a PTO
+  pointer or memref.
 - **Syntax:**
 
   ```mlir
-  pto.store_scalar %value, %ptr[%offset]
-    : !pto.ptr<T, space>, T
+  pto.store %value, %ptr[%offset] : Ptr, index, T
   ```
 
-- **Operands:** `%value` has type `T`, `%ptr` is `!pto.ptr<T, space>`, and
-  `%offset` is an element offset of type `index`.
+- **Operands:** `%value` has type `T`; `%ptr` is `!pto.ptr<T, space>` or a
+  memref with element type `T`; `%offset` is an element displacement (`index`,
+  `i32` or `i64`) measured
+  in elements of `T`.
 - **Results:** None.
-- **Attributes:** None.
-- **Semantics:** Write `%value` to the element at `ptr + offset` through the
-  scalar pipeline.
+- **Semantics:**
 
-```text
-memory[ptr.address + offset * sizeof(T)] = value
-```
+  ```text
+  effective_address = ptr.address + offset * sizeof(T)
+  memory[effective_address] = value as T
+  ```
 
-- **Constraints:** `%value` must exactly match the pointer element type. This
-  op writes one scalar element and has no vector store distribution or mask
-  clauses.
+- **Constraints:** The value type must exactly match the pointer or memref
+  element type. The op has no cache-control clauses. For SIMT GM access that
+  requires `l1cache(...)` or `l2cache(...)`, use `pto.stg`.
 
-Example round trip in UB:
+Example:
 
 ```mlir
-%c7 = arith.constant 7 : index
-%value = pto.load_scalar %ub[%c7] : !pto.ptr<i32, ub> -> i32
-pto.store_scalar %value, %ub_out[%c7] : !pto.ptr<i32, ub>, i32
+%c4 = arith.constant 4 : index
+%value = pto.load %src[%c4] : !pto.ptr<f32, ub>, index -> f32
+pto.store %value, %dst[%c4] : !pto.ptr<f32, ub>, index, f32
 ```
+
+Both accesses select element 4, which is 16 bytes after the base address of an
+`f32` pointer.
 
 ---
 
@@ -311,13 +344,14 @@ execution scope and cache-control contract are different.
 
 - the pointer must be `!pto.ptr<T, gm>`;
 - `T` must be one of `i8`, `i16`, `i32`, or `i64`;
-- `%offset` has type `index` and is measured in elements of `T`;
+- `%offset` is an element displacement (`index`, `i32` or `i64`) measured in
+  elements of `T`;
 - load result and store value types must exactly match `T`;
 - no `l1cache` or `l2cache` policy attribute is accepted;
 - the op must appear in an ordinary AICore entry function, outside both a
   `pto.simt_entry` function and `pto.section.simt`;
-- the supported target profile is A5 with CANN output version 9.0.0 official
-  or newer.
+- `pto.ld_dev` is supported on A2/A3 and on A5 with CANN output version 9.0.0
+  official or newer. `pto.st_dev` is A5-only with that same CANN profile.
 
 Both operations are non-atomic. They do not imply synchronization, memory
 ordering, cache invalidation, cache writeback, or an L2 cache policy. Programs
@@ -332,11 +366,11 @@ local L1 data cache is target-defined.
 - **Syntax:**
 
   ```mlir
-  %value = pto.ld_dev %ptr[%offset] : !pto.ptr<T, gm> -> T
+  %value = pto.ld_dev %ptr[%offset] : !pto.ptr<T, gm>, index -> T
   ```
 
 - **Operands:** `%ptr` is `!pto.ptr<T, gm>` and `%offset` is an element offset
-  of type `index`.
+  of type `index`, `i32` or `i64`.
 - **Result:** One value of type `T` containing exactly the bytes read from GM.
 - **Attributes:** None.
 - **Semantics:** Read `sizeof(T)` bytes from the selected GM element. No sign
@@ -355,11 +389,11 @@ value = GM[address : address + sizeof(T)] as T
 - **Syntax:**
 
   ```mlir
-  pto.st_dev %value, %ptr[%offset] : !pto.ptr<T, gm>, T
+  pto.st_dev %value, %ptr[%offset] : !pto.ptr<T, gm>, index, T
   ```
 
 - **Operands:** `%value` has type `T`, `%ptr` is `!pto.ptr<T, gm>`, and
-  `%offset` is an element offset of type `index`.
+  `%offset` is an element offset of type `index`, `i32` or `i64`.
 - **Results:** None.
 - **Attributes:** None.
 - **Semantics:** Write exactly `sizeof(T)` bytes from `%value` to the selected
@@ -374,8 +408,8 @@ GM[address : address + sizeof(T)] = value as bytes
 
 ```mlir
 %c3 = arith.constant 3 : index
-%value = pto.ld_dev %src[%c3] : !pto.ptr<i32, gm> -> i32
-pto.st_dev %value, %dst[%c3] : !pto.ptr<i32, gm>, i32
+%value = pto.ld_dev %src[%c3] : !pto.ptr<i32, gm>, index -> i32
+pto.st_dev %value, %dst[%c3] : !pto.ptr<i32, gm>, index, i32
 ```
 
 Both operations access element 3, which begins 12 bytes after the corresponding
@@ -388,6 +422,6 @@ not establish ordering with other memory operations.
 
 | Requirement | Operation family |
 |-------------|------------------|
-| General typed scalar access through the scalar-memory interface | `pto.load_scalar`, `pto.store_scalar` |
+| General scalar or contiguous packed access | `pto.load`, `pto.store` |
 | Ordinary AICore integer GM access that bypasses local L1 | `pto.ld_dev`, `pto.st_dev` |
-| SIMT workitem scalar memory access | See [SIMT Ops](17-simt.md) |
+| SIMT GM access with cache controls | `pto.ldg`, `pto.stg`; see [SIMT Ops](17-simt.md) |

@@ -19,24 +19,21 @@ module {
     %c128 = arith.constant 128 : index
     %mask = pto.vmi.create_mask %c128 : index -> !pto.vmi.mask<128xpred>
     %x = pto.vmi.vload %src[%off], %stride24 {group = 8}
-        : !pto.ptr<f32, ub> -> !pto.vmi.vreg<128xf32>
+        : !pto.ptr<f32, ub>, index -> !pto.vmi.vreg<128xf32>
     %sum = pto.vmi.vcadd %x, %mask
         {group = 8, reassoc}
         : !pto.vmi.vreg<128xf32>, !pto.vmi.mask<128xpred>
         -> !pto.vmi.vreg<8xf32>
     pto.vmi.vstore %sum, %sum_dst[%off], %c1 {group = 8}
-        : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>
+        : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>, index
     %h = pto.vmi.vcvt %x {saturate = "SAT"}
         : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xf16>
     pto.vmi.vstore %h, %dense_dst[%off]
-        : !pto.vmi.vreg<128xf16>, !pto.ptr<f16, ub>
+        : !pto.vmi.vreg<128xf16>, !pto.ptr<f16, ub>, index
     return
   }
 }
 
-// CHECK: VMI{{-}}UNSUPPORTED{{:}} pto.vmi.truncf operand #0 has type
-// CHECK-SAME: #pto.vmi.layout<block_deinterleaved = 2>
-// CHECK-SAME: requires
-// CHECK-SAME: #pto.vmi.layout<contiguous>
-// CHECK-SAME: pto.vmi.ensure_layout cannot materialize this conversion
-// CHECK: source/result layouts do not match a supported ensure_layout table row
+// The support contract rejects the graph before lowering: its block layout
+// cannot be converted to the dense narrowing consumer's required layout.
+// CHECK: error: VMI-LAYOUT-CONTRACT: no complete legal VMI layout plan exists for this component

@@ -52,7 +52,7 @@ struct GroupSpan {
 };
 
 static bool isTileType(Type type) {
-  return isa<pto::TileBufType>(type);
+  return isa<pto::TileBufType, pto::ConvTileBufType>(type);
 }
 
 static bool isDpsInitOperand(OpOperand &operand) {
@@ -177,7 +177,7 @@ collectGroupSpansInBlock(Block &block, SmallVectorImpl<GroupSpan> &spans) {
 }
 
 static bool isSpanLocalLastUseCandidate(Value value, Operation *currentOp,
-                                        Block *block) {
+                                        const Block *block) {
   if (!value) {
     return false;
   }
@@ -197,7 +197,8 @@ static bool isSpanLocalLastUseCandidate(Value value, Operation *currentOp,
   return true;
 }
 
-static bool hasLaterUseAfterSpan(Value value, Operation *spanEnd, Block *block) {
+static bool hasLaterUseAfterSpan(Value value, Operation *spanEnd,
+                                 const Block *block) {
   for (OpOperand &use : value.getUses()) {
     Operation *user = use.getOwner();
     if (user->getBlock() != block) {

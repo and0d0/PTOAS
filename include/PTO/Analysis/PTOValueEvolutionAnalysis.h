@@ -132,7 +132,7 @@ bool equalPTOLinearExprs(const PTOLinearExpr &lhs,
                          const PTOLinearExpr &rhs);
 bool dividePTOLinearExprExact(PTOLinearExpr &expr, int64_t divisor);
 bool isZeroPTOLinearExpr(const PTOLinearExpr &expr);
-PTOTypedExprRef buildPTOTypedExpr(const PTOLinearExpr &expr, Type type = {});
+PTOTypedExprRef buildPTOTypedExpr(const PTOLinearExpr &linear, Type type = {});
 void collectPTOExprLeaves(const PTOTypedExprRef &expr,
                           SmallVectorImpl<Value> &leaves);
 bool getPTOExprType(const PTOTypedExprRef &expr, Type &type);
@@ -187,10 +187,22 @@ public:
   /// must prove that the result fits. Casts are expanded only when their
   /// proven source range fits the result type. Unproven source operations
   /// remain opaque SSA atoms.
-  PTOAnalysisResult<PTOTypedExprRef>
-  getPointExpression(const PTOTypedExprRef &expression);
+  const PTOAnalysisResult<PTOTypedExprRef>
+  getPointExpression(const PTOTypedExprRef &expression) const;
 
+  /// Point algebra with source-backed casts retained as opaque boundaries.
+  /// Used when a consumer must retain its existing cast-proof domain.
+  PTOTypedExprRef getConservativePointExpression(const PTOTypedExprRef& expression) const;
+
+  /// Exact typed loop evolution range. Unsupported evolutions stay unknown;
+  /// this does not use contextual guards or arbitrary InferIntRangeInterface
+  /// leaves. Use getRangeAt for conservative bounds at an execution point.
   PTOAnalysisResult<PTOFiniteRange> getRange(Value value, scf::ForOp loop);
+  /// Bounds valid at this program point, including dominating branch guards.
+  /// Unlike getEvolution, this does not claim an exact trip count or stride.
+  PTOAnalysisResult<PTOFiniteRange> getRangeAt(Value value, Operation *context);
+  PTOAnalysisResult<bool> preservesValueAt(Operation *castOp, Operation *context);
+
   PTOAnalysisResult<bool> preservesValue(Operation *castOp,
                                          scf::ForOp loop);
   PTOAnalysisResult<bool> doesNotWrap(Value value, scf::ForOp loop);
@@ -200,13 +212,40 @@ private:
 
   PTOAnalysisResult<PTOLoopEvolution>
   getEvolutionImpl(Value value, scf::ForOp loop, Interpretation interpretation);
+  // getEvolutionImpl() helpers.
+  PTOAnalysisResult<PTOLoopEvolution>
+  getInvariantEvolution(Value value, Interpretation interpretation);
+  // Fills initial/step/negate for affine values; returns a result to forward
+  // directly when the value dispatches to a synthetic/dynamic sub-analysis.
+  std::optional<PTOAnalysisResult<PTOLoopEvolution>>
+  resolveAffineTerms(Value value, scf::ForOp loop, Interpretation interpretation,
+                     uint64_t tripCount, Value &initialValue, Value &stepValue,
+                     bool &negateStep);
+  PTOAnalysisResult<PTOLoopEvolution>
+  buildAffineEvolution(Value value, Value initialValue, Value stepValue,
+                       bool negateStep, uint64_t tripCount,
+                       Interpretation interpretation);
   PTOAnalysisResult<PTOLoopEvolution>
   getSyntheticEvolutionImpl(const PTOTypedExprRef &expression,
                             scf::ForOp loop,
                             Interpretation interpretation,
                             bool sourceProvesNoWrap = false);
+  // getSyntheticEvolutionImpl() per-kind helpers.
+  PTOAnalysisResult<PTOLoopEvolution>
+  getSyntheticCastEvolution(const PTOTypedExprRef &expression, scf::ForOp loop,
+                            unsigned width);
+  PTOAnalysisResult<PTOLoopEvolution>
+  getSyntheticAddSubEvolution(const PTOTypedExprRef &expression,
+                              bool sourceProvesNoWrap, bool isUnsigned,
+                              const PTOAnalysisResult<PTOLoopEvolution> &lhs,
+                              const PTOAnalysisResult<PTOLoopEvolution> &rhs) const;
+  PTOAnalysisResult<PTOLoopEvolution>
+  getSyntheticMulEvolution(const PTOTypedExprRef &expression,
+                           bool sourceProvesNoWrap, bool isUnsigned,
+                           const PTOAnalysisResult<PTOLoopEvolution> &lhs,
+                           const PTOAnalysisResult<PTOLoopEvolution> &rhs) const;
   PTOAnalysisResult<PTOTypedExprRef>
-  getPointExpressionImpl(const PTOTypedExprRef &expression);
+  getPointExpressionImpl(const PTOTypedExprRef &expression) const;
 
   func::FuncOp func;
   DenseMap<Value, PTOTypedExprRef> expressionCache;

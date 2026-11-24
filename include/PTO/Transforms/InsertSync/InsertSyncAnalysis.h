@@ -16,8 +16,11 @@
  
 #include "PTO/Transforms/InsertSync/SyncCommon.h"
 #include "PTO/Transforms/InsertSync/MemoryDependentAnalyzer.h"
+#include "PTO/Transforms/InsertSync/UFTokenModel.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "llvm/ADT/DenseSet.h"
 #include <array>
+#include <memory>
  
 namespace mlir {
 namespace pto {
@@ -29,6 +32,12 @@ struct SyncRecord {
   // appears transiently in intermediate states.
   std::array<bool, static_cast<unsigned>(PipelineType::PIPE_LAST) + 1U>
       alreadySync{false};
+
+  // Pipes whose ordering was provided by a unit-flag handshake rather than an
+  // inserted event. Kept apart from `alreadySync` so event-id reuse never
+  // mistakes a hardware handshake for an allocated event.
+  std::array<bool, static_cast<unsigned>(PipelineType::PIPE_LAST) + 1U>
+      alreadySyncByUF{false};
 
   // Record the pairing status of set/wait within a syncIndex.
   llvm::DenseMap<int, bool> syncFinder;
@@ -62,7 +71,13 @@ private:
   SyncOperations &syncOperations_;
   func::FuncOp func_;
   SyncAnalysisMode syncAnalysisMode_;
-  
+  std::unique_ptr<UFTokenModel> ufTokenModel_;
+  // Compounds whose ACC hand-off is proven before dependency traversal. A same-element
+  // back-edge pair has no event left to read from pipeAfter/pipeBefore, so this
+  // set restores the transitive suppression that event insertion used to give.
+  llvm::DenseSet<unsigned> ufOrderedCompounds_;
+
+  void InitializeUFOrderedCompounds();
   // 全局同步索引计数
   unsigned syncIndex_{0};
  
@@ -98,8 +113,8 @@ private:
 
   /// 合并两个分支的同步状态 (Intersection)
   void MergeAlreadySync(SyncRecordList &syncRecordList,
-                        const SyncRecordList &syncRecordIfList,
-                        const SyncRecordList &syncRecordElseList);
+                              const SyncRecordList &syncRecordIfList,
+                              const SyncRecordList &syncRecordElseList) const;
  
   // --- Dependency & Sync Insertion ---
 
@@ -125,20 +140,40 @@ private:
   bool IsMemInfoHasDependency(CompoundInstanceElement *nowCompound,
                               CompoundInstanceElement *frontCompound,
                               DepBaseMemInfoPairVec &depBaseMemInfosVec);
+
+  /// Return true only when PTO unit-flag semantics cover this exact memory
+  /// dependency. Unknown aliases, branches, and loop-carried dependencies are
+  /// intentionally conservative.
+  bool IsUFCoveredDependency(
+      const CompoundInstanceElement *nowCompound,
+      const CompoundInstanceElement *frontCompound,
+      const std::pair<const BaseMemInfo *, const BaseMemInfo *> &dependency,
+      const std::optional<unsigned> &forEndIndex) const;
  
   /// 实际创建 SyncOperation 对象并插入列表
-  void InsertSyncOperation(CompoundInstanceElement *nowCompound,
-                           CompoundInstanceElement *frontCompound,
+  void InsertSyncOperation(const CompoundInstanceElement *nowCompound,
+                           const CompoundInstanceElement *frontCompound,
                            DepBaseMemInfoPairVec &depBaseMemInfosVec,
                            const std::optional<unsigned> &forEndIndex);
+  
+  /// Insert a PIPE_BARRIER sync for same-pipe dependencies
+  void InsertPipeBarrierSync(const CompoundInstanceElement *nowCompound,
+                             const CompoundInstanceElement *frontCompound,
+                             const std::optional<unsigned> &forEndIndex);
+  
+  /// Insert a SET_EVENT / WAIT_EVENT sync pair for cross-pipe dependencies
+  void InsertCrossPipeEventSync(const CompoundInstanceElement *nowCompound,
+                                const CompoundInstanceElement *frontCompound,
+                                DepBaseMemInfoPairVec &depBaseMemInfosVec,
+                                const std::optional<unsigned> &forEndIndex);
  
   // --- Utility Methods ---
  
   /// 检查是否已经同步过 (Transitive Dependency Elimination)
-  bool isAlreadySync(CompoundInstanceElement *nowCompound,
-                     CompoundInstanceElement *frontCompound,
-                     SyncRecordList &syncRecordList, 
-                     unsigned recordListIndex);
+  bool isAlreadySync(const CompoundInstanceElement *nowCompound,
+                           const CompoundInstanceElement *frontCompound,
+                           SyncRecordList &syncRecordList,
+                           unsigned recordListIndex) const;
 
   bool CanPrunePipeVBarrier(
       const CompoundInstanceElement *nowCompound,
@@ -146,16 +181,39 @@ private:
       const DepBaseMemInfoPairVec &depBaseMemInfosVec,
       const std::optional<unsigned> &forEndIndex) const;
 
+  /// Drop dependency pairs whose ACC portion is already ordered by a UF phase;
+  /// any remaining pair keeps the group's event synchronization.
+  void DropUFOrderedSelfDeps(const CompoundInstanceElement *compound,
+                             DepBaseMemInfoPairVec &depVec) const;
+
+  void DropUFCoveredDeps(CompoundInstanceElement *nowCompound,
+                         CompoundInstanceElement *frontCompound,
+                         DepBaseMemInfoPairVec &depVec,
+                         const std::optional<unsigned> &forEndIndex) const;
+
+  /// Record a fully UF-covered pair in the traversal's sync record. The mark is
+  /// tagged as unit-flag coverage so event-id reuse never counts it as an event.
+  void MarkUFCovered(const CompoundInstanceElement *nowCompound,
+                     const CompoundInstanceElement *frontCompound,
+                     SyncRecordList &syncRecordList) const;
+
+  /// True when any request event id (1..N-1) already has a recorded sync.
+  bool IsAlreadySyncedForAnyEventId(
+      CompoundInstanceElement *nowCompound,
+      CompoundInstanceElement *frontCompound,
+      const DepBaseMemInfoPairVec &depVec,
+      SyncRecordList &syncRecordList) const;
+
   /// 更新 SyncRecord (当插入新同步后)
   void UpdateAlreadySync(const SyncOps &syncVector,
                          SyncRecordList &syncRecordList,
-                         const PipelineType nowPipeValue);
+                         const PipelineType nowPipeValue) const;
                             
-  void UpdateSyncRecordInfo(CompoundInstanceElement *frontCompound,
-                            SyncRecordList &syncRecordList);
+  void UpdateSyncRecordInfo(const CompoundInstanceElement *frontCompound,
+                            SyncRecordList &syncRecordList) const;
  
   void UpdateSyncRecord(const SyncOperation *sync, SyncRecord &syncRecord,
-                        PipelineType nowPipeValue);
+                              PipelineType nowPipeValue) const;
                         
   void InsertLastPipeAll();
   
@@ -166,10 +224,10 @@ private:
                             bool isBackwardDep) const;
  
   /// 获取依赖对涉及的 Event ID 数量 (用于 Multi-Buffer 分析)
-  int GetEventIdNum(const DepBaseMemInfoPairVec &depBaseMemInfosVec);
+  int GetEventIdNum(const DepBaseMemInfoPairVec &depBaseMemInfosVec) const;
  
   /// 辅助函数：获取所有涉及的 Buffer (用于 LCA 计算，虽然现在简化了，保留接口)
-  SmallVector<Value> GetMemInfoBuffers(const DepBaseMemInfoPairVec &depBaseMemInfosVec);
+  SmallVector<Value> GetMemInfoBuffers(const DepBaseMemInfoPairVec &depBaseMemInfosVec) const;
  
   /// 判断两个操作是否构成GM的读写冲突
   bool IsGMHazard(const CompoundInstanceElement *nowCompound,

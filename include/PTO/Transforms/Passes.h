@@ -16,6 +16,9 @@
 #ifndef MLIR_DIALECT_PTO_TRANSFORMS_PASSES_H
 #define MLIR_DIALECT_PTO_TRANSFORMS_PASSES_H
 
+#include <string>
+#include <vector>
+
 #include "PTO/IR/PTO.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LLVM.h"
@@ -24,6 +27,7 @@
 #include "mlir/Pass/Pass.h"
 #include "PTO/IR/PTODialect.h"
 #include "PTO/Transforms/TileLibService.h"
+#include "PTO/Transforms/VPTOBridgeWhitelist.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -45,10 +49,20 @@ std::unique_ptr<Pass> createPTOValidatePhysicalSectionBoundariesPass();
 std::unique_ptr<Pass> createPTOMaterializeTileOpSectionsPass();
 std::unique_ptr<Pass> createVPTOSplitCVModulePass();
 std::unique_ptr<Pass> createVPTONormalizeContainerPass();
+std::unique_ptr<Pass> createVPTOPack4StoreMaskNormalizePass();
+std::unique_ptr<Pass> createVPTOResolveBridgeInstancesPass();
+std::unique_ptr<Pass> createVPTOBridgeCallLoweringPass();
+std::unique_ptr<Pass> createPTOLowerBridgeOpsPass(llvm::StringRef policyPath = "");
+std::unique_ptr<Pass>
+createVPTOPrintDTDataABIPass(llvm::StringRef mode = "implicit");
+std::unique_ptr<Pass> createVPTOBridgeWrapperGenPass();
+/// Pipe family typed lowering, used by the bridge routing pass.
+LogicalResult lowerPipeFamilyOps(mlir::func::FuncOp func,
+                                 const BridgeRoutePolicy &policy);
 std::unique_ptr<Pass> createPTOVerifyTFreePass();
 
 // Creates a pass for ...
-std::unique_ptr<Pass> createPTOInsertSyncPass();
+std::unique_ptr<Pass> createPTOInsertSyncPass(bool deduplicateSlotEvents = true);
 std::unique_ptr<Pass> createPTOInjectBarrierAllSyncPass();
 std::unique_ptr<Pass>
 createPTOBufidSyncPass(const PTOBufidSyncOptions &options = {});
@@ -59,22 +73,25 @@ std::unique_ptr<Pass> createEmitPTOManualPass();
 std::unique_ptr<Pass> createEmitPTOManualPass(PTOArch arch);
 
 
-/// Create a pass to convert ops from other dialects to PTO Ops.
-std::unique_ptr<Pass> createConvertToPTOOpPass();
+std::unique_ptr<Pass> createPTOLowerGenericOpsPass();
+
+// Operation-family support for PTODSL's early EmitC diagnostic. This is not
+// complete operand/type legality checking; conversion still validates those.
+std::vector<std::string> getPTOGenericLoweringOperationNames(MLIRContext *context);
+std::vector<std::string> getEmitCSupportedOperationNames(MLIRContext *context);
 
 /// Create a pass to infer, propagate, and add memory scope information to
 /// PTO Ops.
 std::unique_ptr<Pass> createInferPTOMemScopePass();
 
 std::unique_ptr<Pass>
-createPlanMemoryPass(const PlanMemoryOptions &options = {});
-std::unique_ptr<Pass>
-createPlanMemoryModernPass(const PlanMemoryOptions &options);
+createPlanMemoryModernPass(const PlanMemoryOptions &options = {});
 std::unique_ptr<Pass> createPTORemoveRedundantBarrierPass();
-std::unique_ptr<Pass> createPTOValidateIntToPtrUsesPass();
 std::unique_ptr<Pass> createPTORematerializeFixpipeVectorQuantPass();
 std::unique_ptr<Pass>
-createPTOMaterializeImplicitTmpPass(bool requireExplicitTmp = false);
+createPTOMaterializeImplicitTmpPass(bool requireExplicitTmp = false,
+                                    bool materializeA5IndexPlaceholder = true);
+std::unique_ptr<Pass> createPTOMaterializeTileIfResultsPass();
 std::unique_ptr<Pass> createPTOResolveBufferSelectPass();
 std::unique_ptr<Pass> createInferPTOLayoutPass();
 std::unique_ptr<Pass> createPTOA5NormalizeTMovPass();
@@ -88,8 +105,6 @@ std::unique_ptr<Pass> createOpSchedulingPass();
 std::unique_ptr<Pass> createPTOMarkLastUsePass();
 std::unique_ptr<Pass> createPTOFusionRegionGenPass();
 
-LogicalResult validateIntToPtrUses(func::FuncOp func);
-
 std::unique_ptr<Pass> createPTOUnrollLoopsPass();
 /// Backward-compatible alias of createPTOUnrollLoopsPass().
 std::unique_ptr<Pass> createPTOUnrollSIMTForPass();
@@ -100,6 +115,8 @@ std::unique_ptr<Pass> createPTOAnalyzeSIMTPersistentFragmentPass();
 std::unique_ptr<Pass> createPTOMaterializeSIMTPersistentFragmentPass();
 std::unique_ptr<Pass> createPTOOutlineSIMTSectionsPass();
 std::unique_ptr<Pass> createPTOInferVPTOVecScopePass();
+std::unique_ptr<Pass> createPTOInsertVecScopeMemBarPass();
+std::unique_ptr<Pass> createPTOInsertVecScopeMemBarAllPass();
 std::unique_ptr<Pass> createVPTOExpandWrapperOpsPass();
 std::unique_ptr<Pass> createVPTOSoftPostUpdatePass();
 std::unique_ptr<Pass> createVPTOGuardedLICMPass();
@@ -115,6 +132,7 @@ std::unique_ptr<Pass> createPTOFlattenFusionRegionPass();
 std::unique_ptr<Pass> createVPTOPtrNormalizePass();
 std::unique_ptr<Pass> createVPTOPtrCastCleanupPass();
 std::unique_ptr<Pass> createVPTOCombineReductionsPass();
+std::unique_ptr<Pass> createVPTOOptimizeCtrlStatePass();
 std::unique_ptr<Pass> createVPTOOptimizeVcvtPass();
 std::unique_ptr<Pass> createVPTOMaskSimplifyPass();
 std::unique_ptr<Pass>
@@ -129,13 +147,18 @@ LogicalResult validateVMIProducerBoundaryIR(ModuleOp module,
                                             llvm::raw_ostream *diagOS = nullptr);
 LogicalResult validateVMILayoutAssignedIR(ModuleOp module,
                                           llvm::raw_ostream *diagOS = nullptr,
-                                          bool verifyHelperSupport = true);
+                                          bool verifyHelperSupports = true);
 std::unique_ptr<Pass> createPTOValidateVMIIRPass();
 std::unique_ptr<Pass> createPTOValidateVMILayoutIRPass();
+std::unique_ptr<Pass> createVMISetFastmathStatePass();
 std::unique_ptr<Pass> createVMIPreAssignmentCombinePass();
+std::unique_ptr<Pass> createVMIExpandImplicitEnsureLayoutsPass();
 std::unique_ptr<Pass> createVMIMaskGranularityAssignmentPass();
 std::unique_ptr<Pass> createVMILayoutRematerializeWeakProducersPass();
 std::unique_ptr<Pass> createVMILayoutAssignmentPass();
+struct VMILayoutPlannerOptions;
+std::unique_ptr<Pass>
+createVMILayoutAssignmentPass(const VMILayoutPlannerOptions &options);
 std::unique_ptr<Pass> createVMILayoutFoldPass();
 std::unique_ptr<Pass> createVMILayoutRematerializePass();
 std::unique_ptr<Pass> createVMILayoutSinkMaterializationPass();
@@ -143,6 +166,8 @@ std::unique_ptr<Pass> createVMILegalizeArithSelectPass();
 std::unique_ptr<Pass> createVMILowerUnifiedToLegacyPass();
 std::unique_ptr<Pass> createVMINormalizeSignlessIntToUnsignedPass();
 std::unique_ptr<Pass> createVMIToVPTOPass();
+std::unique_ptr<Pass>
+createVMIToVPTOPass(const VMIToVPTOOptions &options);
 std::unique_ptr<Pass> createVPTOStatefulStreamFusionPass();
 std::unique_ptr<Pass> createPTOExpandSoftLibPass();
 std::unique_ptr<Pass> createInsertTemplateAttributesPass();
@@ -150,7 +175,9 @@ std::unique_ptr<Pass> createExpandTileOpPass();
 std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass();
 std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass(llvm::StringRef foldMode);
 std::unique_ptr<Pass> createPTOCanonicalizeIRPass();
+std::unique_ptr<Pass> createPTOArithRangeOptimizePass();
 std::unique_ptr<Pass> createLowerPTOToUBufOpsPass();
+std::unique_ptr<Pass> createLowerPTOTensorDumpPass();
 std::unique_ptr<Pass>
 createPTOInlineLibCallPass(const PTOInlineLibCallOptions &options = {});
 std::unique_ptr<Pass> createPTOInlineBackendHelpersPass(
@@ -159,6 +186,42 @@ std::unique_ptr<Pass> createPTOInlineBackendHelpersPass(
 //===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//
+
+/// G3: device-id legality. `bufidCapacity` is K, the number of buffer ids the arch
+/// exposes: 0 on A3, 32 on A5.
+/// `injectFault` names a synthetic fault to append to the gate's own record list, so
+/// that the gate can be shown to catch a class the IR cannot express -- an event id
+/// outside [0, 8) is unrepresentable, because `pto.set_flag` spells its id as an
+/// EVENT_ID0..EVENT_ID7 enum. Empty in normal use.
+std::unique_ptr<Pass> createPTOCheckSyncIdsPass(unsigned bufidCapacity = 0, llvm::StringRef injectFault = "");
+
+/// G2: assert no two overlapping intervals share a sync id.
+std::unique_ptr<Pass> createPTOCheckSyncInterferencePass(llvm::StringRef injectFault = "");
+
+/// G1-self: assert every dependence the front end reports is ordered by emitted
+/// sync. `maxViolations` caps the per-function detail lines; 0 prints all.
+std::unique_ptr<Pass> createPTOCheckSyncSelfCoveragePass(unsigned maxViolations = 8);
+
+/// G1: dump the happens-before edges this run's emitted sync induces, as the
+/// reference profile a later run is compared against.
+std::unique_ptr<Pass> createPTODumpSyncCoveragePass();
+
+/// G1: assert this run establishes every ordering recorded in `referenceFile`.
+std::unique_ptr<Pass> createPTOCheckSyncCoveragePass(llvm::StringRef referenceFile);
+
+/// G4: dump this run's kernel-body sync-op counts, one line per function.
+std::unique_ptr<Pass> createPTODumpSyncCountsPass();
+
+/// G4: assert this run's counts do not regress against `referenceFile`.
+std::unique_ptr<Pass> createPTOCheckSyncCountFloorPass(llvm::StringRef referenceFile);
+
+std::unique_ptr<Pass> createPTODumpSyncExtractPass();
+
+/// The unified allocator: event ids, buffer ids and barriers as three resource
+/// classes over one interval-colouring problem. `bufidCapacity` is K, the number of
+/// buffer ids the arch exposes -- 0 on A3, 32 on A5 -- and it is the only arch input.
+std::unique_ptr<Pass> createPTOUnifiedSyncPass(unsigned bufidCapacity = 0, bool debugEnabled = false,
+                                               llvm::StringRef forceMechanism = "", bool checkAddrReuse = false);
 
 #undef GEN_PASS_DECL
 #define GEN_PASS_REGISTRATION

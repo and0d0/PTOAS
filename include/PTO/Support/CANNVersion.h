@@ -15,6 +15,17 @@
 #include <limits>
 #include <optional>
 
+// glibc 2.17 (CentOS7 devtoolset-7 sysroot) exposes `major`/`minor` as macros
+// through <sys/sysmacros.h> (pulled in by <sys/types.h>). They collide with
+// the member names on CANNVersion; drop the macros so the struct below can
+// declare unsigned major/minor members and use them as constructor params.
+#ifdef major
+#undef major
+#endif
+#ifdef minor
+#undef minor
+#endif
+
 namespace mlir::pto {
 
 inline constexpr unsigned kCANNVersionComponentCount = 3;
@@ -27,7 +38,7 @@ struct CANNVersion {
                         unsigned beta)
       : major(major), minor(minor), patch(patch), beta(beta) {}
 
-  static CANNVersion release(unsigned major, unsigned minor, unsigned patch) {
+  static constexpr CANNVersion release(unsigned major, unsigned minor, unsigned patch) {
     return CANNVersion{major, minor, patch, RELEASE};
   }
 
@@ -57,7 +68,7 @@ struct CANNVersion {
   bool operator>=(const CANNVersion &rhs) const { return !(*this < rhs); }
 };
 
-inline constexpr CANNVersion kDefaultCANNVersion{9, 0, 0, 1};
+inline constexpr CANNVersion kDefaultCANNVersion = CANNVersion::release(9, 0, 0);
 inline constexpr CANNVersion kCANN900Beta2Version{9, 0, 0, 2};
 
 inline std::optional<unsigned> parseCANNVersionComponent(

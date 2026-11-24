@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,98 +6,31 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """SIMT ops: index/dimension queries, votes/shuffles, atomics, scalar
 math, synchronization, and pipe/buffer management."""
 
-from functools import wraps
-import warnings
-from ._diagnostics import (
-    PTODSLDeprecationWarning,
-    explicit_mode_required_with_context_error,
-    make_tensor_view_invalid_layout_error,
-    make_tensor_view_missing_metadata_error,
-    tile_row_alignment_error,
-)
-from ._host_tensors import resolve_tensor_data_entry
-from ._scalar_coercion import coerce_scalar_to_type, materialize_scalar_literal
-from ._scalar_adaptation import (
-    classify_runtime_scalar_type,
-    coerce_runtime_i1_value,
-    coerce_runtime_index_value,
-    coerce_runtime_integer_value,
-)
-from ._runtime_scalar_ops import emit_runtime_binary_op
-from ._surface_values import (
-    AllocatedBufferValue,
-    MaskResultValue,
-    PartitionTensorViewValue,
-    TensorViewValue,
-    TileSliceValue,
-    TileValue,
-    _coerce_index_value,
-    _static_index_dims,
-    _unwrap_sequence,
-    compose_partition_spec,
-    emit_as_ptr,
-    infer_tile_element_type,
-    is_runtime_scalar_ir_type,
-    parse_tile_type_metadata,
-    resolve_address_access,
-    unwrap_surface_value,
-    wrap_surface_value,
-)
-from ._types import (
-    _is_struct_type,
-    _isinstance_pto_type,
-    _materialize_integer_literal,
-    _normalize_address_space,
-    _resolve,
-    _strip_integer_signedness,
-    mask_type,
-    part_tensor_view_type,
-    part_tensor_view_type_from_dims,
-    ptr,
-    tensor_view_type,
-    tensor_view_type_from_dims,
-    vreg_type,
-)
-from ptoas.mlir.dialects import arith, pto as _pto
-from ptoas.mlir.ir import (
-    Attribute,
-    BF16Type,
-    F16Type,
-    F32Type,
-    Float8E4M3FNType,
-    Float8E5M2Type,
-    FloatAttr,
-    IndexType,
-    IntegerAttr,
-    IntegerType,
-    MemRefType,
-    Operation,
-    Type,
-    TypeAttr,
-    UnitAttr,
-    VectorType,
-)
+from ._ops_imports import *  # noqa: F401,F403
+
+from ._scalar_adaptation import _pto_cast
 
 from ._ops_common import (
+    castptr,
     _coerce_i32_operand,
     _coerce_index,
     _event_attr,
     _l1_cache_attr,
     _ld_l2_cache_attr,
+    _normalize_token,
     _optional_signedness_attr,
     _pipe_attr,
     _pointer_element_type,
+    _require_target_arch,
     _required_signedness_attr,
-    _rounding_attr,
     _same_type_binary,
     _same_type_ternary,
     _same_type_unary,
-    _saturation_attr,
     _st_l2_cache_attr,
-    _validate_convert_signedness,
     _validate_integer_signedness_only,
     _validate_redux_signedness,
     _validate_static_buf_id,
@@ -289,76 +223,139 @@ def vote_ballot(pred):
     return wrap_surface_value(_pto.VoteBallotOp(unwrap_surface_value(pred)).result)
 
 
+# The ISA splits a warp with a 5-bit lane_mask whose only legal values are
+# 31, 30, 28, 24, 16 and 0, so a shuffle subgroup has 1, 2, 4, 8, 16 or 32 lanes.
+_SHUFFLE_WIDTHS = (1, 2, 4, 8, 16, 32)
+
+
 def _validate_shuffle_width(width, *, context: str):
-    if width not in (16, 32):
-        raise ValueError(f"{context} expects width to be 16 or 32, got {width}")
+    if isinstance(width, bool) or width not in _SHUFFLE_WIDTHS:
+        raise ValueError(
+            f"{context} expects width to be one of {_SHUFFLE_WIDTHS}, got {width}"
+        )
     return width
 
 
-def shuffle_idx(value, index, *, width=32):
-    """``pto.shuffle_idx`` – read a payload from an absolute SIMT lane index."""
+def _validate_shuffle_bound(bound, width, *, context: str):
+    """Validate the optional group-relative source-window boundary.
+
+    ``bound`` maps to the ISA's ``Rm[12:8]`` field (the manual calls it
+    ``max_ofst``): the hardware bounds the shuffled source lane to
+    ``group_base + bound % width`` (an upper bound for ``down``/``bfly``/``idx``
+    and a lower bound for ``up``) and returns the lane's own value outside that
+    window.
+    """
+    if bound is None:
+        return None
+    if isinstance(bound, bool) or not isinstance(bound, int):
+        raise TypeError(
+            f"{context} expects bound to be an int, got {type(bound).__name__}"
+        )
+    if bound < 0 or bound >= width:
+        raise ValueError(
+            f"{context} expects bound in [0, width) = [0, {width}), got {bound}"
+        )
+    return bound
+
+
+def shuffle_idx(value, index, *, width=32, bound=None):
+    """``pto.shuffle_idx`` – read a payload from an absolute SIMT lane index.
+
+    ``width`` is the subgroup size; ``bound`` optionally narrows the source
+    window inside each subgroup (see :func:`_validate_shuffle_bound`).
+    """
+    width = _validate_shuffle_width(width, context="shuffle_idx(..., width)")
     return wrap_surface_value(_pto.ShuffleIdxOp(
         unwrap_surface_value(value),
         _coerce_i32_operand(index, context="shuffle_idx(..., index)"),
-        width=_validate_shuffle_width(width, context="shuffle_idx(..., width)"),
+        width=width,
+        bound=_validate_shuffle_bound(
+            bound, width, context="shuffle_idx(..., bound)"
+        ),
     ).result)
 
 
-def shuffle_up(value, offset, *, width=32):
-    """``pto.shuffle_up`` – read a payload from a lower-index SIMT lane."""
+def shuffle_up(value, offset, *, width=32, bound=None):
+    """``pto.shuffle_up`` – read a payload from a lower-index SIMT lane.
+
+    ``bound`` acts as the lower bound of the source window for this mode.
+    """
+    width = _validate_shuffle_width(width, context="shuffle_up(..., width)")
     return wrap_surface_value(_pto.ShuffleUpOp(
         unwrap_surface_value(value),
         _coerce_i32_operand(offset, context="shuffle_up(..., offset)"),
-        width=_validate_shuffle_width(width, context="shuffle_up(..., width)"),
+        width=width,
+        bound=_validate_shuffle_bound(
+            bound, width, context="shuffle_up(..., bound)"
+        ),
     ).result)
 
 
-def shuffle_down(value, offset, *, width=32):
-    """``pto.shuffle_down`` – read a payload from a higher-index SIMT lane."""
+def shuffle_down(value, offset, *, width=32, bound=None):
+    """``pto.shuffle_down`` – read a payload from a higher-index SIMT lane.
+
+    ``bound`` acts as the upper bound of the source window for this mode.
+    """
+    width = _validate_shuffle_width(width, context="shuffle_down(..., width)")
     return wrap_surface_value(_pto.ShuffleDownOp(
         unwrap_surface_value(value),
         _coerce_i32_operand(offset, context="shuffle_down(..., offset)"),
-        width=_validate_shuffle_width(width, context="shuffle_down(..., width)"),
+        width=width,
+        bound=_validate_shuffle_bound(
+            bound, width, context="shuffle_down(..., bound)"
+        ),
     ).result)
 
 
-def shuffle_bfly(value, mask, *, width=32):
-    """``pto.shuffle_bfly`` – read a payload from a butterfly-selected SIMT lane."""
+def shuffle_bfly(value, mask, *, width=32, bound=None):
+    """``pto.shuffle_bfly`` – read a payload from a butterfly-selected SIMT lane.
+
+    ``bound`` acts as the upper bound of the source window for this mode.
+    """
+    width = _validate_shuffle_width(width, context="shuffle_bfly(..., width)")
     return wrap_surface_value(_pto.ShuffleBflyOp(
         unwrap_surface_value(value),
         _coerce_i32_operand(mask, context="shuffle_bfly(..., mask)"),
-        width=_validate_shuffle_width(width, context="shuffle_bfly(..., width)"),
+        width=width,
+        bound=_validate_shuffle_bound(
+            bound, width, context="shuffle_bfly(..., bound)"
+        ),
     ).result)
 
 
-def redux_add(value, *, signedness=None):
+def redux_add(value):
     """``pto.redux_add`` – SIMT lane sum reduction."""
     raw_value = unwrap_surface_value(value)
-    _validate_redux_signedness(raw_value.type, signedness, require_for_integer=False, context="redux_add(value)")
-    return wrap_surface_value(_pto.ReduxAddOp(
-        raw_value,
-        signedness=_optional_signedness_attr(signedness, context="redux_add(..., signedness)"),
-    ).result)
+    op_cls = _pto.ReduxAddIOp if IntegerType.isinstance(raw_value.type) else _pto.ReduxAddFOp
+    return wrap_surface_value(op_cls(raw_value).result)
 
 
 def redux_max(value, *, signedness=None):
     """``pto.redux_max`` – SIMT lane max reduction."""
     raw_value = unwrap_surface_value(value)
     _validate_redux_signedness(raw_value.type, signedness, require_for_integer=True, context="redux_max(value)")
-    return wrap_surface_value(_pto.ReduxMaxOp(
-        raw_value,
-        signedness=_optional_signedness_attr(signedness, context="redux_max(..., signedness)"),
-    ).result)
+    if IntegerType.isinstance(raw_value.type):
+        return wrap_surface_value(_pto.ReduxMaxIOp(
+            raw_value,
+            signedness=_required_signedness_attr(
+                signedness, context="redux_max(..., signedness)"
+            ),
+        ).result)
+    return wrap_surface_value(_pto.ReduxMaxFOp(raw_value).result)
 
 
 def redux_min(value, *, signedness=None):
     """``pto.redux_min`` – SIMT lane min reduction."""
     raw_value = unwrap_surface_value(value)
     _validate_redux_signedness(raw_value.type, signedness, require_for_integer=True, context="redux_min(value)")
-    return wrap_surface_value(_pto.ReduxMinOp(
-        raw_value,
-        signedness=_optional_signedness_attr(signedness, context="redux_min(..., signedness)"),
-    ).result)
+    if IntegerType.isinstance(raw_value.type):
+        return wrap_surface_value(_pto.ReduxMinIOp(
+            raw_value,
+            signedness=_required_signedness_attr(
+                signedness, context="redux_min(..., signedness)"
+            ),
+        ).result)
+    return wrap_surface_value(_pto.ReduxMinFOp(raw_value).result)
 
 
 def ldg(ptr_or_ref, offset=None, *, l1cache="cache", l2cache="nmfv"):
@@ -399,43 +396,76 @@ def stg(value, ptr_or_ref, offset=None, *, l1cache="cache", l2cache="nmfv"):
     )
 
 
+def _signless_atomic_carrier(elem_type):
+    """Return the signless carrier type for an integer atomic operand.
+
+    ``pto.atomic_*`` only accepts signless i32/i64 operands, while the PTODSL
+    surface may address si/ui buffers.  add/sub/and/or/xor are sign-agnostic
+    and min/max carry their comparison semantics in the ``signedness``
+    attribute, so the carrier can always be signless as long as the original
+    element type is restored on the result.
+    """
+    if not IntegerType.isinstance(elem_type):
+        return None
+    signless_type = IntegerType.get_signless(elem_type.width)
+    return None if elem_type == signless_type else signless_type
+
+
+def _cast_atomic_pointer(raw_ptr, carrier_type):
+    ptr_type = _pto.PtrType(raw_ptr.type)
+    carrier_ptr_type = _pto.PtrType.get(carrier_type, memory_space=ptr_type.memory_space)
+    return unwrap_surface_value(castptr(raw_ptr, carrier_ptr_type))
+
+
+def _cast_atomic_operand(raw_ptr, raw_value, carrier_type, context: str):
+    raw_ptr = _cast_atomic_pointer(raw_ptr, carrier_type)
+    raw_value = coerce_scalar_to_type(raw_value, carrier_type, context=f"{context} signless carrier")
+    return raw_ptr, raw_value
+
+
 def _atomic_binary(op_cls, ptr, value, *, l2cache, signedness, context: str):
     raw_ptr = unwrap_surface_value(ptr)
     elem_type = _pointer_element_type(raw_ptr, context=context)
     _validate_integer_signedness_only(elem_type, signedness, context=context)
     raw_value = coerce_scalar_to_type(value, elem_type, context=context)
-    return wrap_surface_value(op_cls(
-        raw_value.type,
-        raw_ptr,
-        raw_value,
-        l2cache=_st_l2_cache_attr(l2cache, context=f"{context} l2cache"),
-        signedness=_optional_signedness_attr(signedness, context=f"{context} signedness"),
-    ).old)
+    carrier_type = _signless_atomic_carrier(elem_type)
+    if carrier_type is not None:
+        raw_ptr, raw_value = _cast_atomic_operand(raw_ptr, raw_value, carrier_type, context)
+    kwargs = {"l2cache": _st_l2_cache_attr(l2cache, context=f"{context} l2cache")}
+    if signedness is not None:
+        kwargs["signedness"] = _optional_signedness_attr(signedness, context=f"{context} signedness")
+    old = op_cls(raw_value.type, raw_ptr, raw_value, **kwargs).old
+    if carrier_type is not None:
+        old = _pto_cast(old, elem_type)
+    return wrap_surface_value(old)
 
 
-def atomic_exch(ptr, value, *, l2cache="nmfv", signedness=None):
+def atomic_exch(ptr, value, *, l2cache="nmfv"):
     """``pto.atomic_exch`` – SIMT scalar atomic exchange."""
     return _atomic_binary(
-        _pto.AtomicExchOp, ptr, value, l2cache=l2cache, signedness=signedness,
+        _pto.AtomicExchOp, ptr, value, l2cache=l2cache, signedness=None,
         context="atomic_exch(ptr, value)")
 
 
-def atomic_add(ptr, value, *, l2cache="nmfv", signedness=None):
+def atomic_add(ptr, value, *, l2cache="nmfv"):
     """``pto.atomic_add`` – SIMT scalar atomic add."""
     return _atomic_binary(
-        _pto.AtomicAddOp, ptr, value, l2cache=l2cache, signedness=signedness,
+        _pto.AtomicAddOp, ptr, value, l2cache=l2cache, signedness=None,
         context="atomic_add(ptr, value)")
 
 
-def atomic_sub(ptr, value, *, l2cache="nmfv", signedness=None):
+def atomic_sub(ptr, value, *, l2cache="nmfv"):
     """``pto.atomic_sub`` – SIMT scalar atomic subtract."""
     return _atomic_binary(
-        _pto.AtomicSubOp, ptr, value, l2cache=l2cache, signedness=signedness,
+        _pto.AtomicSubOp, ptr, value, l2cache=l2cache, signedness=None,
         context="atomic_sub(ptr, value)")
 
 
 def atomic_min(ptr, value, *, l2cache="nmfv", signedness=None):
     """``pto.atomic_min`` – SIMT scalar atomic min."""
+    elem_type = _pointer_element_type(unwrap_surface_value(ptr), context="atomic_min(ptr, value)")
+    if IntegerType.isinstance(elem_type) and signedness is None:
+        raise TypeError("atomic_min(ptr, value) requires signedness='signed' or 'unsigned' for integer values")
     return _atomic_binary(
         _pto.AtomicMinOp, ptr, value, l2cache=l2cache, signedness=signedness,
         context="atomic_min(ptr, value)")
@@ -443,46 +473,55 @@ def atomic_min(ptr, value, *, l2cache="nmfv", signedness=None):
 
 def atomic_max(ptr, value, *, l2cache="nmfv", signedness=None):
     """``pto.atomic_max`` – SIMT scalar atomic max."""
+    elem_type = _pointer_element_type(unwrap_surface_value(ptr), context="atomic_max(ptr, value)")
+    if IntegerType.isinstance(elem_type) and signedness is None:
+        raise TypeError("atomic_max(ptr, value) requires signedness='signed' or 'unsigned' for integer values")
     return _atomic_binary(
         _pto.AtomicMaxOp, ptr, value, l2cache=l2cache, signedness=signedness,
         context="atomic_max(ptr, value)")
 
 
-def atomic_and(ptr, value, *, l2cache="nmfv", signedness=None):
+def atomic_and(ptr, value, *, l2cache="nmfv"):
     """``pto.atomic_and`` – SIMT scalar atomic bitwise and."""
     return _atomic_binary(
-        _pto.AtomicAndOp, ptr, value, l2cache=l2cache, signedness=signedness,
+        _pto.AtomicAndOp, ptr, value, l2cache=l2cache, signedness=None,
         context="atomic_and(ptr, value)")
 
 
-def atomic_or(ptr, value, *, l2cache="nmfv", signedness=None):
+def atomic_or(ptr, value, *, l2cache="nmfv"):
     """``pto.atomic_or`` – SIMT scalar atomic bitwise or."""
     return _atomic_binary(
-        _pto.AtomicOrOp, ptr, value, l2cache=l2cache, signedness=signedness,
+        _pto.AtomicOrOp, ptr, value, l2cache=l2cache, signedness=None,
         context="atomic_or(ptr, value)")
 
 
-def atomic_xor(ptr, value, *, l2cache="nmfv", signedness=None):
+def atomic_xor(ptr, value, *, l2cache="nmfv"):
     """``pto.atomic_xor`` – SIMT scalar atomic bitwise xor."""
     return _atomic_binary(
-        _pto.AtomicXorOp, ptr, value, l2cache=l2cache, signedness=signedness,
+        _pto.AtomicXorOp, ptr, value, l2cache=l2cache, signedness=None,
         context="atomic_xor(ptr, value)")
 
 
-def atomic_cas(ptr, compare, value, *, l2cache="nmfv", signedness=None):
+def atomic_cas(ptr, compare, value, *, l2cache="nmfv"):
     """``pto.atomic_cas`` – SIMT scalar atomic compare-and-swap."""
     raw_ptr = unwrap_surface_value(ptr)
     elem_type = _pointer_element_type(raw_ptr, context="atomic_cas(ptr, compare, value)")
-    _validate_integer_signedness_only(elem_type, signedness, context="atomic_cas(ptr, compare, value)")
     raw_compare = coerce_scalar_to_type(compare, elem_type, context="atomic_cas(compare)")
     raw_value = coerce_scalar_to_type(value, elem_type, context="atomic_cas(value)")
-    return wrap_surface_value(_pto.AtomicCasOp(
+    carrier_type = _signless_atomic_carrier(elem_type)
+    if carrier_type is not None:
+        raw_ptr = _cast_atomic_pointer(raw_ptr, carrier_type)
+        raw_compare = coerce_scalar_to_type(raw_compare, carrier_type, context="atomic_cas(compare) signless carrier")
+        raw_value = coerce_scalar_to_type(raw_value, carrier_type, context="atomic_cas(value) signless carrier")
+    old = _pto.AtomicCasOp(
         raw_ptr,
         raw_compare,
         raw_value,
         l2cache=_st_l2_cache_attr(l2cache, context="atomic_cas(..., l2cache)"),
-        signedness=_optional_signedness_attr(signedness, context="atomic_cas(..., signedness)"),
-    ).old)
+    ).old
+    if carrier_type is not None:
+        old = _pto_cast(old, elem_type)
+    return wrap_surface_value(old)
 
 
 def prmt(lhs, rhs, selector):
@@ -569,33 +608,9 @@ def round(value):
     return _same_type_unary(_pto.RoundOp, value)
 
 
-def fmin(lhs, rhs):
-    """``pto.fmin`` – SIMT floating minimum."""
-    return _same_type_binary(_pto.FMinOp, lhs, rhs, context="fmin(lhs, rhs)")
-
-
-def fmax(lhs, rhs):
-    """``pto.fmax`` – SIMT floating maximum."""
-    return _same_type_binary(_pto.FMaxOp, lhs, rhs, context="fmax(lhs, rhs)")
-
-
 def fma(lhs, rhs, acc):
-    """``pto.fma`` – SIMT floating fused multiply-add."""
+    """``pto.fma`` – common floating-point fused multiply-add."""
     return _same_type_ternary(_pto.FmaOp, lhs, rhs, acc, context="fma(lhs, rhs, acc)")
-
-
-def convert(src, dst_type, *, rounding, saturation, signedness=None):
-    """``pto.convert`` – SIMT scalar or packed conversion."""
-    raw_src = unwrap_surface_value(src)
-    raw_dst_type = _resolve(dst_type)
-    _validate_convert_signedness(raw_src.type, raw_dst_type, signedness, context="convert(src, dst_type)")
-    return wrap_surface_value(_pto.ConvertOp(
-        raw_dst_type,
-        raw_src,
-        _rounding_attr(rounding, context="convert(..., rounding)"),
-        _saturation_attr(saturation, context="convert(..., saturation)"),
-        signedness=_optional_signedness_attr(signedness, context="convert(..., signedness)"),
-    ).dst)
 
 
 def syncthreads():
@@ -616,6 +631,22 @@ def threadfence_block():
 def trap():
     """``pto.trap`` – unconditionally terminate device-side execution."""
     _pto.TrapOp()
+
+
+def assert_(cond, message=None):
+    """``pto.assert_`` – emit a trap request when ``cond`` is false.
+
+    ``cond`` may be a Python ``bool``/0-1 integer or an i1 scalar. ``message``
+    is an optional diagnostic string consumed only by the EmitC backend.
+    Kernel termination and host error reporting are target/runtime-dependent
+    and are not guaranteed. Use explicit control flow to guard unsafe work.
+    """
+    raw_cond = unwrap_surface_value(
+        coerce_runtime_i1_value(cond, context="assert_(cond)"))
+    if message is None:
+        _pto.AssertOp(raw_cond)
+    else:
+        _pto.AssertOp(raw_cond, message=str(message))
 
 
 def _slot_attr_value(slot, *, context: str):
@@ -696,7 +727,25 @@ def _sync_event_id_operand(event_id, *, context: str):
 
 def _sync_event_id_operand_in_range(event_id, *, context: str, lo: int, hi: int, meaning: str = "event_id"):
     _validate_static_event_id_range(event_id, context=context, lo=lo, hi=hi, meaning=meaning)
-    return event_id if isinstance(event_id, int) else unwrap_surface_value(event_id)
+    if isinstance(event_id, int):
+        return event_id
+
+    value = unwrap_surface_value(event_id)
+    if not IntegerType.isinstance(value.type) or IntegerType(value.type).width not in (32, 64):
+        raise TypeError(f"{context} expects an i32 or i64 event_id, got {value.type}")
+    return value
+
+
+def _intra_block_event_id_operand(event_id, *, context: str, lo: int, hi: int):
+    if isinstance(event_id, int):
+        _validate_static_event_id_range(event_id, context=context, lo=lo, hi=hi,
+                                         meaning="physical event_id")
+        return event_id
+
+    value = unwrap_surface_value(event_id)
+    if not IntegerType.isinstance(value.type) or IntegerType(value.type).width not in (32, 64):
+        raise TypeError(f"{context} expects an i32 or i64 event_id, got {value.type}")
+    return value
 
 
 def _flag_event_id_operand(event_id, *, context: str):
@@ -721,15 +770,66 @@ def set_cross_block(pipe, event_id):
 
 def wait_cross_block(pipe, event_id):
     """``pto.wait_cross_block(pipe, event_id)`` – emits ``pto.wait_cross_block``."""
-    _validate_sync_pipe(
+    pipe_token = _validate_sync_pipe(
         pipe,
         context="wait_cross_block(pipe, event_id)",
-        allowed=("PIPE_FIX", "PIPE_MTE1", "PIPE_MTE2", "PIPE_MTE3", "PIPE_V"),
+        allowed=("PIPE_FIX", "PIPE_MTE1", "PIPE_MTE2", "PIPE_MTE3", "PIPE_S", "PIPE_V"),
     )
+    if pipe_token == "PIPE_S":
+        _require_target_arch("wait_cross_block(Pipe.S, event_id)", {"a5"})
     event_operand = _sync_event_id_operand_in_range(
         event_id, context="wait_cross_block(..., event_id=...)", lo=0, hi=15
     )
     _pto.wait_cross_block(_pipe_attr(pipe), event_operand)
+
+
+def syncall(*, mode, core_type, gm_workspace=None, used_cores=None):
+    """Synchronize every participating core through ``pto.syncall``.
+
+    Hard synchronization takes no workspace and requires every participating
+    core to be simultaneously resident; otherwise the barrier can deadlock.
+    Soft synchronization requires a zero-initialized GM workspace matching the
+    ``pto.syncall`` IR contract.
+    """
+    mode_token = _normalize_token(mode, context="syncall(..., mode)")
+    if mode_token not in {"hard", "soft"}:
+        raise ValueError(
+            f"syncall(..., mode) does not support {mode!r}; expected hard or soft"
+        )
+
+    core_type_token = _normalize_token(
+        core_type, context="syncall(..., core_type)"
+    )
+    if core_type_token not in {"aiv_only", "aic_only", "mix"}:
+        raise ValueError(
+            "syncall(..., core_type) does not support "
+            f"{core_type!r}; expected aiv_only, aic_only, or mix"
+        )
+
+    if mode_token == "hard":
+        if gm_workspace is not None or used_cores is not None:
+            raise ValueError(
+                "syncall(mode='hard') does not accept gm_workspace or used_cores"
+            )
+        _pto.syncall(
+            Attribute.parse("#pto.sync_all_mode<hard>"),
+            Attribute.parse(f"#pto.sync_core_type<{core_type_token}>"),
+        )
+        return
+
+    if gm_workspace is None:
+        raise ValueError("syncall(mode='soft') requires gm_workspace")
+
+    kwargs = {"gm_workspace": unwrap_surface_value(gm_workspace)}
+    if used_cores is not None:
+        kwargs["used_cores"] = _coerce_i32_operand(
+            used_cores, context="syncall(..., used_cores)"
+        )
+    _pto.syncall(
+        Attribute.parse("#pto.sync_all_mode<soft>"),
+        Attribute.parse(f"#pto.sync_core_type<{core_type_token}>"),
+        **kwargs,
+    )
 
 
 def set_intra_block(pipe, event_id):
@@ -739,12 +839,11 @@ def set_intra_block(pipe, event_id):
         context="set_intra_block(pipe, event_id)",
         allowed=("PIPE_FIX", "PIPE_MTE1", "PIPE_MTE2", "PIPE_MTE3", "PIPE_V"),
     )
-    event_operand = _sync_event_id_operand_in_range(
+    event_operand = _intra_block_event_id_operand(
         event_id,
         context="set_intra_block(..., event_id=...)",
         lo=0,
         hi=31,
-        meaning="physical event_id",
     )
     _pto.set_intra_block(_pipe_attr(pipe), event_operand)
 
@@ -756,12 +855,11 @@ def wait_intra_block(pipe, event_id):
         context="wait_intra_block(pipe, event_id)",
         allowed=("PIPE_FIX", "PIPE_MTE1", "PIPE_MTE2", "PIPE_MTE3", "PIPE_V"),
     )
-    event_operand = _sync_event_id_operand_in_range(
+    event_operand = _intra_block_event_id_operand(
         event_id,
         context="wait_intra_block(..., event_id=...)",
         lo=0,
         hi=31,
-        meaning="physical event_id",
     )
     _pto.wait_intra_block(_pipe_attr(pipe), event_operand)
 

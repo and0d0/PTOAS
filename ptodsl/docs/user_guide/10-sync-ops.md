@@ -137,6 +137,11 @@ pto.wait_flag(pto.Pipe.MTE2, pto.Pipe.V, event_id=0)
 pto.pipe_barrier(pto.Pipe.ALL)
 ```
 
+Inside a `@pto.simt` body, only `pipe_barrier(Pipe.ALL)` is supported and it
+lowers to the SIMT workitem barrier. Other pipe barriers are rejected; prefer
+`pto.syncthreads` for explicit lane synchronization and keep pipeline barriers
+around the SIMT launch.
+
 ### Typical explicit-mode usage pattern
 
 A common explicit-mode pattern interleaves DMA and compute with `set_flag` /
@@ -353,7 +358,45 @@ def flash_attention_block(
 
 Section 10.2 covers the general pipe-to-pipe sync mechanism (`set_flag`/`wait_flag`). This section covers two additional sync domains that the pipe-flag mechanism does not address: **cross-core** communication between separate NPU cores, and **intra-block** synchronization between the Cube and Vector units within a block.
 
-### 10.5.1 Cross-core sync: `set_cross_block`, `wait_cross_block`
+### 10.5.1 All-participant synchronization: `syncall`
+
+`pto.syncall` synchronizes every participating core using the existing
+`pto.syncall` IR operation. Callers must explicitly select both the
+synchronization mode and participating core kind:
+
+```python
+pto.syncall(
+    mode=pto.SyncAllMode.HARD,
+    core_type=pto.SyncCoreType.AIV_ONLY,
+)
+```
+
+Hard synchronization does not accept a workspace and is only safe when all
+participating cores can be resident simultaneously. If a launch can exceed the
+hardware occupancy limit, already-resident cores may block at the barrier while
+preventing remaining cores from starting, causing a deadlock or AICore timeout.
+Use soft synchronization for partial-occupancy launches.
+
+Soft synchronization uses the existing PTO-ISA workspace ABI and requires a
+zero-initialized, exclusive GM cache line containing at least 16 `i32` elements:
+
+```python
+pto.syncall(
+    mode=pto.SyncAllMode.SOFT,
+    core_type=pto.SyncCoreType.AIV_ONLY,
+    gm_workspace=sync_workspace,
+    used_cores=core_count,
+)
+```
+
+`syncall` is distinct from `wait_cross_block`: it represents the complete
+all-participant synchronization operation. On A5, the lower-level mode-0
+protocol may use `wait_cross_block(Pipe.S, event_id)` as its wait endpoint;
+for example, the native AIV-only hard barrier signals on `Pipe.MTE3` and waits
+on `Pipe.S`. This does not make `Pipe.S` a valid `set_cross_block` endpoint or
+enable the scalar wait endpoint on A2/A3.
+
+### 10.5.2 Cross-core sync: `set_cross_block`, `wait_cross_block`
 
 When a kernel spans multiple cores, cores need to coordinate through shared resources. `set_cross_block` sends a signal to another core; `wait_cross_block` blocks the calling core until the expected signal arrives.
 
@@ -388,7 +431,7 @@ pto.set_cross_block(pto.Pipe.FIX, 0)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `pipe` | `Pipe` | Waiting endpoint: `Pipe.FIX`, `Pipe.MTE1`, `Pipe.MTE2`, `Pipe.MTE3`, or `Pipe.V`. |
+| `pipe` | `Pipe` | Waiting endpoint: `Pipe.FIX`, `Pipe.MTE1`, `Pipe.MTE2`, `Pipe.MTE3`, or `Pipe.V`; A5 mode-0 synchronization also supports `Pipe.S`. |
 | `event_id` | `int` | Event identifier to wait on (`0`–`15`) |
 
 **Returns**: None (side-effect operation).
@@ -401,7 +444,11 @@ pto.set_cross_block(pto.Pipe.FIX, 0)
 pto.wait_cross_block(pto.Pipe.FIX, 0)
 ```
 
-### 10.5.2 Intra-block sync: `set_intra_block`, `wait_intra_block`
+`Pipe.S` is an A5-only wait endpoint. It is intended for the scalar wait side
+of the native mode-0 protocol (for example, an MTE3 arrival followed by an S
+wait); it remains invalid for `set_cross_block` and on A2/A3.
+
+### 10.5.3 Intra-block sync: `set_intra_block`, `wait_intra_block`
 
 The intra-block sync channel is separate from the standard pipe-flag mechanism used by cross-core sync. `set_intra_block` and `wait_intra_block` synchronize the relevant producer/consumer pipes within the same block, ensuring that shared UB tile data is not accessed before the producer finishes.
 
@@ -456,7 +503,8 @@ the base event ID and `base_id + 16`.
 ```python
 # MTE3 waits for the Cube-to-UB handoff for each AIV subblock.
 with pto.for_(0, 2, step=1) as sid:
-    pto.wait_intra_block(pto.Pipe.MTE3, sid * 16 + 6)
+    event_id = pto.cast(sid * 16 + 6, pto.i32)
+    pto.wait_intra_block(pto.Pipe.MTE3, event_id)
 ```
 
 ## 10.6 Synchronization in the authoring model
@@ -494,19 +542,54 @@ In auto mode, users can still write sync operations directly — `set_flag`/`wai
 
 ### `pto.trap()`
 
-**Description**: Unconditionally terminates execution of the current device-side
-execution instance. This is useful for fail-fast paths in lowered assertions or
-debug-only guards.
+**Description**: Unconditionally requests a device trap. Actual termination of
+the current execution instance or kernel depends on the target/runtime.
 
 `pto.trap()` is a device operation emitted while the kernel is being traced. It
 is not a Python exception and must not be replaced with Python `raise` or
 `assert`, which execute during host-side tracing instead of on the device.
 
-**Returns**: None. Execution does not continue after the trap at runtime.
+**Returns**: None. This PR does not guarantee that execution stops after the
+trap or that the host receives an error. The existing trap operation is not
+changed; this limitation also applies when it is used by `pto.assert_`.
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.trap","symbol":"sync_ops_trap_probe","compile":{}} -->
 ```python
 # The condition and any diagnostic reporting are normally emitted by a
 # higher-level assertion helper; trap itself is unconditional.
 pto.trap()
+```
+
+## 10.8 Device-side conditional assert
+
+### `pto.assert_(cond, message=None)`
+
+**Description**: Requests a device trap when the scalar `i1` condition `cond`
+is false. This is a conditional diagnostic interface, not a portable
+fail-fast guarantee.
+
+`cond` may be a Python `bool`, a 0/1 integer, or an `i1` scalar (e.g. a
+comparison result). The optional `message` string is a diagnostic consumed
+only by the EmitC backend (printed before the trap request); the VPTO backend
+ignores it.
+
+`pto.assert_` is a device operation emitted while the kernel is being traced.
+It must not be replaced with Python `assert`, which executes during host-side
+tracing instead of on the device.
+
+**Returns**: None. When `cond` is true, no trap is requested and execution
+continues. When it is false, kernel termination and host error reporting
+depend on the target/runtime and are not guaranteed.
+
+**Current limitation**: Reliable failure termination is not provided by this
+change. Supported local simulator configurations have continued with later
+device writes after a false assertion. Do not use `pto.assert_` as the only
+guard against invalid memory accesses or other unsafe work; use explicit
+control flow to prevent those operations.
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.assert","symbol":"sync_ops_assert_probe","compile":{}} -->
+```python
+# Runtime predicate, e.g. a bounds check on the workitem id.
+cond = pto.get_tid_x() < pto.get_block_dim_x()
+pto.assert_(cond, "tid out of range")
 ```

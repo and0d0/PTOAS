@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,6 +6,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """PTODSL TileLib templates for ``pto.tinsert``."""
 
 from ptodsl import pto
@@ -14,6 +16,12 @@ from ._common import NUMERIC_DTYPES
 
 
 BLOCK_BYTE_SIZE = 32
+
+
+def _acc_to_mat_layout(dst):
+    if str(dst.dtype) == "f32" and dst.config.s_fractal_size == 512:
+        return ("nz2nz", 1)
+    return None
 
 
 def _acc_to_mat(src_kind, dst_kind, src_memory_space, dst_memory_space, src_config, dst_config, **_):
@@ -285,8 +293,10 @@ def template_tinsert_acc_to_mat_basic(
         pto.addptr(dst.as_ptr(), dst_offset),
         valid_rows,
         n_size,
-        src.shape[0] * pto.bytewidth(src.dtype),
-        dst.shape[0] * c0_size * elem_bytes,
+        # FIXPIPE strides use C0 units for L0C and elements for L1.
+        src.shape[0],
+        dst.shape[0] * c0_size,
+        layout=_acc_to_mat_layout(dst),
         pre_relu=_tinsert_pre_relu(),
     )
 
@@ -326,8 +336,10 @@ def template_tinsert_fp_acc_to_mat(
         pto.addptr(dst.as_ptr(), dst_offset),
         valid_rows,
         n_size,
-        src.shape[0] * pto.bytewidth(src.dtype),
-        dst.shape[0] * c0_size * elem_bytes,
+        # FIXPIPE strides use C0 units for L0C and elements for L1.
+        src.shape[0],
+        dst.shape[0] * c0_size,
+        layout=_acc_to_mat_layout(dst),
         pre_quant=(fp.as_ptr(), _tinsert_fp_quant_mode(src.dtype, dst.dtype)),
         pre_relu=_tinsert_pre_relu(),
     )
@@ -608,5 +620,5 @@ def template_tinsert_vec_to_vec_nd_scalar_basic(
     index_col: pto.i32,
     dst: pto.Tile,
 ):
-    value = pto.load_scalar(src.as_ptr(), 0)
-    pto.store_scalar(dst.as_ptr(), index_row * dst.shape[1] + index_col, value)
+    value = pto.load(src.as_ptr(), 0)
+    pto.store(value, dst.as_ptr(), index_row * dst.shape[1] + index_col)

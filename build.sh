@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # --------------------------------------------------------------------------------
 # Copyright (c) 2025 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -13,7 +13,13 @@
 # layout). This is the entry point used by the gitcode smoke pipeline
 # (./build.sh --build / --pkg). It builds the external LLVM/MLIR 19 dependency
 # (reusing a cached LLVM source/build when available) and then builds and
-# installs PTOAS through the tree's native CMake build.
+# installs PTOAS through the tree's native CMake build. Both Actions and robot
+# PreSmoke consume a cached or downloaded Compile installer; PreSmoke never
+# builds from source.
+# Native, wheel, and CPack configurations use separate persistent build trees.
+# Use --clean to discard PTOAS intermediates without touching the LLVM cache.
+# LLVM, native, and wheel builds use ccache when available unless a compiler
+# launcher is supplied. An explicitly empty launcher disables caching.
 
 set -e
 
@@ -23,36 +29,23 @@ COLOR_GREEN="\033[32m"
 COLOR_RED="\033[31m"
 
 export BASE_PATH=$(
-  cd "$(dirname $0)"
+  cd "$(dirname "$0")"
   pwd
 )
 export BUILD_PATH="${BASE_PATH}/build"
+export WHEEL_BUILD_PATH="${BUILD_PATH}/wheel"
 export BUILD_OUT_PATH="${BASE_PATH}/build_out"
 export INSTALL_PATH="${BASE_PATH}/install"
 export PACKAGE_STAGE_PATH="${BUILD_PATH}/package_runtime"
 export PTOAS_PRESMOKE_SKIP_RUNOP_MARKER="${BUILD_PATH}/.skip-presmoke-runop"
 export LLVM_SOURCE_VERSION="19.1.7"
 export PTOAS_GLIBCXX_ABI="${PTOAS_GLIBCXX_ABI:-0}"
-# This branch is used to validate the native LLVM/PTOAS build and CANN package
-# lifecycle while the CI image cannot install the Python wheel build backend.
-# Keep the normal CMake/CPack package flow, but deliberately omit the wheel from
-# the generated .run artifact.  The installer handles the empty wheel directory
-# as a successful placeholder package.
-export PTOAS_PLACEHOLDER_RUN_PACKAGE="${PTOAS_PLACEHOLDER_RUN_PACKAGE:-TRUE}"
-# The PTOAS tree is built against the vpto-dev LLVM/MLIR 19 "feature-vpto"
-# branch (source of custom calling conventions such as SimtEntry). Source it
-# from GitHub by default; override with LLVM_GIT_URL / LLVM_GIT_REF when a
-# mirror must be used.
-export LLVM_GIT_URL="${LLVM_GIT_URL:-https://github.com/vpto-dev/llvm-project.git}"
-export LLVM_GIT_REF="${LLVM_GIT_REF:-feature-vpto}"
-# The vpto calling conventions (SimtEntry, float8) can also be produced by
-# applying the feature-vpto patch to the upstream llvmorg-19.1.7 source that
-# the CI cache (ASCEND_3RD_LIB_PATH) and cann-cmake download. When the cached
-# source lacks SimtEntry we fetch the patch from the gitcode release asset and
-# apply it with patch -p1, matching the PATCH_COMMAND added to cann-cmake's
-# third_party/llvm.cmake.
-export LLVM_VPTO_PATCH_URL="${LLVM_VPTO_PATCH_URL:-https://gitcode.com/cann-src-third-party/llvm/releases/download/19.1.7-h0/feature-vpto-last3.patch}"
-export LLVM_VPTO_PATCH_SHA256="${LLVM_VPTO_PATCH_SHA256:-a49c1d3dd8ab78e93264712bc0d46deb536196a54abb2c2ee02abd914cd385e2}"
+# The LLVM 19 source (upstream llvmorg-19.1.7 tarball + feature-vpto patch)
+# is fetched by cann-cmake's third_party/llvm.cmake via ExternalProject_Add.
+# ensure_llvm_source() drives a minimal CMake project that includes the module
+# and builds the third_party_llvm target, so the download+patch runs at build
+# time. cann-cmake itself (providing llvm.cmake) is pulled by
+# cmake/fetch_cann_cmake.cmake. See ensure_cann_cmake / ensure_llvm_source.
 # Prefer ASCEND_3RD_LIB_PATH when it points to a valid LLVM source cache
 # (CI images set this to /home/jenkins/opensource). Fall back to the in-tree
 # third_party directory for local builds where it is unset.
@@ -62,16 +55,105 @@ else
     CANN_3RD_LIB_PATH="${BASE_PATH}/third_party"
 fi
 HARDENING_CACHE_FILE="${BASE_PATH}/cmake/LinuxHardeningCache.cmake"
-LLVM_PROJECT_URL="${LLVM_GIT_URL}"
 # Only enable the CentOS7 devtoolset-7 sysroot + gcc-toolchain when the
-# toolchain is actually present. Manylinux and non-CentOS7 images do not ship
-# /opt/rh/devtoolset-7, and forcing these flags there breaks the build because
-# clang cannot find the sysroot.
-if [ -d "/opt/rh/devtoolset-7/root" ]; then
-  DEVTOOLSET_TOOLCHAIN_FLAGS="--sysroot=/opt/rh/devtoolset-7/root --gcc-toolchain=/opt/rh/devtoolset-7/root/usr"
-else
-  DEVTOOLSET_TOOLCHAIN_FLAGS=""
-fi
+# toolchain is actually present AND the host glibc is newer than CentOS7.
+# On a CentOS7 CI image the host glibc is already 2.17, so linking against the
+# devtoolset sysroot is a no-op and would instead invalidate the pre-seeded
+# LLVM cache (whose flags carry no --sysroot), forcing a full LLVM rebuild
+# that times out. On newer hosts (Ubuntu 22.04 glibc 2.35, manylinux) the
+# sysroot flags lower the packaged libraries' glibc floor from the host value
+# down to 2.17.
+#
+# A /opt/rh/devtoolset-7 stub can also linger on non-CentOS7 CI images
+# (e.g. ubuntu24.04_x86) without the actual GCC 7 tree. gating on the
+# directory alone made those builds link libLLVMSupport/llvm-min-tblgen
+# against a nonexistent libstdc++ and hang for hours, so the sysroot is
+# only accepted when the arch-matching GCC 7 toolchain tree is complete
+# AND a probe C++ link against it succeeds within a timeout.
+devtoolset7_tree_is_usable() {
+  local root="/opt/rh/devtoolset-7/root"
+  [ -d "${root}" ] || return 1
+  [ -x "${root}/usr/bin/gcc" ] || return 1
+  { [ -f "${root}/lib64/libc.so.6" ] || [ -f "${root}/lib/libc.so.6" ] \
+    || [ -f "${root}/lib/aarch64-linux-gnu/libc.so.6" ] \
+    || [ -f "${root}/lib/x86_64-linux-gnu/libc.so.6" ]; } || return 1
+  # The GCC 7 install triplet varies across images: redhat-style
+  # (x86_64-redhat-linux / aarch64-unknown-linux-gnu) and the ubuntu-built
+  # devtoolset on the X86 image (x86_64-pc-linux-gnu). Locate the actual
+  # gcc/7 directory by globbing instead of hardcoding one triplet.
+  local gcc_dir=""
+  local arch_triplet=""
+  local _candidate
+  for _candidate in "${root}"/usr/lib/gcc/*/7; do
+    [ -d "${_candidate}" ] || continue
+    if [ -f "${_candidate}/crtbegin.o" ]         && ls "${_candidate}"/libstdc++.so* >/dev/null 2>&1; then
+      gcc_dir="${_candidate}"
+      arch_triplet="$(basename "$(dirname "${_candidate}")")"
+      break
+    fi
+  done
+  [ -n "${gcc_dir}" ] || return 1
+  [ -d "${root}/usr/include/c++/7" ] || return 1
+  # The arch-specific C++ header dir may be missing on some minimal trees;
+  # accept the gcc install triplet or any arch subdir under c++/7.
+  local _cxx_inc_arch="${root}/usr/include/c++/7/${arch_triplet}"
+  if [ ! -d "${_cxx_inc_arch}" ]; then
+    local _d
+    for _d in "${root}"/usr/include/c++/7/*/; do
+      case "$(basename "${_d}")" in
+        backward|ext) continue ;;
+      esac
+      _cxx_inc_arch="${_d%/}"
+      break
+    done
+  fi
+  [ -d "${_cxx_inc_arch}" ] || return 1
+
+  # Probe-link a tiny C++ program with the exact flags we will use. A stub
+  # tree passes the layout checks but can still deadlock the linker (seen on
+  # CI: llvm-min-tblgen link hung for hours), so require a real, timed link.
+  # Locate a working C/C++ driver first (always present on build hosts).
+  local cc_bin=""
+  if [ -n "${PTOAS_CC:-}" ] && [ -x "${PTOAS_CC}" ]; then
+    cc_bin="${PTOAS_CC}"
+  elif command -v clang++ >/dev/null 2>&1; then
+    cc_bin="$(command -v clang++)"
+  elif command -v g++ >/dev/null 2>&1; then
+    cc_bin="$(command -v g++)"
+  fi
+  [ -n "${cc_bin}" ] || return 1
+
+  local probe_src="${TMPDIR:-/tmp}/ptoas_dts7_probe.cpp"
+  local probe_bin="${TMPDIR:-/tmp}/ptoas_dts7_probe.$$"
+  printf '#include <string>\nint main(){ std::string s("ok"); return (int)s.size()==2?0:1; }\n' \
+    > "${probe_src}" 2>/dev/null || return 1
+  # 30s is far beyond a healthy link; a hanging stub tree gets killed promptly.
+  timeout 30 "${cc_bin}" "${probe_src}" -o "${probe_bin}" \
+      --sysroot="${root}" --gcc-toolchain="${root}/usr" \
+      >/dev/null 2>&1
+  local link_rc=$?
+  rm -f "${probe_src}" "${probe_bin}"
+  [ "${link_rc}" -eq 0 ] || return 1
+  return 0
+}
+
+DEVTOOLSET_TOOLCHAIN_FLAGS=""
+resolve_devtoolset_toolchain() {
+  if devtoolset7_tree_is_usable; then
+    local glibc_version
+    glibc_version="$(ldd --version 2>/dev/null)"
+    # Read the complete output before selecting its first line. Piping ldd to
+    # head can raise SIGPIPE and abort this function under set -o pipefail.
+    if [[ "${glibc_version%%$'\n'*}" =~ ([0-9]+)\.([0-9]+) ]]; then
+      local glibc_major="${BASH_REMATCH[1]}"
+      local glibc_minor="${BASH_REMATCH[2]}"
+      if [ "${glibc_major}" -gt 2 ] \
+          || { [ "${glibc_major}" -eq 2 ] && [ "${glibc_minor}" -gt 17 ]; }; then
+        DEVTOOLSET_TOOLCHAIN_FLAGS="--sysroot=/opt/rh/devtoolset-7/root --gcc-toolchain=/opt/rh/devtoolset-7/root/usr"
+      fi
+    fi
+  fi
+}
 
 # Internal builds provide a pinned clang-15 toolchain under /opt/buildtools,
 # while gitcode images provide clang-15 through PATH. Keep the internal
@@ -115,6 +197,16 @@ resolve_ptoas_toolchain() {
   echo "Using PTOAS toolchain: CC=${PTOAS_CC}, CXX=${PTOAS_CXX}"
 }
 
+# Initialize both launchers for every build stage while preserving CI's xcache
+# or a user-supplied launcher. ccache remains optional for local build hosts.
+resolve_compiler_launchers() {
+  local ccache_bin
+  ccache_bin="$(command -v ccache || true)"
+  export CMAKE_C_COMPILER_LAUNCHER="${CMAKE_C_COMPILER_LAUNCHER-${ccache_bin}}"
+  export CMAKE_CXX_COMPILER_LAUNCHER="${CMAKE_CXX_COMPILER_LAUNCHER-${ccache_bin}}"
+  echo "Compiler launchers: C=${CMAKE_C_COMPILER_LAUNCHER:-none}, CXX=${CMAKE_CXX_COMPILER_LAUNCHER:-none}"
+}
+
 print_success() {
   echo
   echo $dotted_line
@@ -138,11 +230,50 @@ usage() {
   echo "    -h, --help               Print usage"
   echo "    --build                  Build and run validation"
   echo "    --pkg                    Build and package through CANN CPack"
+  echo "    --clean                  Reset PTOAS build trees before building"
   echo "    --pkg-type=<TYPE>        Package type (run/rpm/deb/all); accepted for"
   echo "                             interface compatibility and forwarded to CPack"
   echo "    -j <N>                   Parallel jobs (default: nproc)"
   echo "    --cann_3rd_lib_path <d>  Override the third-party/LLVM cache root"
   echo ""
+  echo "PreSmoke reuses a Compile run installer and never builds from source."
+  echo "Downloads use obs_path (Actions) or GIT_PR_NUMBER/pr_id (robot)."
+}
+
+# Keep LLVM parallelism at nproc (or an explicit -j). PTOAS applies its
+# separate limit at each native build entry point, including the wheel.
+resolve_build_jobs() {
+  local cpus requested
+  cpus="$(nproc 2>/dev/null || echo 4)"
+  requested="${JOBS:-${cpus}}"
+  if [[ ! "${requested}" =~ ^[1-9][0-9]{0,5}$ ]]; then
+    echo "ERROR: -j/JOBS must be a positive integer of at most six digits" >&2
+    return 1
+  fi
+  JOBS="${requested}"
+  export CMAKE_BUILD_PARALLEL_LEVEL="${JOBS}"
+  echo "Build resources: nproc=${cpus}, requested=${requested}, jobs=${JOBS}"
+}
+
+# PTOAS has large TableGen-generated translation units. Bound their
+# concurrency without reducing LLVM parallelism or using cgroup memory
+# estimates. Honor explicit job counts below the limit.
+ptoas_build_jobs() {
+  echo "$(( JOBS > 16 ? 16 : JOBS ))"
+}
+
+report_build_failure() {
+  local status="$1"
+  [ "${status}" -ne 0 ] || return 0
+  echo "Build exited with status ${status}; jobs=${JOBS:-unknown}" >&2
+  local counter
+  for counter in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.peak \
+      /sys/fs/cgroup/memory/memory.failcnt; do
+    if [ -r "${counter}" ]; then
+      echo "${counter}:" >&2
+      cat "${counter}" >&2 || true
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -172,77 +303,122 @@ llvm_has_simt_entry() {
     && grep -q "SimtEntry" "${LLVM_SOURCE_DIR}/llvm/include/llvm/IR/CallingConv.h"
 }
 
-# Download the feature-vpto patch and apply it to the upstream LLVM source so
-# the tree gains the vpto calling conventions. The patch is a git-format-patch
-# series rooted at llvm/, so patch -p1 is the correct strip level (the same
-# PATCH_COMMAND used by cann-cmake's third_party/llvm.cmake).
-apply_vpto_patch() {
+# Ensure cann-cmake (the CANN CMake infrastructure repo providing
+# third_party/llvm.cmake) is present under ${CANN_3RD_LIB_PATH}/cann-cmake.
+# fetch_cann_cmake.cmake runs in cmake script mode and uses git clone, so it
+# works without a project() declaration.
+ensure_cann_cmake() {
+  if [ -d "${CANN_3RD_LIB_PATH}/cann-cmake/third_party/llvm.cmake" ]; then
+    return 0
+  fi
   echo "${dotted_line}"
-  echo "Applying feature-vpto patch to upstream LLVM source"
-  local patch_file="${CANN_3RD_LIB_PATH}/pkg/feature-vpto-last3.patch"
+  echo "Fetching cann-cmake (CANN CMake infrastructure)"
+  mkdir -p "${CANN_3RD_LIB_PATH}"
+  cmake -DPROJECT_SOURCE_DIR="" -DCANN_3RD_LIB_PATH="${CANN_3RD_LIB_PATH}" \
+    -P "${BASE_PATH}/cmake/fetch_cann_cmake.cmake" || {
+      echo "ERROR: failed to fetch cann-cmake" >&2
+      exit 1
+    }
+}
+
+# Ensure the LLVM 19 source tree is present under ${LLVM_SOURCE_DIR}. A cached
+# tree carrying SimtEntry is reused as-is. Otherwise the source is fetched via
+# cann-cmake's third_party/llvm.cmake: a minimal CMake project includes the
+# module, declaring an ExternalProject_Add target (third_party_llvm) that
+# downloads the llvmorg-19.1.7 tarball, applies the feature-vpto patch, and
+# extracts to ${LLVM_SOURCE_DIR}. The download+patch runs at build time, not
+# configure time, matching the cann-cmake integration pattern used across CANN
+# repos (add_cann_third_party + cmake --build --target <name>).
+# Apply the feature-vpto patch in place to an existing (unpatched) LLVM
+# source tree. CI images pre-seed the third-party cache with the pristine
+# llvmorg-19.1.7 source; deleting and re-fetching the tree (as an earlier
+# revision did) invalidates the pre-seeded LLVM build cache and forces a full
+# LLVM rebuild that exceeds the smoke job time limit. Patching in place keeps
+# the untouched files' build cache entries valid. The patch source and hash
+# mirror cann-cmake third_party/llvm.cmake (LLVM_VPTO_PATCH_FILE logic).
+apply_vpto_patch_inplace() {
+  echo "${dotted_line}"
+  echo "Cached LLVM source lacks SimtEntry; applying feature-vpto patch in place"
+  local patch_file=""
   if [ -f "${CANN_3RD_LIB_PATH}/feature-vpto-last3.patch" ]; then
     patch_file="${CANN_3RD_LIB_PATH}/feature-vpto-last3.patch"
   elif [ -f "${CANN_3RD_LIB_PATH}/pkg/feature-vpto-last3.patch" ]; then
     patch_file="${CANN_3RD_LIB_PATH}/pkg/feature-vpto-last3.patch"
   else
     mkdir -p "${CANN_3RD_LIB_PATH}/pkg"
-    echo "Downloading vpto patch from ${LLVM_VPTO_PATCH_URL}"
-    curl -fL --retry 3 -o "${patch_file}" "${LLVM_VPTO_PATCH_URL}" || {
-      echo "ERROR: failed to download vpto patch" >&2
-      exit 1
-    }
+    patch_file="${CANN_3RD_LIB_PATH}/pkg/feature-vpto-last3.patch"
+    echo "Downloading vpto patch from https://gitcode.com/cann-src-third-party/llvm/releases/download/19.1.7-h0/feature-vpto-last3.patch"
+    curl -fL --retry 3 -o "${patch_file}"       "https://gitcode.com/cann-src-third-party/llvm/releases/download/19.1.7-h0/feature-vpto-last3.patch" || {
+        echo "ERROR: failed to download vpto patch" >&2
+        exit 1
+      }
     local actual_sha
-    actual_sha="$(sha256sum "${patch_file}" | cut -d' ' -f1)"
-    if [ "${actual_sha}" != "${LLVM_VPTO_PATCH_SHA256}" ]; then
+    actual_sha="$(sha256sum "${patch_file}" | cut -d ' ' -f1)"
+    if [ "${actual_sha}" != "a49c1d3dd8ab78e93264712bc0d46deb536196a54abb2c2ee02abd914cd385e2" ]; then
       echo "ERROR: vpto patch SHA256 mismatch: ${actual_sha}" >&2
       exit 1
     fi
   fi
-
   (cd "${LLVM_SOURCE_DIR}" && patch -p1 < "${patch_file}") || {
     echo "ERROR: failed to apply vpto patch to ${LLVM_SOURCE_DIR}" >&2
     exit 1
   }
-  echo "Applied vpto patch: ${patch_file}"
+  if ! llvm_has_simt_entry; then
+    echo "ERROR: LLVM source still lacks SimtEntry after patching" >&2
+    exit 1
+  fi
+  echo "Applied vpto patch in place: ${patch_file}"
 }
 
-# Ensure the LLVM 19 source (vpto "feature-vpto" branch) is present under
-# ${LLVM_SOURCE_DIR}. Accepts an already-populated source tree (the usual CI
-# cache layout where llvm-19/llvm holds the top-level CMakeLists.txt) or
-# clones the vpto branch from ${LLVM_GIT_URL}. When the cached source is the
-# upstream (unpatched) snapshot, apply the vpto patch so SimtEntry/float8
-# resolve during the PTOAS build.
 ensure_llvm_source() {
   if [ -f "${LLVM_SOURCE_DIR}/llvm/CMakeLists.txt" ]; then
-    # Git checkout layout: the project root is ${LLVM_SOURCE_DIR}/llvm.
     export LLVM_CMAKE_SOURCE_DIR="${LLVM_SOURCE_DIR}/llvm"
     if ! llvm_has_simt_entry; then
-      echo "${dotted_line}"
-      echo "Cached LLVM source lacks SimtEntry; applying feature-vpto patch"
-      apply_vpto_patch
+      apply_vpto_patch_inplace
     fi
     return 0
   fi
   if [ -f "${LLVM_SOURCE_DIR}/CMakeLists.txt" ]; then
     export LLVM_CMAKE_SOURCE_DIR="${LLVM_SOURCE_DIR}"
     if ! llvm_has_simt_entry; then
-      echo "${dotted_line}"
-      echo "Cached LLVM source lacks SimtEntry; applying feature-vpto patch"
-      apply_vpto_patch
+      apply_vpto_patch_inplace
     fi
     return 0
   fi
 
+  ensure_cann_cmake
+
   echo "${dotted_line}"
-  echo "Cloning LLVM ${LLVM_SOURCE_VERSION} source (${LLVM_GIT_REF})"
-  mkdir -p "${CANN_3RD_LIB_PATH}"
-  git clone --depth 1 --single-branch \
-    --branch "${LLVM_GIT_REF}" \
-    "${LLVM_GIT_URL}" "${LLVM_SOURCE_DIR}"
+  echo "Fetching LLVM ${LLVM_SOURCE_VERSION} source via cann-cmake third_party/llvm.cmake"
+  local llvm_fetch_dir="${BUILD_PATH}/llvm_fetch"
+  rm -rf "${llvm_fetch_dir}"
+  mkdir -p "${llvm_fetch_dir}"
+  cat > "${llvm_fetch_dir}/CMakeLists.txt" <<EOF
+cmake_minimum_required(VERSION 3.20.0)
+project(ptoas_llvm_fetch NONE)
+set(CANN_3RD_LIB_PATH "${CANN_3RD_LIB_PATH}" CACHE PATH "")
+include("${CANN_3RD_LIB_PATH}/cann-cmake/third_party/llvm.cmake")
+EOF
+  cmake -S "${llvm_fetch_dir}" -B "${llvm_fetch_dir}/build" || {
+    echo "ERROR: cmake configure of LLVM fetch project failed" >&2
+    exit 1
+  }
+  cmake --build "${llvm_fetch_dir}/build" --target third_party_llvm || {
+    echo "ERROR: failed to fetch LLVM source via cann-cmake" >&2
+    exit 1
+  }
+
   if [ -f "${LLVM_SOURCE_DIR}/llvm/CMakeLists.txt" ]; then
     export LLVM_CMAKE_SOURCE_DIR="${LLVM_SOURCE_DIR}/llvm"
-  else
+  elif [ -f "${LLVM_SOURCE_DIR}/CMakeLists.txt" ]; then
     export LLVM_CMAKE_SOURCE_DIR="${LLVM_SOURCE_DIR}"
+  else
+    echo "ERROR: LLVM source not found at ${LLVM_SOURCE_DIR} after fetch" >&2
+    exit 1
+  fi
+  if ! llvm_has_simt_entry; then
+    echo "ERROR: fetched LLVM source still lacks SimtEntry; patch may have failed" >&2
+    exit 1
   fi
 }
 
@@ -252,8 +428,10 @@ llvm_build_is_abi_compatible() {
   local support_lib="${LLVM_BUILD_DIR}/lib/libLLVMSupport.so.19.1"
   [ -f "${support_lib}" ] || return 1
   # _ZNK4llvm5Twine3strEv -> _GLIBCXX_USE_CXX11_ABI=0
+  # Drain nm output: grep -q can close the pipe early and make a valid cache
+  # fail with SIGPIPE under pipefail, forcing LLVM to be rebuilt on every run.
   nm -D --defined-only "${support_lib}" 2>/dev/null \
-    | grep -q "_ZNK4llvm5Twine3strEv"
+    | grep -F "_ZNK4llvm5Twine3strEv" >/dev/null
 }
 
 # BSPUB changes LLVM data types at compile time, so a cache produced without
@@ -264,6 +442,23 @@ llvm_build_has_bspub_npu_data_type() {
   grep -Eq '^LLVM_BSPUB_NPU_DATA_TYPE:(BOOL|UNINITIALIZED)=ON$' "${cache_file}" \
     && grep -Eq '^CMAKE_C_FLAGS:[^=]*=.*-DBSPUB_NPU_DATA_TYPE([[:space:]]|$)' "${cache_file}" \
     && grep -Eq '^CMAKE_CXX_FLAGS:[^=]*=.*-DBSPUB_NPU_DATA_TYPE([[:space:]]|$)' "${cache_file}"
+}
+
+# The CentOS7 devtoolset-7 sysroot lowers the GLIBC/GLIBCXX dependency floor of
+# the packaged runtime libraries. A cache produced without it (e.g. built on a
+# manylinux/Ubuntu image) still links against the host glibc and must not be
+# reused when the devtoolset-7 toolchain is present: the resulting .run package
+# would silently require the newer host libc at install time.
+llvm_build_has_devtoolset_sysroot() {
+  # Only enforced when the build is actually going to apply the devtoolset
+  # sysroot flags (newer host glibc). On a CentOS7 CI image the flags are
+  # disabled and the pre-seeded host-glibc LLVM cache stays valid.
+  [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS}" ] || return 0
+  [ -d "/opt/rh/devtoolset-7/root" ] || return 0
+  local cache_file="${LLVM_BUILD_DIR}/CMakeCache.txt"
+  [ -f "${cache_file}" ] || return 1
+  grep -Eq '^CMAKE_C_FLAGS:[^=]*=.*--sysroot=/opt/rh/devtoolset-7/root' "${cache_file}" \
+    && grep -Eq '^CMAKE_CXX_FLAGS:[^=]*=.*--sysroot=/opt/rh/devtoolset-7/root' "${cache_file}"
 }
 
 # PTOAS links LLVM and MLIR component targets directly. Keep those components
@@ -294,7 +489,7 @@ llvm_vectorize_has_target_parser_dependency() {
   readelf_bin="$(command -v readelf || command -v llvm-readelf || true)"
   [ -n "${readelf_bin}" ] || return 1
   "${readelf_bin}" -d "${vectorize_lib}" 2>/dev/null \
-    | grep -q 'libLLVMTargetParser\.so'
+    | grep -F 'libLLVMTargetParser.so' >/dev/null
 }
 
 # Check every property that makes the shared LLVM cache safe for PTOAS. This
@@ -302,20 +497,31 @@ llvm_vectorize_has_target_parser_dependency() {
 # from the CANN toolchain may be complete but use the opposite libstdc++ ABI
 # or omit the TargetParser dependency required by LLVMVectorize.
 llvm_build_cache_is_usable() {
-  [ -f "${LLVM_BUILD_DIR}/lib/cmake/llvm/LLVMConfig.cmake" ] \
-    && [ -f "${LLVM_BUILD_DIR}/lib/cmake/mlir/MLIRConfig.cmake" ] \
-    || return 1
-
-  if llvm_has_simt_entry \
-     && [ -f "${LLVM_BUILD_DIR}/include/llvm/IR/CallingConv.h" ] \
-     && ! grep -q "SimtEntry" "${LLVM_BUILD_DIR}/include/llvm/IR/CallingConv.h"; then
-    return 1
+  local reason
+  if [ ! -f "${LLVM_BUILD_DIR}/lib/cmake/llvm/LLVMConfig.cmake" ] \
+     || [ ! -f "${LLVM_BUILD_DIR}/lib/cmake/mlir/MLIRConfig.cmake" ]; then
+    reason="LLVM/MLIR CMake package files are missing"
+  elif llvm_has_simt_entry \
+       && [ -f "${LLVM_BUILD_DIR}/include/llvm/IR/CallingConv.h" ] \
+       && ! grep -q "SimtEntry" "${LLVM_BUILD_DIR}/include/llvm/IR/CallingConv.h"; then
+    reason="cached CallingConv.h lacks SimtEntry"
+  elif ! llvm_build_is_abi_compatible; then
+    reason="libLLVMSupport is missing, unreadable, or has an incompatible C++ ABI"
+  elif ! llvm_build_has_bspub_npu_data_type; then
+    reason="BSPUB_NPU_DATA_TYPE flags do not match"
+  elif ! llvm_build_has_devtoolset_sysroot; then
+    reason="devtoolset-7 sysroot flags do not match"
+  elif ! llvm_build_uses_shared_components; then
+    reason="LLVM shared-component settings do not match"
+  elif ! llvm_build_links_vectorize_target_parser; then
+    reason="LLVMVectorize linker flags lack LLVMTargetParser"
+  elif ! llvm_vectorize_has_target_parser_dependency; then
+    reason="LLVMVectorize is missing, unreadable, or lacks its LLVMTargetParser dependency"
+  else
+    return 0
   fi
-  llvm_build_is_abi_compatible || return 1
-  llvm_build_has_bspub_npu_data_type || return 1
-  llvm_build_uses_shared_components || return 1
-  llvm_build_links_vectorize_target_parser || return 1
-  llvm_vectorize_has_target_parser_dependency || return 1
+  echo "LLVM/MLIR cache miss at ${LLVM_BUILD_DIR}: ${reason}" >&2
+  return 1
 }
 
 # Build LLVM/MLIR 19 (shared components + MLIR Python bindings) if the cached build
@@ -332,8 +538,13 @@ ensure_llvm_build() {
 
   # Do not destroy a legacy cache shared by other jobs. Build the requested
   # configuration in a stable sibling directory so later PreSmoke runs can
-  # reuse it instead of repeating the LLVM build.
-  local keyed_llvm_build_dir="${default_llvm_build_dir}-ptoas-abi${PTOAS_GLIBCXX_ABI}-bspub-shared"
+  # reuse it instead of repeating the LLVM build. When the devtoolset sysroot
+  # is active (newer host glibc) keep the low-glibc tree in its own keyed
+  # directory; otherwise fall back to the default shared cache location.
+  local _dts7_key=""
+  [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS}" ] && _dts7_key="-dts7"
+  local keyed_llvm_build_dir="${default_llvm_build_dir}-ptoas-abi${PTOAS_GLIBCXX_ABI}-bspub${_dts7_key}-shared"
+  unset _dts7_key
   if [ "${PTOAS_LLVM_BUILD_DIR_EXPLICIT:-FALSE}" != "TRUE" ]; then
     export LLVM_BUILD_DIR="${keyed_llvm_build_dir}"
     if llvm_build_cache_is_usable; then
@@ -350,11 +561,55 @@ ensure_llvm_build() {
   echo "Building LLVM/MLIR ${LLVM_SOURCE_VERSION} (this can take a while)"
   mkdir -p "${LLVM_BUILD_DIR}"
 
+  # CI's BuildAccelerate/NextCache injects itself through an LD_PRELOAD
+  # exec hook (libxcache_hook.so) that intercepts clang/ld invocations. When
+  # the devtoolset sysroot is active the intercepted build misbehaves, so
+  # detach the whole cmake/ninja subtree from the hook by unsetting
+  # LD_PRELOAD. CentOS7 CI (glibc already 2.17, no sysroot) keeps the hook
+  # and its acceleration intact.
+  if [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS}" ] && [ -n "${LD_PRELOAD:-}" ]; then
+    _hook_lib="${LD_PRELOAD}"
+    case "${_hook_lib}" in
+      *libxcache_hook.so*|*nextbuild*)
+        echo "Note: unsetting LD_PRELOAD (${_hook_lib}) to detach the build from the xcache exec hook"
+        unset LD_PRELOAD
+        ;;
+    esac
+    unset _hook_lib
+  fi
+
   local python_bin
   python_bin="$(command -v python3 || command -v python)"
 
   local pybind_dir
   pybind_dir="$("${python_bin}" -m pybind11 --cmakedir 2>/dev/null || true)"
+
+  local llvm_c_flags="-DBSPUB_NPU_DATA_TYPE"
+  local llvm_cxx_flags="-DBSPUB_NPU_DATA_TYPE -D_GLIBCXX_USE_CXX11_ABI=${PTOAS_GLIBCXX_ABI}"
+  local llvm_linker_flags=""
+  if [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS}" ]; then
+    # Lower the linked GLIBC/GLIBCXX floor of the runtime libraries to the
+    # CentOS7 devtoolset-7 sysroot instead of the host libc.
+    llvm_c_flags="${llvm_c_flags} ${DEVTOOLSET_TOOLCHAIN_FLAGS}"
+    llvm_cxx_flags="${llvm_cxx_flags} ${DEVTOOLSET_TOOLCHAIN_FLAGS}"
+    # clang 15 + the devtoolset-7 sysroot headers (glibc 2.17 __REDIRECT
+    # fortify macros) miscompile llvm::sys::fs::readNativeFileSlice into an
+    # infinite self-loop when -D_FORTIFY_SOURCE is active: the tblgen binary
+    # then spins at 100% CPU forever on its first file read and the build
+    # hangs (observed as the [185/202] llvm-min-tblgen "link" hang). The
+    # LLVM build tools are not part of the delivered run package, so drop
+    # FORTIFY for this build only. The delivered PTOAS libraries keep the
+    # full hardening flags.
+    llvm_c_flags="${llvm_c_flags} -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
+    llvm_cxx_flags="${llvm_cxx_flags} -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
+    # LLVM's sandbox/C utility binaries (bin/count etc.) are C programs linked
+    # with the C driver, which never injects -lstdc++. With the devtoolset
+    # sysroot in effect those executables pull libLLVMSupport.so (a C++ DSO)
+    # and the link fails on the libstdc++ symbols unless stdc++ is provided
+    # explicitly. Keep it in the runtime linker flags so both the C and C++
+    # targets resolve their libstdc++ dependency against the sysroot.
+    llvm_linker_flags="-fuse-ld=lld -lstdc++"
+  fi
 
   local cmake_args=(
     -G Ninja
@@ -364,12 +619,16 @@ ensure_llvm_build() {
     # Keeping it out avoids building clangInterpreter, which is incompatible
     # with the GCC 7 libstdc++ headers used by the ARM CI image.
     -DLLVM_ENABLE_PROJECTS="mlir"
-    -DCMAKE_CXX_FLAGS="-DBSPUB_NPU_DATA_TYPE -D_GLIBCXX_USE_CXX11_ABI=${PTOAS_GLIBCXX_ABI}"
-    -DCMAKE_C_FLAGS="-DBSPUB_NPU_DATA_TYPE"
+    -DCMAKE_CXX_FLAGS="${llvm_cxx_flags}"
+    -DCMAKE_C_FLAGS="${llvm_c_flags}"
+    -DCMAKE_EXE_LINKER_FLAGS="${llvm_linker_flags}"
+    -DCMAKE_SHARED_LINKER_FLAGS="${llvm_linker_flags}"
+    -DCMAKE_MODULE_LINKER_FLAGS="${llvm_linker_flags}"
     -DLLVM_BSPUB_NPU_DATA_TYPE=ON
     -DBUILD_SHARED_LIBS=ON
     -DLLVM_BUILD_LLVM_DYLIB=OFF
     -DLLVM_LINK_LLVM_DYLIB=OFF
+    -DLLVM_USE_LINKER=lld
     -DLLVM_LLVMVectorize_LINKER_FLAGS="-L${LLVM_BUILD_DIR}/lib;-Wl,--no-as-needed;-lLLVMTargetParser;-Wl,--as-needed"
     -DLLVM_ENABLE_ASSERTIONS=ON
     -DMLIR_ENABLE_BINDINGS_PYTHON=ON
@@ -381,6 +640,8 @@ ensure_llvm_build() {
     -DLLVM_INCLUDE_EXAMPLES=OFF
     -DCMAKE_C_COMPILER="${PTOAS_CC}"
     -DCMAKE_CXX_COMPILER="${PTOAS_CXX}"
+    -DCMAKE_C_COMPILER_LAUNCHER="${CMAKE_C_COMPILER_LAUNCHER:-}"
+    -DCMAKE_CXX_COMPILER_LAUNCHER="${CMAKE_CXX_COMPILER_LAUNCHER:-}"
     -DPython3_EXECUTABLE="${python_bin}"
     -DPython_EXECUTABLE="${python_bin}"
   )
@@ -398,6 +659,25 @@ ensure_llvm_build() {
   # The linker-flags cache entry adds a linker input but not a Ninja target
   # edge, so materialize TargetParser before the parallel Vectorize link.
   cmake --build "${LLVM_BUILD_DIR}" --target LLVMTargetParser -- -j "${JOBS}"
+  # The devtoolset sysroot link has been observed to hang indefinitely on
+  # some CI ARM executors (no error, no CPU, [185/202] llvm-min-tblgen stuck
+  # for hours) while the identical command completes in 0.1s elsewhere.
+  # Build the small executable-link step serially under a timeout so a hang
+  # is detected early instead of burning the 2h job limit; on timeout print
+  # the exact link command and a process snapshot for diagnosis, then retry
+  # once with a fully sanitized environment (env -i) which has been observed
+  # to unstick similar exec-hook interactions.
+  if [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS}" ]; then
+    if ! timeout 300 cmake --build "${LLVM_BUILD_DIR}" --target llvm-min-tblgen -- -j 1 -v; then
+      echo "WARNING: llvm-min-tblgen link timed out or failed; dumping diagnostics and retrying once" >&2
+      ps -ef | grep -E "ld|lld|clang" | grep -v grep >&2 || true
+      ninja -C "${LLVM_BUILD_DIR}" -t commands llvm-min-tblgen 2>/dev/null | tail -1 >&2 || true
+      env -i PATH="${PATH}" HOME="${HOME}"         timeout 300 ninja -C "${LLVM_BUILD_DIR}" llvm-min-tblgen -j 1 -v || {
+          echo "ERROR: llvm-min-tblgen link failed after sanitized retry" >&2
+          exit 1
+        }
+    fi
+  fi
   cmake --build "${LLVM_BUILD_DIR}" -- -j "${JOBS}"
   if ! llvm_vectorize_has_target_parser_dependency; then
     echo "ERROR: LLVMVectorize was built without a dependency on LLVMTargetParser" >&2
@@ -586,9 +866,11 @@ configure_ptoas() {
   local pybind_dir
   pybind_dir="$("${python_bin}" -m pybind11 --cmakedir 2>/dev/null || true)"
 
-  echo "Resetting PTOAS build tree: ${BUILD_PATH}"
-  rm -rf "${BUILD_PATH}"
+  echo "Configuring incremental PTOAS build: ${BUILD_PATH}"
   mkdir -p "${BUILD_PATH}"
+  if is_presmoke; then
+    touch "${PTOAS_PRESMOKE_SKIP_RUNOP_MARKER}"
+  fi
   local ptoas_cmake_args=(
     -G Ninja
     -S "${BASE_PATH}"
@@ -600,14 +882,24 @@ configure_ptoas() {
     -DPTO_ENABLE_PYTHON_BINDING=ON
     -DBUILD_TESTING=ON
     -DCMAKE_BUILD_TYPE=Release
-    -DCMAKE_CXX_FLAGS="-DBSPUB_NPU_DATA_TYPE -D_GLIBCXX_USE_CXX11_ABI=0 -Wno-error=deprecated-declarations"
+    -DCMAKE_CXX_FLAGS="-DBSPUB_NPU_DATA_TYPE -D_GLIBCXX_USE_CXX11_ABI=0 -Wno-error=deprecated-declarations${DEVTOOLSET_TOOLCHAIN_FLAGS:+ ${DEVTOOLSET_TOOLCHAIN_FLAGS}}"
     -DCMAKE_INSTALL_PREFIX="${INSTALL_PATH}"
     -DCMAKE_C_COMPILER="${PTOAS_CC}"
     -DCMAKE_CXX_COMPILER="${PTOAS_CXX}"
-    -DENABLE_PACKAGE="${ENABLE_PACKAGE:-FALSE}"
+    -DCMAKE_C_COMPILER_LAUNCHER="${CMAKE_C_COMPILER_LAUNCHER:-}"
+    -DCMAKE_CXX_COMPILER_LAUNCHER="${CMAKE_CXX_COMPILER_LAUNCHER:-}"
+    -DENABLE_PACKAGE=OFF
     -DPACKAGE_TYPE="${PACKAGE_TYPE:-run}"
     -DCANN_3RD_LIB_PATH="${CANN_3RD_LIB_PATH}"
   )
+  if [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS:-}" ]; then
+    # Inject the devtoolset-7 sysroot + gcc-toolchain into C compilation.
+    # `-D` overrides the `-C` hardening preload, so carry the hardening flags
+    # explicitly alongside the sysroot instead of letting them be dropped.
+    ptoas_cmake_args+=(
+      "-DCMAKE_C_FLAGS=-D_FORTIFY_SOURCE=2 -fstack-protector-strong -ftrapv ${DEVTOOLSET_TOOLCHAIN_FLAGS}"
+    )
+  fi
   if [ -n "${PTOAS_WHEEL_FILE:-}" ]; then
     ptoas_cmake_args+=("-DPTOAS_WHEEL_FILE=${PTOAS_WHEEL_FILE}")
   fi
@@ -641,7 +933,10 @@ build_only() {
   echo "build ptoas"
   ensure_llvm_build
   configure_ptoas
-  cmake --build "${BUILD_PATH}" -- -j "${JOBS}"
+  local _ptoas_jobs
+  _ptoas_jobs="$(ptoas_build_jobs)"
+  echo "PTOAS build parallelism: jobs=${_ptoas_jobs} (requested=${JOBS})"
+  cmake --build "${BUILD_PATH}" -- -j "${_ptoas_jobs}"
   cmake --install "${BUILD_PATH}"
 
   echo "execute samples success"
@@ -688,6 +983,7 @@ stage_ptoas_wheel() {
   pip_install_runtime_deps "${python_bin}" \
     numpy \
     'pybind11<3' \
+    wheel \
     'scikit-build-core>=0.12.2,<2'
   # pip 21.2 copies local projects out of tree unless this transitional
   # feature is enabled, which conflicts with the existing CMake cache. Newer
@@ -696,12 +992,70 @@ stage_ptoas_wheel() {
        --use-feature=in-tree-build --help >/dev/null 2>&1; then
     wheel_feature_args+=(--use-feature=in-tree-build)
   fi
-  CMAKE_BUILD_PARALLEL_LEVEL="${JOBS}" \
-  SKBUILD_BUILD_DIR="${BUILD_PATH}" \
+  # Keep the wheel's scikit-build configuration separate from configure_ptoas.
+  # compile.sh sources /opt/rh/devtoolset-7/enable, so PATH resolves the C/C++
+  # compilers to the devtoolset GCC 7.3.1 unless the wheel configure pins them
+  # explicitly; --gcc-toolchain below is a clang-only flag, so letting CMake
+  # pick GCC fails the compiler check. Pin the same clang pair that
+  # configure_ptoas uses for the install-tree build.
+  # CANN_3RD_LIB_PATH must also be passed explicitly: the wheel configure no
+  # longer inherits it from a previous configure_ptoas cache, and without it
+  # fetch_cann_cmake.cmake falls back to cloning cann/cmake.git, which is
+  # unreachable from the intranet build environment. A CMake cache define is
+  # used instead of an env var so the value is recorded in the build tree.
+  wheel_feature_args+=(
+    "--config-settings=cmake.define.CMAKE_C_COMPILER=${PTOAS_CC}"
+    "--config-settings=cmake.define.CMAKE_CXX_COMPILER=${PTOAS_CXX}"
+    "--config-settings=cmake.define.CMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER:-}"
+    "--config-settings=cmake.define.CMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER:-}"
+    "--config-settings=cmake.define.LLVM_DIR=${LLVM_BUILD_DIR}/lib/cmake/llvm"
+    "--config-settings=cmake.define.MLIR_DIR=${LLVM_BUILD_DIR}/lib/cmake/mlir"
+    "--config-settings=cmake.define.CANN_3RD_LIB_PATH=${CANN_3RD_LIB_PATH}"
+    "--config-settings=cmake.define.ENABLE_PACKAGE=OFF"
+  )
+  # The BSPUB data-type define and the libstdc++ ABI must match the LLVM/MLIR
+  # cache on every image, not only on the devtoolset-7 (CentOS) one: the cache
+  # is configured with _GLIBCXX_USE_CXX11_ABI=${PTOAS_GLIBCXX_ABI}, so a wheel
+  # built without the define picks the compiler default (ABI=1) and fails to
+  # link against the cached ABI=0 libraries ("undefined reference to
+  # llvm::toString[abi:cxx11](llvm::Error)"). The devtoolset sysroot flags stay
+  # additive and are appended only when that toolchain is in use.
+  local _wheel_c_flags=""
+  local _wheel_cxx_flags="-DBSPUB_NPU_DATA_TYPE -D_GLIBCXX_USE_CXX11_ABI=${PTOAS_GLIBCXX_ABI}"
+  if [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS}" ]; then
+    _wheel_c_flags="${DEVTOOLSET_TOOLCHAIN_FLAGS}"
+    _wheel_cxx_flags="${_wheel_cxx_flags} ${DEVTOOLSET_TOOLCHAIN_FLAGS}"
+  fi
+  wheel_feature_args+=(
+    "--config-settings=cmake.define.CMAKE_C_FLAGS=${_wheel_c_flags}"
+    "--config-settings=cmake.define.CMAKE_CXX_FLAGS=${_wheel_cxx_flags}"
+  )
+  # Pass the devtoolset-7 sysroot + gcc-toolchain through CMake defines so the
+  # wheel's native extension links against the CentOS7 libc floor, matching the
+  # LLVM/MLIR runtime libraries packaged alongside it.
+  if [ -n "${DEVTOOLSET_TOOLCHAIN_FLAGS}" ]; then
+    # -ftrapv (from the hardening preload) on aarch64 emits __muloti4 calls
+    # for __int128 multiplications; the devtoolset-7 GCC libgcc lacks that
+    # symbol, so the wheel's native extension link fails unless compiler-rt
+    # is provided. resolve_compiler_rt locates the archive (or builds it).
+    resolve_compiler_rt
+    local _wheel_rt_flags=""
+    if [ -n "${PTOAS_COMPILER_RT:-}" ]; then
+      _wheel_rt_flags="-Wl,-u,__muloti4 ${PTOAS_COMPILER_RT}"
+    fi
+    wheel_feature_args+=(
+      "--config-settings=cmake.define.CMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -lstdc++ ${_wheel_rt_flags}"
+      "--config-settings=cmake.define.CMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -lstdc++ ${_wheel_rt_flags}"
+      "--config-settings=cmake.define.CMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld -lstdc++ ${_wheel_rt_flags}"
+    )
+  fi
+  CMAKE_BUILD_PARALLEL_LEVEL="$(ptoas_build_jobs)" \
+  SKBUILD_BUILD_DIR="${WHEEL_BUILD_PATH}" \
   LLVM_BUILD_DIR="${LLVM_BUILD_DIR}" \
     "${python_bin}" -m pip wheel "${BASE_PATH}" \
       "${wheel_feature_args[@]}" \
       --config-settings=wheel.py-api=cp37 \
+      --config-settings=cmake.define.PTOAS_ENABLE_ONLINE_CORE_COMPILE=ON \
       --no-build-isolation \
       --no-deps \
       --wheel-dir "${wheel_dist}"
@@ -753,11 +1107,41 @@ stage_ptoas_wheel() {
   "${python_bin}" "${BASE_PATH}/docker/validate_wheel_payload.py" \
     "${wheelhouse}"
 
-  mkdir -p "${stable_wheelhouse}"
-  cp "${wheelhouse}"/ptoas*.whl "${stable_wheelhouse}/"
+  PATH="${python_tool_path}" \
+    "${python_bin}" "${BASE_PATH}/test/python/test_harden_cann_wheel.py"
+
+  # CANN delivery requires every ELF (including auditwheel's copied libraries)
+  # to be stripped and have no RPATH/RUNPATH. Keep the ordinary repaired wheel
+  # intact and validate the dedicated delivery copy before CPack consumes it.
+  PATH="${python_tool_path}" \
+    "${python_bin}" "${BASE_PATH}/scripts/package/harden_cann_wheel.py" \
+      "${wheelhouse}"/ptoas*.whl --output-dir "${stable_wheelhouse}"
+  "${python_bin}" "${BASE_PATH}/docker/validate_wheel_payload.py" \
+    "${stable_wheelhouse}"
   PTOAS_WHEEL_FILE="$(realpath "${stable_wheelhouse}"/ptoas*.whl)"
   export PTOAS_WHEEL_FILE
   echo "staged ptoas wheel: ${PTOAS_WHEEL_FILE}"
+}
+
+# Reuse the wheel build's exported CMake files. The packaging configuration has
+# no native targets: changing the installer payload cannot rebuild the compiler.
+package_ptoas_wheel() {
+  local package_build="${BUILD_PATH}/package"
+  cmake --install "${WHEEL_BUILD_PATH}" --prefix "${INSTALL_PATH}" --component PTOAS_CMake
+  # The shared GitCode API checker reads build/compile_commands.json.
+  cp "${WHEEL_BUILD_PATH}/compile_commands.json" "${BUILD_PATH}/compile_commands.json"
+  cmake -G Ninja -S "${BASE_PATH}" -B "${package_build}" \
+    -DPTOAS_PACKAGE_ONLY=ON \
+    -DPTOAS_NATIVE_BUILD_DIR="${WHEEL_BUILD_PATH}" \
+    -DPTOAS_WHEEL_FILE="${PTOAS_WHEEL_FILE}" \
+    -DPython3_EXECUTABLE="$(command -v python3 || command -v python)" \
+    -DCMAKE_INSTALL_PREFIX="${INSTALL_PATH}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="${PTOAS_CC}" \
+    -DCMAKE_CXX_COMPILER="${PTOAS_CXX}" \
+    -DCANN_3RD_LIB_PATH="${CANN_3RD_LIB_PATH}" \
+    -DPACKAGE_TYPE="${PACKAGE_TYPE:-run}"
+  cmake --build "${package_build}" --target package -- -j "$(ptoas_build_jobs)"
 }
 
 # Package the wheel into a self-extracting .run installer under build_out. The
@@ -768,33 +1152,21 @@ package() {
   echo $dotted_line
   echo "package ptoas"
   ensure_llvm_build
-  ENABLE_PACKAGE=FALSE configure_ptoas
-  cmake --build "${BUILD_PATH}" -- -j "${JOBS}"
-
+  local _ptoas_jobs
+  _ptoas_jobs="$(ptoas_build_jobs)"
+  echo "PTOAS build parallelism: jobs=${_ptoas_jobs} (requested=${JOBS})"
   # Distill the version used for the .run package name. The CANN product version
   # (9.2.0 for this release train) differs from project(ptoas VERSION 0.57), so
   # default to the packaging version and allow an explicit override.
   PTOAS_PACKAGE_VERSION="${PTOAS_PACKAGE_VERSION:-9.2.0}"
 
-  # The placeholder package intentionally does not invoke pip/auditwheel.  The
-  # native build above is still performed, and CMake/CPack owns generation of
-  # the same .run/RPM/DEB package formats.  Keep the old wheel path available
-  # behind an explicit opt-in for local release builds.
+  # Compile once through the wheel backend, then package its existing output.
+  # Keep both build trees so a repeated invocation can use Ninja's dependency
+  # graph in addition to the CI compiler cache.
   rm -rf "${BUILD_OUT_PATH}"
   mkdir -p "${BUILD_OUT_PATH}"
-  unset PTOAS_WHEEL_FILE
-  if [ "${PTOAS_PLACEHOLDER_RUN_PACKAGE}" != "TRUE" ]; then
-    stage_ptoas_wheel
-  else
-    echo "Building placeholder PTOAS package without a Python wheel"
-  fi
-  ENABLE_PACKAGE=TRUE
-  configure_ptoas
-  # configure_ptoas resets the build tree; rebuild all targets before the
-  # install/CPack pass so generated install scripts reference real artifacts.
-  cmake --build "${BUILD_PATH}" -- -j "${JOBS}"
-  cmake --install "${BUILD_PATH}"
-  cmake --build "${BUILD_PATH}" --target package -- -j "${JOBS}"
+  stage_ptoas_wheel
+  package_ptoas_wheel
   echo "package staged under ${BUILD_OUT_PATH}"
   # Diagnostics: the OBS uploader reads build_out via the host path
   # /opt/cloud/slavespace/.../x86build/build_out; print what we actually
@@ -803,23 +1175,159 @@ package() {
   ls -la "${BUILD_OUT_PATH}"
 }
 
-# The CANN PreSmoke driver invokes test/samples/runop.sh after build.sh exits.
-# Persist the decision in the build tree because exports from this child shell
-# cannot affect that later command in the parent CI process.
+# Actions marks PreSmoke with ST_PART=1. The robot exports task_name and may
+# also pass SMOKE_TYPE=pre; accept the job name when that shell variable is lost.
+is_presmoke() {
+  [ "${SMOKE_TYPE:-}" = "pre" ] || [ "${ST_PART:-}" = "1" ] \
+    || [[ "${task_name:-}" == PreSmoke_* ]]
+}
+
+# Persist the decision before building: the parent driver invokes runop.sh
+# after this child exits, and cannot inherit exports from it.
+prepare_presmoke_log_archive() {
+  # The parent smoke driver archives this directory after the skipped board
+  # commands, so prepare it for either CI entry point after package success.
+  local log_dir="${PTOAS_PRESMOKE_LOG_DIR:-/root/ascend/log}"
+  mkdir -p "${log_dir}"
+  printf '%s\n' 'PTOAS PreSmoke package prepared; runop and board validation are disabled.' \
+    > "${log_dir}/ptoas-presmoke.log"
+}
+
 write_presmoke_runop_policy() {
-  if [ "${SMOKE_TYPE:-}" = "pre" ]; then
+  if is_presmoke; then
     mkdir -p "${BUILD_PATH}"
     touch "${PTOAS_PRESMOKE_SKIP_RUNOP_MARKER}"
     echo "PreSmoke runop smoke disabled: ${PTOAS_PRESMOKE_SKIP_RUNOP_MARKER}"
+    # Report the legacy success sentinel only after package preparation succeeds.
+    if [ "${1:-}" = "complete" ]; then
+      prepare_presmoke_log_archive
+      echo "execute samples success (skipped in PreSmoke; covered by Build_and_test)"
+    fi
   else
     rm -f "${PTOAS_PRESMOKE_SKIP_RUNOP_MARKER}"
   fi
 }
 
+# Accept exactly one nonempty installer for this host. Reject ambiguous output
+# rather than letting the parent expand its wildcard to multiple installers.
+find_presmoke_package() {
+  local package_dir="$1"
+  local package_arch="$2"
+  local packages=()
+  local candidate
+  for candidate in "${package_dir}"/cann-pto-as*.run; do
+    [ -e "${candidate}" ] || continue
+    packages+=("${candidate}")
+  done
+  [ "${#packages[@]}" -eq 1 ] || return 1
+  candidate="${packages[0]}"
+  [ -f "${candidate}" ] && [ -s "${candidate}" ] || return 1
+  case "${candidate##*/}" in
+    *linux-"${package_arch}".run) printf '%s\n' "${candidate}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Only PreSmoke may consume a previous package. Compile and Build_and_test
+# always build the requested source, and successful packaging refreshes this
+# optional architecture-specific cache with an atomic rename.
+cache_presmoke_package() {
+  local package_arch="$1"
+  local cached_dir="${CANN_3RD_LIB_PATH}/lib_cache/ptoas-presmoke/${package_arch}"
+  local package_file
+  package_file="$(find_presmoke_package "${BUILD_OUT_PATH}" "${package_arch}")" || return 0
+  mkdir -p "${cached_dir}" || return 1
+  local staging_file
+  staging_file="$(mktemp "${cached_dir}/.package.XXXXXX")" || return 1
+  if cp "${package_file}" "${staging_file}" && chmod 644 "${staging_file}" \
+      && mv -f "${staging_file}" "${cached_dir}/cann-pto-as_linux-${package_arch}.run"; then
+    echo "Cached PreSmoke installer under ${cached_dir}"
+  else
+    rm -f "${staging_file}"
+    return 1
+  fi
+}
+
+reuse_presmoke_package() {
+  local package_arch="$1"
+  local cached_dir="${CANN_3RD_LIB_PATH}/lib_cache/ptoas-presmoke/${package_arch}"
+  local package_dir package_file
+  for package_dir in "${BUILD_OUT_PATH}" "${BASE_PATH}" "${download_path:-${BASE_PATH}}" "${cached_dir}"; do
+    package_file="$(find_presmoke_package "${package_dir}" "${package_arch}")" || continue
+    if [ "${package_dir}" != "${BUILD_OUT_PATH}" ]; then
+      # Never leave two installers for the parent's cann-pto-as*.run glob.
+      local existing
+      for existing in "${BUILD_OUT_PATH}"/cann-pto-as*.run; do
+        [ ! -e "${existing}" ] || return 1
+      done
+      mkdir -p "${BUILD_OUT_PATH}" || return 1
+      cp "${package_file}" "${BUILD_OUT_PATH}/cann-pto-as_linux-${package_arch}.run" || return 1
+    fi
+    echo "Reusing PreSmoke installer: ${package_file}; skipping LLVM/PTOAS build and packaging"
+    return 0
+  done
+  return 1
+}
+
+# Actions exports obs_path; the robot publishes under pto-as/package and
+# exports GIT_PR_NUMBER (older smoke wrappers use pr_id). Never guess a PR.
+presmoke_artifact_path() {
+  if [ -n "${obs_path:-}" ]; then
+    if [[ "${obs_path}" =~ ^([A-Za-z0-9_-]+/pto-as/ci|pto-as)/package/[0-9]+$ ]]; then
+      printf '%s\n' "${obs_path}"
+      return 0
+    fi
+  elif [ "${ST_PART:-}" != "1" ]; then
+    local robot_pr="${GIT_PR_NUMBER:-${pr_id:-}}"
+    if [[ "${robot_pr}" =~ ^[0-9]+$ ]]; then
+      printf 'pto-as/package/%s\n' "${robot_pr}"
+      return 0
+    fi
+  fi
+  echo "ERROR: no valid PreSmoke artifact path; set obs_path or the robot PR number" >&2
+  return 1
+}
+
+# Both CI systems publish Compile installers to this existing public endpoint,
+# but their PreSmoke nodes may have neither the package nor a shared cache.
+download_presmoke_package() {
+  local package_arch="$1" artifact_path
+  artifact_path="$(presmoke_artifact_path)" || return 1
+  if [[ ! "${package_arch}" =~ ^(x86_64|aarch64)$ ]]; then
+    echo "ERROR: unsupported PreSmoke installer architecture" >&2
+    return 1
+  fi
+  local package_name="cann-pto-as_linux-${package_arch}.run"
+  local artifact_url="https://ascend-ci.obs.cn-north-4.myhuaweicloud.com/${artifact_path}/${package_name}"
+  local existing staging_file first_line
+  for existing in "${BUILD_OUT_PATH}"/cann-pto-as*.run; do
+    [ ! -e "${existing}" ] || return 1
+  done
+  mkdir -p "${BUILD_OUT_PATH}" || return 1
+  staging_file="$(mktemp "${BUILD_OUT_PATH}/.package.XXXXXX")" || return 1
+  echo "Downloading Compile installer for PreSmoke: ${artifact_url}"
+  if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --connect-timeout 15 --max-time 300 --retry 2 --retry-max-time 300 \
+      --output "${staging_file}" "${artifact_url}" && [ -s "${staging_file}" ]; then
+    IFS= read -r first_line < "${staging_file}" || first_line=""
+    case "${first_line}" in
+      '#!/bin/sh'|'#!/bin/bash'|'#!/usr/bin/env bash')
+        if chmod 644 "${staging_file}" && mv "${staging_file}" "${BUILD_OUT_PATH}/${package_name}"; then
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  rm -f "${staging_file}"
+  echo "ERROR: no valid Compile installer available for PreSmoke; source builds are disabled" >&2
+  return 1
+}
+
 main() {
-  JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
+  JOBS="${JOBS:-}"
   ENABLE_BUILD_ONLY=FALSE
   ENABLE_PACKAGE=FALSE
+  CLEAN_PTOAS=FALSE
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -833,6 +1341,10 @@ main() {
         ;;
       --pkg)
         ENABLE_PACKAGE=TRUE
+        shift
+        ;;
+      --clean)
+        CLEAN_PTOAS=TRUE
         shift
         ;;
       --pkg-type|--pkg-type=*)
@@ -849,6 +1361,7 @@ main() {
         esac
         ;;
       -j)
+        [ $# -ge 2 ] || { echo "ERROR: -j requires a job count" >&2; return 1; }
         JOBS="$2"
         shift 2
         ;;
@@ -871,8 +1384,35 @@ main() {
     esac
   done
 
+  local package_arch
+  package_arch="$(uname -m)"
+  case "${package_arch}" in
+    arm64) package_arch=aarch64 ;;
+    amd64) package_arch=x86_64 ;;
+  esac
   if [ "$ENABLE_BUILD_ONLY" == "TRUE" ] || [ "$ENABLE_PACKAGE" == "TRUE" ]; then
+    write_presmoke_runop_policy
+    if is_presmoke; then
+      if [ "${PACKAGE_TYPE:-run}" != "run" ]; then
+        echo "ERROR: PreSmoke requires a run installer; source builds are disabled" >&2
+        return 1
+      fi
+      if ! reuse_presmoke_package "${package_arch}"; then
+        download_presmoke_package "${package_arch}" || return 1
+        reuse_presmoke_package "${package_arch}" || return 1
+      fi
+      write_presmoke_runop_policy complete
+      return 0
+    fi
+    resolve_build_jobs
+    trap 'report_build_failure "$?"' EXIT
+    resolve_devtoolset_toolchain
     resolve_ptoas_toolchain
+    resolve_compiler_launchers
+    if [ "${CLEAN_PTOAS}" == "TRUE" ]; then
+      echo "Cleaning PTOAS build trees: ${BUILD_PATH}"
+      rm -rf "${BUILD_PATH}"
+    fi
   fi
 
   prepare_llvm_cache_layout
@@ -882,9 +1422,12 @@ main() {
   fi
   if [ "$ENABLE_PACKAGE" == "TRUE" ]; then
     package
+    if ! cache_presmoke_package "${package_arch}"; then
+      echo "WARNING: could not refresh the optional PreSmoke package cache" >&2
+    fi
   fi
   if [ "$ENABLE_BUILD_ONLY" == "TRUE" ] || [ "$ENABLE_PACKAGE" == "TRUE" ]; then
-    write_presmoke_runop_policy
+    write_presmoke_runop_policy complete
   fi
   if [ "$ENABLE_BUILD_ONLY" != "TRUE" ] && [ "$ENABLE_PACKAGE" != "TRUE" ]; then
     usage

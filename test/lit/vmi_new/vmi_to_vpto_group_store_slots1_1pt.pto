@@ -16,13 +16,13 @@ module {
     %c2 = arith.constant 2 : index
     pto.vmi.vstore %value, %dst[%off], %c2 {group = 8}
         : !pto.vmi.vreg<8xf32, #pto.vmi.layout<num_groups = 8, slots = 1>>,
-          !pto.ptr<f32, ub>
+          !pto.ptr<f32, ub>, index
     return
   }
 }
 
 // CHECK-LABEL: func.func @vmi_to_vpto_group_store_slots1_1pt(
-// CHECK-COUNT-8: pto.vsts {{.*}} {dist = "1PT_B32"} : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+// CHECK-COUNT-8: pto.vsts {{.*}} {dist = "1PT_B32"} : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
 // CHECK-NOT: pto.vmi.
 // CHECK-NOT: !pto.vmi.
 // CHECK-NOT: unrealized_conversion_cast

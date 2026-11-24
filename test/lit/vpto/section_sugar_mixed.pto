@@ -11,14 +11,15 @@ module attributes {pto.target_arch = "a5"} {
     %mat = pto.castptr %c0 : i64 -> !pto.ptr<i16, l1>
 
     pto.section.vector {
-      pto.mte_gm_ub %arg0, %ub, %c0, %c1
+      %c32 = arith.constant 32 : i64
+      pto.mte_gm_ub %arg0, %ub, %c0, %c32
         nburst(%c1, %c1, %c1)
         : !pto.ptr<i16, gm>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64
       %mask = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
       %vec = pto.vlds %ub[%idx0]
-        : !pto.ptr<i16, ub> -> !pto.vreg<128xi16>
+        : !pto.ptr<i16, ub>, index -> !pto.vreg<128xi16>
       pto.vsts %vec, %ub[%idx0], %mask
-        : !pto.vreg<128xi16>, !pto.ptr<i16, ub>, !pto.mask<b16>
+        : !pto.vreg<128xi16>, !pto.ptr<i16, ub>, index, !pto.mask<b16>
     }
 
     pto.section.cube {

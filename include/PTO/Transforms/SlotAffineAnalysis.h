@@ -6,8 +6,10 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-//===- SlotAffineAnalysis.h - Multi-buffer slot affine compare --*- C++ -*-===//
+//===- SlotAffineAnalysis.h - Tile slot affine compare         --*- C++ -*-===//
 //
+// Affine helpers for multi-buffer slots and dense full-row subviews.
+// Subview proofs are kept separate from general memory aliasing.
 // Small affine helper used by the multi-buffer sync path. InsertSync consumes
 // it to decide, for two `pto.multi_tile_get`
 // slot-index SSA expressions, whether they are provably equal modulo N,
@@ -24,6 +26,9 @@
 #include <cstdint>
 
 namespace mlir {
+namespace scf {
+class ForOp;
+} // namespace scf
 namespace pto {
 
 /// Three-valued relation between two multi-buffer slot SSA expressions
@@ -52,6 +57,21 @@ mlir::Value findMultiTileSlotExpr(mlir::Value v);
 ///   compareSlotSSA(%iv % 2, %j % 2)          -> kUnknown   // diff symbols
 ///   compareSlotSSA(arith.constant 0, arith.constant 1) -> kDisjoint
 SlotRelation compareSlotSSA(mlir::Value a, mlir::Value b, uint32_t N);
+
+/// Prove that two dense full-row subviews of the same allocation select
+/// different rows in the same iteration. Byte-preserving tile aliases are
+/// supported; unknown layouts, ranges, and arithmetic wrap retain dependencies.
+/// Subview event modeling remains conservative inside loops; callers must
+/// restrict this proof to accesses outside loops.
+bool areDisjointSubviewSlots(mlir::Value a, mlir::Value b);
+
+/// Prove that two dense full-row subviews touch different rows in every pair
+/// of distinct iterations of `forOp`. Both accesses must select the loop's
+/// induction variable from the same loop-invariant allocation. Only constant,
+/// in-range bounds and a positive unit step are supported; rotating slots and
+/// unknown accesses retain their loop-carried dependencies.
+bool areSubviewIterationsDisjoint(mlir::Value a, mlir::Value b,
+                                  scf::ForOp forOp);
 
 } // namespace pto
 } // namespace mlir

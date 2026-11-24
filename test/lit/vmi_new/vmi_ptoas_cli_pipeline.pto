@@ -8,6 +8,9 @@
 
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - | FileCheck %s
 // RUN: ptoas --pto-arch=a5 --emit-vpto %s -o - | FileCheck %s --check-prefix=ATTR
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - | FileCheck %s --check-prefix=DEFAULT
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --vmi-fastmath %s -o - | FileCheck %s --check-prefix=FAST
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --vmi-fastmath=false %s -o - | FileCheck %s --check-prefix=STRICT
 
 module attributes {pto.target_arch = "a5"} {
   module attributes {pto.backend = "vpto", pto.kernel_kind = #pto.kernel_kind<vector>} {
@@ -20,7 +23,7 @@ module attributes {pto.target_arch = "a5"} {
       %value = pto.vmi.vbrc %scalar
           : f32 -> !pto.vmi.vreg<128xf32>
       pto.vmi.vstore %value, %dst[%aligned_offset]
-          : !pto.vmi.vreg<128xf32>, !pto.ptr<f32, ub>
+          : !pto.vmi.vreg<128xf32>, !pto.ptr<f32, ub>, index
       return
     }
 
@@ -30,34 +33,31 @@ module attributes {pto.target_arch = "a5"} {
         %offset: index) {
       %c16 = arith.constant 16 : index
       %aligned_offset = arith.muli %offset, %c16 : index
-      %x16 = pto.vmi.vload %src[%aligned_offset] {dist_mode = "continuous"}
-          : !pto.ptr<f16, ub> -> !pto.vmi.vreg<128xf16>
+      %x16 = pto.vmi.vload %src[%aligned_offset]
+          : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<128xf16>
       %x32 = pto.vmi.vcvt %x16
           : !pto.vmi.vreg<128xf16> -> !pto.vmi.vreg<128xf32>
       pto.vmi.vstore %x32, %dst[%aligned_offset]
-          : !pto.vmi.vreg<128xf32>, !pto.ptr<f32, ub>
+          : !pto.vmi.vreg<128xf32>, !pto.ptr<f32, ub>, index
+      return
+    }
+
+    func.func @vmi_ptoas_cli_fastmath_f32_bf16(
+        %src: !pto.ptr<f32, ub>,
+        %dst: !pto.ptr<bf16, ub>,
+        %offset: index) {
+      %c64 = arith.constant 64 : index
+      %aligned_offset = arith.muli %offset, %c64 : index
+      %wide = pto.vmi.vload %src[%aligned_offset]
+          : !pto.ptr<f32, ub>, index -> !pto.vmi.vreg<64xf32>
+      %narrow = pto.vmi.vcvt %wide {rounding = "Z", saturate = "NOSAT"}
+          : !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xbf16>
+      pto.vmi.vstore %narrow, %dst[%aligned_offset]
+          : !pto.vmi.vreg<64xbf16>, !pto.ptr<bf16, ub>, index
       return
     }
   }
 }
-
-// CHECK-LABEL: func.func @vmi_ptoas_cli_pipeline
-// CHECK: pto.vecscope
-// CHECK: %[[VALUE:.*]] = pto.vdup
-// CHECK: pto.vsts %[[VALUE]]
-// CHECK: pto.vsts %[[VALUE]]
-// CHECK-NOT: pto.vmi.
-// CHECK-NOT: !pto.vmi.
-// CHECK-NOT: unrealized_conversion_cast
-
-// CHECK-LABEL: func.func @vmi_ptoas_cli_fold_pipeline
-// CHECK: pto.vlds
-// CHECK: pto.vcvt {{.*}} {part = "EVEN"}
-// CHECK: pto.vcvt {{.*}} {part = "ODD"}
-// CHECK: pto.vstsx2
-// CHECK-NOT: pto.vmi.
-// CHECK-NOT: !pto.vmi.
-// CHECK-NOT: unrealized_conversion_cast
 
 // ATTR-LABEL: func.func @vmi_ptoas_cli_pipeline
 // ATTR: pto.vecscope
@@ -66,3 +66,63 @@ module attributes {pto.target_arch = "a5"} {
 // ATTR-NOT: pto.vmi.
 // ATTR-NOT: !pto.vmi.
 // ATTR-NOT: unrealized_conversion_cast
+
+// DEFAULT-LABEL: func.func @vmi_ptoas_cli_fastmath_f32_bf16
+// DEFAULT: pto.vdintlv
+// DEFAULT-NOT: pto.vcvt
+
+// FAST-LABEL: func.func @vmi_ptoas_cli_fastmath_f32_bf16
+// FAST: pto.vdintlv
+// FAST-NOT: pto.vmi.
+// FAST-NOT: !pto.vmi.
+
+// The stateless strict path emits one per-part vcvt and lets the packed store
+// absorb the lane stride; it must never claim the dense same-layout relation
+// (which would need pto.vdintlv to produce a dense value).
+// STRICT-LABEL: func.func @vmi_ptoas_cli_fastmath_f32_bf16
+// STRICT: pto.vcvt
+// STRICT-NOT: pto.vdintlv
+// STRICT: pto.vsts {{.*}} {dist = "PK_B32"}
+
+// CHECK-LABEL: module attributes {pto.backend = "vpto", pto.kernel_kind = #pto.kernel_kind<vector>} {
+// CHECK-NEXT: func.func @vmi_ptoas_cli_pipeline(%[[VAL_0:[a-zA-Z0-9_.$-]+]]: f32, %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f32, ub>, %[[VAL_2:[a-zA-Z0-9_.$-]+]]: index) {
+// CHECK-NEXT: %[[VAL_3:[a-zA-Z0-9_.$-]+]] = arith.constant 8 : index
+// CHECK-NEXT: pto.vecscope {
+// CHECK-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+// CHECK-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_2]], %[[VAL_3]] : index
+// CHECK-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vdup %[[VAL_0]], %[[VAL_4]] : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+// CHECK-NEXT: pto.vstsx2 %[[VAL_6]], %[[VAL_6]], %[[VAL_1]]{{\[}}%[[VAL_5]]], "INTLV_B32", %[[VAL_4]] : !pto.vreg<64xf32>, !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
+// CHECK-NEXT: }
+// CHECK-NEXT: return
+// CHECK-NEXT: }
+// CHECK-NEXT: func.func @vmi_ptoas_cli_fold_pipeline(%[[VAL_7:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>, %[[VAL_8:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f32, ub>, %[[VAL_9:[a-zA-Z0-9_.$-]+]]: index) {
+// CHECK-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = arith.constant 16 : index
+// CHECK-NEXT: pto.vecscope {
+// CHECK-NEXT: %[[VAL_11:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_9]], %[[VAL_10]] : index
+// CHECK-NEXT: %[[VAL_12:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_7]]{{\[}}%[[VAL_11]]] : !pto.ptr<f16, ub>, index -> !pto.vreg<128xf16>
+// CHECK-NEXT: %[[VAL_13:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
+// CHECK-NEXT: %[[VAL_14:[a-zA-Z0-9_.$-]+]] = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+// CHECK-NEXT: %[[VAL_15:[a-zA-Z0-9_.$-]+]] = pto.vcvt %[[VAL_12]], %[[VAL_13]] {part = "EVEN"} : !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<64xf32>
+// CHECK-NEXT: %[[VAL_16:[a-zA-Z0-9_.$-]+]] = pto.vcvt %[[VAL_12]], %[[VAL_13]] {part = "ODD"} : !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<64xf32>
+// CHECK-NEXT: pto.vstsx2 %[[VAL_15]], %[[VAL_16]], %[[VAL_8]]{{\[}}%[[VAL_11]]], "INTLV_B32", %[[VAL_14]] : !pto.vreg<64xf32>, !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
+// CHECK-NEXT: }
+// CHECK-NEXT: return
+// CHECK-NEXT: }
+// CHECK-NEXT: func.func @vmi_ptoas_cli_fastmath_f32_bf16(%[[VAL_17:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f32, ub>, %[[VAL_18:[a-zA-Z0-9_.$-]+]]: !pto.ptr<bf16, ub>, %[[VAL_19:[a-zA-Z0-9_.$-]+]]: index) {
+// CHECK-NEXT: %[[VAL_20:[a-zA-Z0-9_.$-]+]] = arith.constant 64 : i32
+// CHECK-NEXT: %[[VAL_21:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : i16
+// CHECK-NEXT: %[[VAL_22:[a-zA-Z0-9_.$-]+]] = arith.constant 64 : index
+// CHECK-NEXT: pto.vecscope {
+// CHECK-NEXT: %[[VAL_31:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
+// CHECK-NEXT: %[[VAL_32:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_19]], %[[VAL_22]] : index
+// CHECK-NEXT: %[[VAL_33:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_17]]{{\[}}%[[VAL_32]]] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
+// CHECK-NEXT: %[[VAL_34:[a-zA-Z0-9_.$-]+]], %{{.*}} = pto.plt_b16 %[[VAL_20]] : i32 -> !pto.mask<b16>, i32
+// CHECK-NEXT: %[[VAL_35:[a-zA-Z0-9_.$-]+]] = pto.vdup %[[VAL_21]], %[[VAL_31]] : i16, !pto.mask<b16> -> !pto.vreg<128xi16>
+// CHECK-NEXT: %[[VAL_36:[a-zA-Z0-9_.$-]+]] = pto.vbitcast %[[VAL_33]] : !pto.vreg<64xf32> -> !pto.vreg<128xi16>
+// CHECK-NEXT: %{{.*}}, %[[VAL_37:[a-zA-Z0-9_.$-]+]] = pto.vdintlv %[[VAL_36]], %[[VAL_35]] : !pto.vreg<128xi16>, !pto.vreg<128xi16> -> !pto.vreg<128xi16>, !pto.vreg<128xi16>
+// CHECK-NEXT: %[[VAL_38:[a-zA-Z0-9_.$-]+]] = pto.vbitcast %[[VAL_37]] : !pto.vreg<128xi16> -> !pto.vreg<128xbf16>
+// CHECK-NEXT: pto.vsts %[[VAL_38]], %[[VAL_18]]{{\[}}%[[VAL_32]]], %[[VAL_34]] : !pto.vreg<128xbf16>, !pto.ptr<bf16, ub>, index, !pto.mask<b16>
+// CHECK-NEXT: }
+// CHECK-NEXT: return
+// CHECK-NEXT: }
+// CHECK-NEXT: }

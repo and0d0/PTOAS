@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,9 +6,11 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """PTODSL TileLib templates for ``pto.tstore``."""
 
 from ptodsl import pto
+from ptodsl._ast_rewrite import rewrite_jit_function
 import ptodsl.tilelib as tilelib
 
 from ._load_store import (
@@ -21,6 +24,42 @@ from ._load_store import (
     tstore_nd_constraint,
     tstore_nz_constraint,
 )
+
+
+@rewrite_jit_function
+def _emit_store(src, dst, n_burst, len_burst, ub_stride, gm_stride, src_stride2, elem_bytes):
+    """Emit the UB->GM burst, deriving the loop strides from the destination view."""
+    g0, g1, g2, _, _ = dst.shape
+    s0, s1, s2, _, _ = dst.strides
+    src_stride1 = g2 * src_stride2
+    src_stride0 = g1 * src_stride1
+
+    loops = []
+    if g2 not in (1, None):
+        loops.append((g2, src_stride2 * elem_bytes, s2 * elem_bytes))
+    if g1 not in (1, None):
+        loops.append((g1, src_stride1 * elem_bytes, s1 * elem_bytes))
+
+    ub_ptr = src.as_ptr()
+    gm_ptr = dst.as_ptr()
+    if g0 == 1 and s0 is None:
+        pto.mte_store(
+            ub_ptr,
+            gm_ptr,
+            len_burst,
+            nburst=(n_burst, ub_stride, gm_stride),
+            loops=loops or None,
+        )
+        return
+
+    for i in range(0, g0, 1):
+        pto.mte_store(
+            pto.addptr(ub_ptr, i * src_stride0),
+            pto.addptr(gm_ptr, i * s0),
+            len_burst,
+            nburst=(n_burst, ub_stride, gm_stride),
+            loops=loops or None,
+        )
 
 
 def _acc_src_stride(src):
@@ -58,8 +97,8 @@ def template_tstore_nd(src: pto.Tile, dst: pto.PartitionTensorView):
         )
         return
 
-    g0, g1, g2, g3, g4 = dst.shape
-    s0, s1, s2, s3, s4 = dst.strides
+    g0, g1, g2, g3, _ = dst.shape
+    _, _, _, s3, _ = dst.strides
     valid_rows, valid_cols = src.valid_shape
     _, ub_cols = src.shape
 
@@ -69,34 +108,7 @@ def template_tstore_nd(src: pto.Tile, dst: pto.PartitionTensorView):
     gm_stride = 0 if g3 == 1 or s3 is None else s3 * elem_bytes
 
     src_stride2 = (valid_rows if g3 is None else g3) * ub_cols
-    src_stride1 = g2 * src_stride2
-    src_stride0 = g1 * src_stride1
-
-    loops = []
-    if g2 not in (1, None):
-        loops.append((g2, src_stride2 * elem_bytes, s2 * elem_bytes))
-    if g1 not in (1, None):
-        loops.append((g1, src_stride1 * elem_bytes, s1 * elem_bytes))
-
-    ub_ptr = src.as_ptr()
-    gm_ptr = dst.as_ptr()
-    if g0 == 1 and s0 is None:
-        pto.mte_store(
-            ub_ptr,
-            gm_ptr,
-            len_burst,
-            nburst=(n_burst, ub_stride, gm_stride),
-            loops=loops or None,
-        )
-    else:
-        for i in range(0, g0, 1):
-            pto.mte_store(
-                pto.addptr(ub_ptr, i * src_stride0),
-                pto.addptr(gm_ptr, i * s0),
-                len_burst,
-                nburst=(n_burst, ub_stride, gm_stride),
-                loops=loops or None,
-            )
+    _emit_store(src, dst, n_burst, len_burst, ub_stride, gm_stride, src_stride2, elem_bytes)
 
 
 @tilelib.tile_template(
@@ -115,8 +127,8 @@ def template_tstore_nd(src: pto.Tile, dst: pto.PartitionTensorView):
 )
 def template_tstore_dn(src: pto.Tile, dst: pto.PartitionTensorView):
     elem_bytes = pto.bytewidth(src.dtype)
-    g0, g1, g2, g3, g4 = dst.shape
-    s0, s1, s2, s3, s4 = dst.strides
+    _, _, _, _, g4 = dst.shape
+    _, _, _, _, s4 = dst.strides
     valid_rows, valid_cols = src.valid_shape
     ub_rows, _ = src.shape
 
@@ -126,34 +138,7 @@ def template_tstore_dn(src: pto.Tile, dst: pto.PartitionTensorView):
     ub_stride = ub_rows * elem_bytes
 
     src_stride2 = ub_rows * n_burst
-    src_stride1 = g2 * src_stride2
-    src_stride0 = g1 * src_stride1
-
-    loops = []
-    if g2 not in (1, None):
-        loops.append((g2, src_stride2 * elem_bytes, s2 * elem_bytes))
-    if g1 not in (1, None):
-        loops.append((g1, src_stride1 * elem_bytes, s1 * elem_bytes))
-
-    ub_ptr = src.as_ptr()
-    gm_ptr = dst.as_ptr()
-    if g0 == 1 and s0 is None:
-        pto.mte_store(
-            ub_ptr,
-            gm_ptr,
-            len_burst,
-            nburst=(n_burst, ub_stride, gm_stride),
-            loops=loops or None,
-        )
-    else:
-        for i in range(0, g0, 1):
-            pto.mte_store(
-                pto.addptr(ub_ptr, i * src_stride0),
-                pto.addptr(gm_ptr, i * s0),
-                len_burst,
-                nburst=(n_burst, ub_stride, gm_stride),
-                loops=loops or None,
-            )
+    _emit_store(src, dst, n_burst, len_burst, ub_stride, gm_stride, src_stride2, elem_bytes)
 
 
 @tilelib.tile_template(
@@ -264,6 +249,29 @@ def template_tstore_acc_to_gm_nz2dn(src: pto.Tile, dst: pto.PartitionTensorView)
     )
 
 
+def _nz_dst_stride(src, dst):
+    """Return the NZ column-block pitch in element units.
+
+    Mirrors the stride PTO-ISA TStoreAccNZ derives internally:
+    align16(validRow) * C0, where validRow equals the destination NZ view's
+    row count (shape[2] * shape[3]) and C0 is 16, or 8 for an f32 view whose
+    last dimension is 8 (channel split). The pitch is a GM-side property of
+    the view, so prefer the view's own row tiles and fall back to the
+    aligned valid rows of the store. Never use the ACC tile's physical rows:
+    a padded ACC tile (physical rows > valid rows) must not widen the
+    destination pitch.
+    """
+    name = str(src.dtype)
+    c0 = 16
+    shape = dst.shape
+    if name == "f32" and len(shape) == 5 and shape[4] == 8:
+        c0 = 8
+    if len(shape) == 5:
+        return shape[2] * shape[3] * c0
+    rows = src.valid_shape[0]
+    return ((rows + 15) // 16) * 16 * c0
+
+
 @tilelib.tile_template(
     op="pto.tstore",
     target="a5",
@@ -282,7 +290,7 @@ def template_tstore_acc_to_gm_nz2dn(src: pto.Tile, dst: pto.PartitionTensorView)
 def template_tstore_acc_to_gm_nz2nz(src: pto.Tile, dst: pto.PartitionTensorView):
     m, n = src.valid_shape
     src_stride = _acc_src_stride(src)
-    dst_stride = n
+    dst_stride = _nz_dst_stride(src, dst)
 
     pto.mte_l0c_gm(
         src.as_ptr(),

@@ -47,7 +47,9 @@ for model_path in "${BASE_DIR}"/Qwen* "${BASE_DIR}"/Deepseek*; do
       ;;
   esac
 done
-PTO_PTO_DIRS="${PTO_PTO_DIRS:-Sync${MODEL_PTO_DIRS} CommSync Prelu Rem Rems Gemvmx MatmulMxLowPrecision TquantMx TquantMxDn Movfp Interleave DeInterleave PairReduceSum}"
+PTO_PTO_DIRS="${PTO_PTO_DIRS:-Sync${MODEL_PTO_DIRS} CommSync Img2col ConvPipeline \
+Prelu Rem Rems Gemvmx MatmulMxLowPrecision MatmulMxScaleExtract TquantMx TquantMxDn Movfp \
+Interleave DeInterleave PairReduceSum}"
 ENABLE_BC=0
 
 usage() {
@@ -94,7 +96,8 @@ sample_dir_arch() {
   case "$1" in
     TPipe|TAxpy|TColArgMax|TColArgMin|TConcatIdx|\
       TRowArgMax|TRowArgMin|Qwen*A3|Deepseek*A3) printf 'a3\n' ;;
-    Qwen*A5|Deepseek*A5|TquantMx|TquantMxDn|Interleave|DeInterleave|PairReduceSum) printf 'a5\n' ;;
+    Qwen*A5|Deepseek*A5|MatmulMxScaleExtract|Img2col|ConvPipeline|TquantMx|TquantMxDn|Interleave|DeInterleave|\
+      PairReduceSum|Histogram|Random) printf 'a5\n' ;;
   esac
 }
 
@@ -263,7 +266,7 @@ process_one_dir() {
       ptoas_flags+=(--pto-arch a5)
       target_arch="a5"
     fi
-    if [[ "${model_arch}" == "a5" && $has_pto_level_override -eq 0 ]]; then
+    if [[ ( "${model_arch}" == "a5" || "${A}" == "MatmulMxScaleExtract" ) && $has_pto_level_override -eq 0 ]]; then
       ptoas_flags+=(--pto-level=level3)
     fi
   elif [[ "${required_arch}" == "a3" ]]; then
@@ -343,6 +346,21 @@ process_one_dir() {
         ;;
     esac
     base="$(basename "$f" .py)"
+    local sample_arch="$target_arch_lc"
+    local -a sample_ptoas_cmd_base=("${ptoas_cmd_base[@]}")
+    case "$base" in
+      tpipe_identity|tpipe_v2c)
+        if [[ -n "$soc_lc" && "$soc_lc" != *a5* && "$soc_lc" != *950* ]] ||
+           [[ $has_pto_arch_override -eq 1 && "$sample_arch" != a5 ]]; then
+          echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
+          continue
+        fi
+        if [[ $has_pto_arch_override -eq 0 ]]; then
+          sample_arch=a5
+          sample_ptoas_cmd_base+=(--pto-arch a5)
+        fi
+        ;;
+    esac
     if generation_case_is_skipped "${base}"; then
       echo -e "${A}(${base}.py)\tSKIP\tlisted in PTOAS_SKIP_CASES"
       continue
@@ -366,6 +384,18 @@ process_one_dir() {
         echo -e "${A}(${base}.py)\tSKIP\trequires A5 (set SOC_VERSION to A5/950)"
         continue
       fi
+    fi
+    # Cases the A5 runop environment cannot handle yet. Random/Histogram declare
+    # A5-only ops but carry no arch declaration, Sync/tpipe_* fail inside ptoas,
+    # and the AsyncComm / TPrefetchAsync cases are timing sensitive on the A5
+    # runner. Keep them visible as SKIP on A5 and run them unchanged elsewhere.
+    if [[ ( "${soc_lc}" == *"a5"* || "${soc_lc}" == *"950"* ) ]]; then
+      case "$base" in
+        random|histogram|tpipe_identity|tpipe_v2c|async_comm|tget_async_kernel_impl_like|tput_async_kernel_impl_like|tprefetch_async_binding)
+          echo -e "${A}(${base}.py)\tSKIP\tA5 target not supported yet"
+          continue
+          ;;
+      esac
     fi
     # Inter-core sync regression samples are arch-specific.
     if [[ "$base" == "test_intercore_sync_a5" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
@@ -441,7 +471,7 @@ process_one_dir() {
     mlir="${out_subdir}/${base}-pto-ir.pto"
     cpp="${out_subdir}/${base}-pto.cpp"
 
-    if ! PTOAS_SAMPLE_ARCH="${target_arch_lc}" "$python" "$f" > "$mlir"; then
+    if ! PTOAS_SAMPLE_ARCH="${sample_arch}" "$python" "$f" > "$mlir"; then
       if [[ $expect_fail -eq 1 ]]; then
         echo -e "${A}(${base}.py)\tXFAIL\tpython failed as expected"
         continue
@@ -493,7 +523,7 @@ process_one_dir() {
     fi
 
     # Write output via -o to avoid mixing debug prints with generated C++.
-    local -a ptoas_cmd=("${ptoas_cmd_base[@]}" "$pto_input" -o "$cpp")
+    local -a ptoas_cmd=("${sample_ptoas_cmd_base[@]}" "$pto_input" -o "$cpp")
     if [[ "$base" == "syncall_binding" ]]; then
       local sample_has_level3=0
       for ((i=0; i<${#ptoas_cmd[@]}; i++)); do

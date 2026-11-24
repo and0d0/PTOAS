@@ -27,18 +27,24 @@ public:
   // 检查两组内存信息之间是否存在依赖
   bool DepBetween(const SmallVector<const BaseMemInfo *> &a,
                   const SmallVector<const BaseMemInfo *> &b,
-                  DepBaseMemInfoPairVec &depBaseMemInfosVec);
+                  DepBaseMemInfoPairVec &depBaseMemInfosVec) const;
  
   // 检查两个具体的 MemInfo 是否别名
-  bool MemAlias(const BaseMemInfo *a, const BaseMemInfo *b);
+  bool MemAlias(const BaseMemInfo *a, const BaseMemInfo *b) const;
  
 private:
-  bool isGMBufferOverlap(const BaseMemInfo *a, const BaseMemInfo *b);
-  
-  bool isBufferAddressRangeOverlap(const BaseMemInfo *a, const BaseMemInfo *b);
-  
-  bool isBufferOverlap(const BaseMemInfo *a, const BaseMemInfo *b, 
-                       int aIndex, int bIndex);
+  bool isGMBufferOverlap(const BaseMemInfo *a, const BaseMemInfo *b) const;
+
+  // Proves two same-root GM accesses cannot share a byte, using the strided
+  // window recorded by PTOIRTranslator. Returns false whenever no proof is
+  // available, which leaves the caller's conservative answer in place.
+  bool isGMWindowProvenDisjoint(const BaseMemInfo *a,
+                                const BaseMemInfo *b) const;
+
+  bool isBufferAddressRangeOverlap(const BaseMemInfo *a, const BaseMemInfo *b) const;
+
+  bool isBufferOverlap(const BaseMemInfo *a, const BaseMemInfo *b,
+                       int aIndex, int bIndex) const;
 };
  
 } // namespace pto

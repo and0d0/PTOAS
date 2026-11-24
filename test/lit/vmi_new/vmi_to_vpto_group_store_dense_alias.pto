@@ -1,0 +1,106 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: pto-test-opt %s -vmi-lower-unified-to-legacy | FileCheck %s --check-prefix=LEGACY
+// RUN: pto-test-opt %s -vmi-lower-unified-to-legacy -vmi-mask-granularity-assignment -vmi-layout-assignment -vmi-to-vpto | FileCheck %s --check-prefix=LOWER
+
+// `stride == groupSize` makes a group_store a plain dense store: rows are packed
+// back to back, so the group form carries no extra addressing.  The alias only
+// exists for groupSize >= 2 -- `groupSize == 1` keeps the group form (it still
+// has to pack the per-group slots of a multi-part product).
+
+module {
+  func.func @group_store_dense_alias(
+      %src: !pto.ptr<ui8, ub>, %dst: !pto.ptr<ui8, ub>, %off: index) {
+    %c0 = arith.constant 0 : index
+    %c8 = arith.constant 8 : index
+    %v = pto.vmi.vload %src[%c0]
+        : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<64xui8>
+    pto.vmi.vstore %v, %dst[%c0], %c8 {group = 8}
+        : !pto.vmi.vreg<64xui8>, !pto.ptr<ui8, ub>, index
+    return
+  }
+
+  // Strided rows that still sit on the 32-byte block granularity keep the
+  // group form (i32: group = 8 lanes = one 32-byte block, row stride = 16).
+  func.func @group_store_strided_rows(
+      %src: !pto.ptr<i32, ub>, %dst: !pto.ptr<i32, ub>, %off: index) {
+    %c0 = arith.constant 0 : index
+    %c16 = arith.constant 16 : index
+    %v = pto.vmi.vload %src[%c0]
+        : !pto.ptr<i32, ub>, index -> !pto.vmi.vreg<64xi32>
+    pto.vmi.vstore %v, %dst[%c0], %c16 {group = 8}
+        : !pto.vmi.vreg<64xi32>, !pto.ptr<i32, ub>, index
+    return
+  }
+
+  func.func @group_store_unit_group(
+      %src: !pto.ptr<ui8, ub>, %dst: !pto.ptr<ui8, ub>, %off: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v = pto.vmi.vload %src[%c0]
+        : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<8xui8>
+    pto.vmi.vstore %v, %dst[%c0], %c1 {group = 8}
+        : !pto.vmi.vreg<8xui8>, !pto.ptr<ui8, ub>, index
+    return
+  }
+}
+
+// LEGACY-LABEL: func.func @group_store_dense_alias(
+// LEGACY-NOT: pto.vmi.group_store
+// LEGACY: pto.vmi.store
+
+// LEGACY-LABEL: func.func @group_store_strided_rows(
+// LEGACY: pto.vmi.group_store
+// LEGACY-SAME: {num_groups = 8 : i64}
+
+// LEGACY-LABEL: func.func @group_store_unit_group(
+// LEGACY: pto.vmi.group_store
+// LEGACY-SAME: {num_groups = 8 : i64}
+
+// LOWER-LABEL: func.func @group_store_dense_alias(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_3:[a-zA-Z0-9_.$-]+]] = arith.constant 64 : i32
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 1 : i16
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : i16
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : index
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL64" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.addptr %[[VAL_0]], %[[VAL_6]] : <ui8, ub>, index -> <ui8, ub>
+// LOWER-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.vsldb %[[VAL_8]], %[[VAL_4]], %[[VAL_5]], %[[VAL_7]] : !pto.ptr<ui8, ub>, i16, i16, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]], %[[VAL_11:[a-zA-Z0-9_.$-]+]] = pto.plt_b8 %[[VAL_3]] : i32 -> !pto.mask<b8>, i32
+// LOWER-NEXT: pto.vsts %[[VAL_9]], %[[VAL_1]]{{\[}}%[[VAL_6]]], %[[VAL_10]] : !pto.vreg<256xui8>, !pto.ptr<ui8, ub>, index, !pto.mask<b8>
+// LOWER-NEXT: return
+// LOWER-NEXT: }
+// LOWER-LABEL: func.func @group_store_strided_rows(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<i32, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<i32, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_3:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : i16
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 2 : i16
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : index
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_0]]{{\[}}%[[VAL_5]]] : !pto.ptr<i32, ub>, index -> !pto.vreg<64xi32>
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.addptr %[[VAL_1]], %[[VAL_5]] : <i32, ub>, index -> <i32, ub>
+// LOWER-NEXT: pto.vsstb %[[VAL_6]], %[[VAL_8]], %[[VAL_4]], %[[VAL_3]], %[[VAL_7]] : !pto.vreg<64xi32>, !pto.ptr<i32, ub>, i16, i16, !pto.mask<b32>
+// LOWER-NEXT: return
+// LOWER-NEXT: }
+// LOWER-LABEL: func.func @group_store_unit_group(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_3:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : i16
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : index
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL1" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.addptr %[[VAL_0]], %[[VAL_4]] : <ui8, ub>, index -> <ui8, ub>
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vsldb %[[VAL_6]], %[[VAL_3]], %[[VAL_3]], %[[VAL_5]] : !pto.ptr<ui8, ub>, i16, i16, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL8" : !pto.mask<b8>
+// LOWER-NEXT: pto.vsts %[[VAL_7]], %[[VAL_1]]{{\[}}%[[VAL_4]]], %[[VAL_8]] {dist = "NORM_B8"} : !pto.vreg<256xui8>, !pto.ptr<ui8, ub>, index, !pto.mask<b8>
+// LOWER-NEXT: return
+// LOWER-NEXT: }

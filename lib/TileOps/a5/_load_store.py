@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,11 +6,13 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Shared helpers for PTODSL TileLib load/store template ports."""
 
 from ptodsl import pto
 
 from ._common import NUMERIC_DTYPES
+from ._cube import CUBE_MOVE_DTYPE_NAMES, CUBE_MOVE_DTYPES
 
 
 INTEGER_LOAD_STORE_DTYPES = (
@@ -24,7 +27,24 @@ LOW_PRECISION_LOAD_STORE_DTYPES = ("f8e4m3", "f8e5m2", "hif8", "f4e1m2x2", "f4e2
 LOAD_STORE_DTYPES = tuple(
     (dtype, dtype) for dtype in NUMERIC_DTYPES + INTEGER_LOAD_STORE_DTYPES + LOW_PRECISION_LOAD_STORE_DTYPES
 )
-MAT_LOAD_DTYPES = (("f16", "f16"), ("bf16", "bf16"), ("f32", "f32"))
+# GM -> MAT tload packs the source matrix into the NZ fractal form.  The move
+# itself is a dtype pass-through (the element type is carried by the pointer
+# types), so the accepted dtypes are decided purely by the consumers that
+# later read the MAT (L1) tile back out:
+#   1. operand path -- pto.tmov m2l/m2r and pto.textract mat2left/right feed
+#      the L0A/L0B multiply operands, so they accept the cube matmul operand
+#      element types (CUBE_MOVE_DTYPE_NAMES).  i32 is NOT among them: no
+#      matmul consumes i32 operands, and the m2l/m2r tables must keep
+#      rejecting it.
+#   2. bias path -- pto.tmov m2b stages cube bias vectors into the bt slots
+#      via pto.mte_l1_bt (which supports i32 -> i32); the bias element type
+#      follows the i32 accumulator of i8 x i8 -> i32 gemv_bias (#1742), so
+#      i32 extends only this load table.
+#   3. scaling path -- pto.tmov m2s feeds the fixpipe scale buffer but only
+#      accepts f32, which the operand table already covers.
+BIAS_STAGING_DTYPE_NAMES = ("i32",)
+MAT_LOAD_DTYPE_NAMES = CUBE_MOVE_DTYPE_NAMES + BIAS_STAGING_DTYPE_NAMES
+MAT_LOAD_DTYPES = tuple((name, name) for name in MAT_LOAD_DTYPE_NAMES)
 ACC_STORE_DTYPES = (
     ("f32", "f32"),
     ("f32", "f16"),
@@ -224,7 +244,7 @@ def tload_mat_nd2nz_constraint(src_kind, src_shape, src_strides, src_memory_spac
         return False
     if dst_config.b_layout != "col_major" or dst_config.s_layout != "row_major":
         return False
-    if dst_dtype not in {"f16", "bf16", "f32"}:
+    if dst_dtype not in MAT_LOAD_DTYPE_NAMES:
         return False
     if _view_rank(src_shape) != 5:
         return False
@@ -235,19 +255,39 @@ def tload_mat_nd2nz_constraint(src_kind, src_shape, src_strides, src_memory_spac
     )
 
 
-def tload_mat_dn2nz_constraint(src_kind, src_shape, src_strides, src_memory_space, dst_kind, dst_shape, dst_memory_space, dst_config, dst_dtype, **_):
+def tload_mat_dn2nz_constraint(
+    src_kind,
+    src_shape,
+    src_strides,
+    src_memory_space,
+    dst_kind,
+    dst_shape,
+    dst_valid_shape,
+    dst_memory_space,
+    dst_config,
+    dst_dtype,
+    **_,
+):
     if src_kind != "view" or dst_kind != "tile" or src_memory_space != "gm" or dst_memory_space != "mat":
         return False
     if dst_config.b_layout != "col_major" or dst_config.s_layout != "row_major":
         return False
-    if dst_dtype not in {"f16", "bf16", "f32"}:
+    if dst_dtype not in MAT_LOAD_DTYPE_NAMES:
         return False
     if _view_rank(src_shape) != 5:
         return False
-    # DN input is column-major in the logical matrix, so its row dimension is
-    # the contiguous view axis.
-    return _known_eq(src_shape[4], dst_shape[0]) and _known_eq(
-        _stride_at(src_strides, 3), 1
+    # DN keeps the logical [rows, cols] shape; strides make rows contiguous.
+    # This template emits one matrix, not a batch of matrices.
+    if any(dim != 1 for dim in src_shape[:3]):
+        return False
+    return _check_load_bounds(
+        src_shape,
+        src_strides,
+        dst_shape,
+        dst_valid_shape,
+        logical_rows=src_shape[3],
+        logical_cols=src_shape[4],
+        stride_axis=3,
     )
 
 

@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,9 +6,11 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Element-wise template selection, traversal, and scope acceptance tests."""
 
 import ast
+import itertools
 import unittest
 from pathlib import Path
 
@@ -604,7 +607,70 @@ def _select_specs(
     }
 
 
+_ISSUE1607_ARITH_FAMILIES = (
+    ("tdiv", ("i16", "ui16", "ui32"), _binary_specs, "pto.vdiv"),
+    ("tfmod", ("i32", "ui32", "ui16"), _binary_specs, "pto.vdiv"),
+    ("trem", ("i16", "ui16", "ui32"), _binary_tmp_specs, "pto.vdiv"),
+    ("trems", ("i16", "i32"), _scalar_tmp_specs, "pto.vdiv"),
+    ("tneg", ("ui16", "ui32"), _unary_specs, "pto.vmuls"),
+)
+
+_ISSUE1607_PREDICATE_FAMILIES = (
+    ("pto.tsel", ("bf16", "i16", "i32", "ui8", "ui16", "ui32"), _select_specs),
+    ("pto.tcmp", ("bf16", "ui16", "ui32"), _compare_specs),
+)
+
+_TRAVERSAL_SUFFIXES = ("", "_1d")
+
+
+def _expand_dtype_families(families, suffixes):
+    """Expand ``(key, dtypes, *rest)`` rows into one case per dtype and suffix.
+
+    Flattened once here so each test body stays a single loop.
+    """
+    cases = []
+    for row in families:
+        key, dtypes, rest = row[0], row[1], tuple(row[2:])
+        for dtype, suffix in itertools.product(dtypes, suffixes):
+            cases.append((key, dtype, suffix) + rest)
+    return tuple(cases)
+
+
+_ISSUE1607_ARITH_CASES = _expand_dtype_families(_ISSUE1607_ARITH_FAMILIES, _TRAVERSAL_SUFFIXES)
+
+_ISSUE1607_DIVS_CASES = tuple(
+    itertools.product(("i16", "ui16", "ui32"), (False, True), _TRAVERSAL_SUFFIXES)
+)
+
+_ISSUE1607_PREDICATE_CASES = _expand_dtype_families(
+    _ISSUE1607_PREDICATE_FAMILIES, _TRAVERSAL_SUFFIXES
+)
+
+
+def _payload_mask_width(dtype):
+    if dtype == "ui8":
+        return 8
+    if dtype in {"i32", "ui32"}:
+        return 32
+    return 16
+
+
 class TileLibElementwiseTest(unittest.TestCase):
+    def test_issue1607_integer_arithmetic_candidates_render(self):
+        for op, dtype, suffix, make_specs, vector_op in _ISSUE1607_ARITH_CASES:
+            with self.subTest(op=op, dtype=dtype, suffix=suffix):
+                self._assert_arith_renders(op, dtype, suffix, make_specs, vector_op)
+
+    def test_issue1607_divs_both_scalar_positions_render(self):
+        for dtype, scalar_lhs, suffix in _ISSUE1607_DIVS_CASES:
+            with self.subTest(dtype=dtype, scalar_lhs=scalar_lhs, suffix=suffix):
+                self._assert_divs_renders(dtype, scalar_lhs, suffix)
+
+    def test_issue1607_predicates_follow_payload_width(self):
+        for op, dtype, suffix, make_specs in _ISSUE1607_PREDICATE_CASES:
+            with self.subTest(op=op, dtype=dtype, suffix=suffix):
+                self._assert_predicate_width(op, dtype, suffix, make_specs)
+
     def test_issue_scope_catalog_has_ranked_1d_and_2d_coverage(self):
         family_sizes = sum(
             len(operations)
@@ -733,7 +799,7 @@ class TileLibElementwiseTest(unittest.TestCase):
                     )
                 ).mlir_text()
                 self.assertEqual(mlir.count("scf.for"), 1)
-                self.assertIn("arith.muli", mlir)
+                self.assertIn("pto.muli", mlir)
                 self.assertIn("iter_args", mlir)
                 self.assertNotIn("memref.subview", mlir)
 
@@ -1020,7 +1086,7 @@ class TileLibElementwiseTest(unittest.TestCase):
         cases = (
             ("default", ("pto.vdiv",)),
             (
-                "high_precision",
+                "precision_0ulp_ftz_false",
                 (
                     "pto.vdiv",
                     "pto.vbitcast",
@@ -1397,7 +1463,7 @@ class TileLibElementwiseTest(unittest.TestCase):
             ),
         )
         for specs, expected_name in cases:
-            for precision_type in ("default", "high_precision"):
+            for precision_type in ("default", "precision_0ulp_ftz_false"):
                 with self.subTest(
                     operand_order=tuple(specs),
                     precision_type=precision_type,
@@ -1419,7 +1485,7 @@ class TileLibElementwiseTest(unittest.TestCase):
                     self.assertEqual(mlir.count("scf.for"), 1)
                     self.assertIn("pto.vbr", mlir)
                     self.assertIn("pto.vdiv", mlir)
-                    if precision_type == "high_precision":
+                    if precision_type == "precision_0ulp_ftz_false":
                         self.assertIn("pto.vbitcast", mlir)
                         self.assertIn("pto.vcmp", mlir)
 
@@ -1728,7 +1794,7 @@ class TileLibElementwiseTest(unittest.TestCase):
         self.assertEqual(selected.metadata.loop_depth, 2)
         self.assertEqual(mlir.count("scf.for"), 2)
 
-    def test_tcmps_fallback_keeps_flat_packed_predicate_rows(self):
+    def test_tcmps_fallback_uses_destination_physical_row_stride(self):
         specs = _compare_specs(
             "pto.tcmps",
             "f16",
@@ -1741,8 +1807,42 @@ class TileLibElementwiseTest(unittest.TestCase):
 
         self.assertEqual(selected.name, "template_tcmps")
         self.assertEqual(selected.metadata.loop_depth, 2)
-        self.assertIn("arith.constant 16 : index", mlir)
-        self.assertNotIn("arith.constant 64 : index", mlir)
+        self.assertIn("pto.constant 16 : index", mlir)
+        self.assertIn("pto.constant 64 : index", mlir)
+
+    def test_tcmps_fallback_stride_ignores_narrow_valid_width(self):
+        specs = _compare_specs(
+            "pto.tcmps",
+            "f16",
+            src_shape=(4, 128),
+            dst_shape=(4, 32),
+            dst_valid_shape=(4, 16),
+        )
+        selected = select("pto.tcmps", "a5", specs)
+        mlir = selected.specialize(**specs).mlir_text()
+
+        self.assertEqual(selected.name, "template_tcmps")
+        self.assertEqual(selected.metadata.loop_depth, 2)
+        # The next row starts at the destination's physical 32-byte width,
+        # not at the 16 packed predicate bytes this row produces.
+        self.assertIn("pto.constant 32 : index", mlir)
+
+    def test_tcmps_padded_flat_destination_falls_back_to_2d(self):
+        specs = _compare_specs(
+            "pto.tcmps",
+            "bf16",
+            src_shape=(4, 128),
+            dst_shape=(4, 128),
+            dst_valid_shape=(4, 128),
+        )
+        selected = select("pto.tcmps", "a5", specs)
+
+        # A destination with one predicate container per data element has a
+        # 128-byte row stride but only 16 packed predicate bytes per row. The
+        # 1D writer would pack the rows contiguously, which a 2D tsels reader
+        # cannot consume, so selection must stay on the 2D template.
+        self.assertEqual(selected.name, "template_tcmps")
+        self.assertEqual(selected.metadata.loop_depth, 2)
 
     def test_select_family_registers_preferred_1d_and_fallback_2d(self):
         cases = (
@@ -1925,6 +2025,34 @@ class TileLibElementwiseTest(unittest.TestCase):
             ["template_tdiv"],
         )
         self.assertEqual(candidates[0].metadata.loop_depth, 2)
+
+    def _assert_arith_renders(self, op, dtype, suffix, make_specs, vector_op):
+        specs = make_specs(dtype, shape=(1, 256))
+        descriptor = select("pto." + op, "a5", specs,
+                            candidate_id="template_" + op + suffix)
+        text = descriptor.specialize(**specs).mlir_text()
+        self.assertIn(vector_op, text)
+        if op == "tneg":
+            self.assertNotIn("pto.vneg", text)
+
+    def _assert_divs_renders(self, dtype, scalar_lhs, suffix):
+        specs = _scalar_specs(dtype, shape=(1, 256))
+        if scalar_lhs:
+            specs = {"scalar": specs["scalar"], "src": specs["src"], "dst": specs["dst"]}
+        side = "scalar_tile" if scalar_lhs else "tile_scalar"
+        descriptor = select("pto.tdivs", "a5", specs,
+                            candidate_id="template_tdivs_" + side + suffix)
+        self.assertIn("pto.vdiv", descriptor.specialize(**specs).mlir_text())
+
+    def _assert_predicate_width(self, op, dtype, suffix, make_specs):
+        specs = make_specs(op, dtype)
+        descriptor = select(op, "a5", specs,
+                            candidate_id="template_" + op[4:] + suffix)
+        text = descriptor.specialize(**specs).mlir_text()
+        width = _payload_mask_width(dtype)
+        self.assertIn("!pto.mask<b" + str(width) + ">", text)
+        if width == 32:
+            self.assertIn("pto.pintlv" if op == "pto.tsel" else "pto.pdintlv", text)
 
 
 if __name__ == "__main__":

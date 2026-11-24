@@ -41,9 +41,11 @@ pto.tile.mul(scale_tile, data_tile, scaled_tile)
 
 ---
 
-#### `pto.tile.div(src0: Tile, src1: Tile, dst: Tile, *, precision: Precision = Precision.Default) -> None`
+#### `pto.tile.div(src0: Tile, src1: Tile, dst: Tile, *, precision: str = "intrinsic") -> None`
 
-**Description**: Element-wise division. `precision` can be `Default` or `HighPrecision` (f16/f32 only).
+**Description**: Element-wise division. `precision` names an AscendC `DivAlgo`
+algorithm; see [Division algorithms](#division-algorithms) for the full list and
+the per-type support matrix.
 
 `div_precision` remains accepted temporarily for compatibility and emits a
 `PTODSLDeprecationWarning`; use `precision` for new code. The same migration
@@ -57,9 +59,69 @@ applies to the operation-specific precision keywords for `exp`, `log`, `sqrt`,
 | `src0` | `Tile` | Numerator tile |
 | `src1` | `Tile` | Denominator tile |
 | `dst` | `Tile` | Destination tile |
-| `precision` | `Precision` | `Default` (default) or `HighPrecision` |
+| `precision` | `str` | Division algorithm, default `"intrinsic"` |
 
 **Returns**: None.
+
+---
+
+### Division algorithms
+
+`pto.tile.div`, `pto.tdivs`, `pto.trowexpanddiv`, `pto.tcolexpanddiv`, `pto.vdiv`
+and `pto.div` share one selector: the AscendC `DivAlgo` algorithm name. The
+default `intrinsic` is the ordinary hardware divide and is elided from the
+printed IR. The tile forms expand the software algorithms inline (the sequences
+are pointwise), so none of them needs a `tmp` operand.
+
+| `precision` | AscendC `DivAlgo` | A5 f32 lowering | Element types | `tmp`/mask requirement |
+| --- | --- | --- | --- | --- |
+| `"intrinsic"` | `INTRINSIC` | one native vector divide | any supported element type | none |
+| `"diff_compensation"` | `DIFF_COMPENSATION` | compensated residual search (same sequence as `precision_0ulp_ftz_true`) | f32 | `b32` mask; no `tmp` needed |
+| `"precision_1ulp_ftz_true"` | `PRECISION_1ULP_FTZ_TRUE` | one native vector divide | any supported element type | none |
+| `"precision_0ulp_ftz_true"` | `PRECISION_0ULP_FTZ_TRUE` | 21-op residual search (`DivPrecisionImpl`) | f32 only | `b32` mask; no `tmp` needed |
+| `"precision_0ulp_ftz_false"` | `PRECISION_0ULP_FTZ_FALSE` | normalise + residual search + IEEE rounding | f32 only | `b32` mask; no `tmp` needed |
+| `"precision_1ulp_ftz_false"` | `PRECISION_1ULP_FTZ_FALSE` | normalise + single divide + IEEE rounding | f32 only | `b32` mask; no `tmp` needed |
+
+The shorthand spellings `"0ulp_ftz_true"`, `"0ulp_ftz_false"` and
+`"1ulp_ftz_false"` are accepted as well. The correctly rounded scalar
+`pto.div` only supports `"intrinsic"` and `"precision_0ulp_ftz_true"`.
+
+**FTZ and ULP semantics.**
+
+* `ftz_true` keeps the native flush-to-zero behaviour: subnormal operands and
+  results are flushed, and no subnormal re-scaling is emitted.
+* `ftz_false` multiplies subnormal operands by `2^23`, divides in the normalised
+  domain and re-applies the exponent, so subnormal inputs and gradual underflow
+  are preserved (the shift-out rounding is done explicitly).
+* `0ulp` means the quotient is the nearest representable value: the residual of
+  the hardware quotient and of its two bit neighbours is compared and the
+  smallest one wins. An exact tie takes the lower neighbour (`z - 1`), matching
+  the reference `vcmp_lt` + `vsel(z, z, zPre)` sequence; there is no
+  round-half-even tie breaking.
+* The 0-ULP implementations use the **unscaled** sequence (21 instructions for
+  `precision_0ulp_ftz_true`, 96/131 for the two FTZ-false variants). The
+  `dav_3510` reference additionally pre-scales both operands by `2^k` when the
+  dividend exponent is below −64 (+11 instructions); that block is intentionally
+  omitted for throughput, and it matches the AscendC template the ASC backend
+  compiles today. Under flush-to-zero the residual of extremely small dividends
+  (exponent below about −102) can be flushed, in which case the tie rule keeps
+  `z - 1` and the result may sit one ULP away from the native divide — use
+  `precision_0ulp_ftz_false` when that corner must be exact.
+* `1ulp` routes the normalised quotient through a single hardware divide and
+  only fixes the subnormal rounding, so the result can be up to one ULP away
+  from the nearest value (in practice the hardware divide is usually already
+  correctly rounded).
+
+**Migration from `HighPrecision`.** `high_precision` was removed; replace it as
+follows:
+
+| Old value | New value |
+| --- | --- |
+| `precision=pto.DivPrecision.HighPrecision` on `pto.vdiv` / `pto.div` | `precision="precision_0ulp_ftz_true"` |
+| `div_precision="high_precision"` on `pto.tile.div` / `tdivs` / `rowexpanddiv` / `colexpanddiv` | `div_precision="precision_0ulp_ftz_false"` |
+
+The tile path historically used the IEEE-754 0-ULP implementation, hence the
+different target value.
 
 ---
 
@@ -89,7 +151,8 @@ Element-wise operations between a tile and a scalar.
 
 #### `pto.tile.divs(src: Tile, scalar: ScalarType, dst: Tile, *, precision: Precision = Precision.Default) -> None`
 
-**Description**: Element-wise tile-scalar division: `dst[i,j] = src[i,j] / scalar`.
+**Description**: Element-wise tile-scalar division:
+`dst[i,j] = src[i,j] / scalar`.
 
 ---
 
@@ -135,23 +198,40 @@ pto.tile.mov(p_tile, p_mat)
 #### `pto.tile.fmod(src0: Tile, src1: Tile, dst: Tile, *, precision: Precision = Precision.Default) -> None`
 #### `pto.tile.fmods(src: Tile, scalar: ScalarType, dst: Tile) -> None`
 
-**Description**: Computes the element-wise remainder using truncation toward
-zero for the quotient. The binary form uses two tiles; the scalar form divides
+**Description**: Computes the element-wise remainder. `rem`/`rems` floor the
+quotient, `fmod`/`fmods` truncate it toward zero; on integer element types the
+two families coincide. The binary form uses two tiles; the scalar form divides
 each source element by the scalar.
 
 **Semantics**:
 
 ```text
-rem(src0, src1): dst[i,j] = src0[i,j] - trunc(src0[i,j] / src1[i,j]) * src1[i,j]
-rems(src, scalar): dst[i,j] = src[i,j] - trunc(src[i,j] / scalar) * scalar
-fmod(src0, src1): dst[i,j] = src0[i,j] - trunc(src0[i,j] / src1[i,j]) * src1[i,j]
-fmods(src, scalar): dst[i,j] = src[i,j] - trunc(src[i,j] / scalar) * scalar
+rem(src0, src1):   dst[i,j] = src0[i,j] - floor(src0[i,j] / src1[i,j]) * src1[i,j]
+rems(src, scalar): dst[i,j] = src[i,j]  - floor(src[i,j]  / scalar)   * scalar
+fmod(src0, src1):  dst[i,j] = src0[i,j] - trunc(src0[i,j] / src1[i,j]) * src1[i,j]
+fmods(src, scalar):dst[i,j] = src[i,j]  - trunc(src[i,j]  / scalar)   * scalar
 ```
 
-For floating-point inputs, `rem` and `rems` preserve the sign of the dividend
-for ordinary finite, non-zero operands. Integer support is target-dependent.
-The A5 public surface currently covers the floating-point forms used by the
-validated A5 cases (`f16` and `f32`).
+On floating-point element types the two families differ in sign: `rem`/`rems`
+floor the quotient, so the remainder takes the sign of the **divisor**, while
+`fmod`/`fmods` truncate and the remainder takes the sign of the **dividend**.
+
+On integer element types `rem`/`rems` and `fmod`/`fmods` produce identical
+results: integer division already truncates toward zero and no rounding step is
+applied, so both families compute the truncated remainder and the result takes
+the sign of the dividend.
+
+A5 element type support:
+
+| Operation | A5 element types |
+|-----------|------------------|
+| `rem` | `f32`, `f16`, `i16`, `ui16`, `i32`, `ui32` |
+| `rems` | `f32`, `f16`, `i16`, `i32` |
+| `fmod` | `f32`, `f16`, `i16`, `ui16`, `i32`, `ui32` |
+| `fmods` | `f32`, `f16`, `i16`, `i32` |
+
+The scalar forms exclude unsigned element types because the op's scalar operand
+rejects them during verification, not because the templates are missing.
 
 **Parameters**:
 
@@ -243,17 +323,18 @@ Reductions collapse one dimension of a 2D tile, producing a tile with one row or
 #### `pto.tile.rowmax(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
 #### `pto.tile.rowmin(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
 #### `pto.tile.rowprod(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
-#### `pto.tile.rowargmax(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
-#### `pto.tile.rowargmin(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.rowargmax(src: Tile, dst_idx: Tile, dst_val: Tile | None = None, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.rowargmin(src: Tile, dst_idx: Tile, dst_val: Tile | None = None, *, tmp: Tile | None = None) -> None`
 
-**Description**: For each row `i`, reduce across columns: `dst[i, 0] = <reduce>_j src[i, j]`. `tile.rowargmax`/`tile.rowargmin` return the column index of the extremum. In the public PTODSL wrapper, `tmp` is optional; when omitted, PTODSL allocates a matching scratch tile automatically.
+**Description**: For each row `i`, `dst_idx[i, 0]` receives the column index of the extremum. If `dst_val` is supplied, it also receives the maximum or minimum value. Omitting `dst_val` preserves index-only behavior. `tmp` is keyword-only and optional; when omitted, the compiler supplies the required scratch tile.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `src` | `Tile` | Source tile (`[rows, cols]`) |
-| `dst` | `Tile` | Destination tile (`[rows, 1]`) |
+| `dst_idx` | `Tile` | Index destination (`[rows, 1]`, with `i32` or `ui32` elements) |
+| `dst_val` | `Tile` or `None` | Optional value destination (`[rows, 1]`, with the same element type as `src`) |
 | `tmp` | `Tile | None` | Optional scratch tile for intermediate reduction state; when omitted, PTODSL synthesizes a matching scratch tile automatically |
 
 **Returns**: None.
@@ -266,8 +347,10 @@ Reductions collapse one dimension of a 2D tile, producing a tile with one row or
 #### `pto.tile.colmax(src: Tile, dst: Tile) -> None`
 #### `pto.tile.colmin(src: Tile, dst: Tile) -> None`
 #### `pto.tile.colprod(src: Tile, dst: Tile) -> None`
+#### `pto.tile.colargmax(src: Tile, dst_idx: Tile, dst_val: Tile | None = None, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.colargmin(src: Tile, dst_idx: Tile, dst_val: Tile | None = None, *, tmp: Tile | None = None) -> None`
 
-**Description**: For each column `j`, reduce across rows: `dst[0, j] = <reduce>_i src[i, j]`.
+**Description**: `colsum`, `colmax`, `colmin`, and `colprod` reduce each column to `dst[0, j]`. `colargmax` and `colargmin` write the row index to `dst_idx[0, j]`, and also write the extremum value when `dst_val` is supplied. Omitting `dst_val` preserves index-only behavior. For arg reductions, `tmp` is keyword-only and optional; the compiler supplies the required scratch tile when it is omitted.
 
 **Parameters**:
 
@@ -275,6 +358,11 @@ Reductions collapse one dimension of a 2D tile, producing a tile with one row or
 |-----------|------|-------------|
 | `src` | `Tile` | Source tile (`[rows, cols]`) |
 | `dst` | `Tile` | Destination tile (`[1, cols]`) |
+| `dst_idx` | `Tile` | Arg-reduction index destination (`[1, cols]`) |
+| `dst_val` | `Tile` or `None` | Optional arg-reduction value destination (`[1, cols]`) |
+| `tmp` | `Tile` or `None` | Optional scratch tile for arg reductions |
+
+For column arg reductions, index-only mode uses `i32` or `ui32` indices. Value-and-index mode supports `f16`, `f32`, `ui16`, and `ui32` sources; the index width matches the source element width, and `dst_val` has the source element type.
 
 **Returns**: None.
 
@@ -964,6 +1052,67 @@ acc_next = pto.alloc_tile(
     slayout="RowMajor",
 )
 pto.tile.matmul_acc(acc_prev, lhs_l0a, rhs_l0b, acc_next)
+```
+
+---
+
+#### `pto.tile.matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, dst: Tile) -> None`
+
+**Description**: Bias-enabled tile-level matrix multiplication. Computes the
+product `lhs @ rhs`, adds the `bias` tile, and writes the result into `dst`.
+This is the ordinary-precision counterpart of `pto.tile.matmul_mx_bias`.
+
+```text
+dst[m, n] = sum_k lhs[m, k] * rhs[k, n] + bias[n]
+```
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lhs` | `Tile` | Left operand tile, typically in `MemorySpace.LEFT` |
+| `rhs` | `Tile` | Right operand tile, typically in `MemorySpace.RIGHT` |
+| `bias` | `Tile` | Bias tile in `MemorySpace.BIAS`, broadcast across M |
+| `dst` | `Tile` | Destination accumulator tile, typically in `MemorySpace.ACC` |
+
+**Returns**: None.
+
+**Constraints**:
+- `lhs`, `rhs`, and `dst` must satisfy the same shape and memory-space relationship as `pto.tile.matmul`.
+- `bias` must be a `[1, N]` tile in `MemorySpace.BIAS` with the same element type as `dst`.
+
+**Example** — compute one cube tile product with a bias add:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"compute_ops.tile_window_matmul","symbol":"compute_ops_tile_window_matmul_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16,"CARRIER_M":64,"CARRIER_N":64}} -->
+```python
+lhs_l0a = pto.alloc_tile(
+    shape=[16, 16],
+    dtype=pto.f16,
+    memory_space=pto.MemorySpace.LEFT,
+    blayout="ColMajor",
+    slayout="RowMajor",
+)
+rhs_l0b = pto.alloc_tile(
+    shape=[16, 16],
+    dtype=pto.f16,
+    memory_space=pto.MemorySpace.RIGHT,
+    blayout="RowMajor",
+    slayout="ColMajor",
+)
+bias_bt = pto.alloc_tile(
+    shape=[1, 16],
+    dtype=pto.f32,
+    memory_space=pto.MemorySpace.BIAS,
+    valid_shape=[1, 16],
+)
+acc_l0c = pto.alloc_tile(
+    shape=[16, 16],
+    dtype=pto.f32,
+    memory_space=pto.MemorySpace.ACC,
+    blayout="ColMajor",
+    slayout="RowMajor",
+)
+pto.tile.matmul_bias(lhs_l0a, rhs_l0b, bias_bt, acc_l0c)
 ```
 
 ---
@@ -1729,6 +1878,73 @@ pto.tile.print(src_tile)
 pto.tile.print(src_tile, print_format="width10_precision6")
 ```
 
+### `pto.tile.dump(src, dst)`
+
+**Description**: Persistent tensor dump for post-mortem inspection. Writes the
+tile contents to the host-passed GM view `dst` as a 64-byte little-endian
+metadata header (magic `"PTD0"`, version, element size/type, ndim, shape,
+valid_shape, data offset) followed by the tile valid region in row-major order.
+This maps to `pto.tdump`. Unlike `pto.tile.print`, it writes binary data to GM
+rather than text output and does not abort execution. After normal kernel
+completion and the necessary synchronization, the host can read the buffer.
+Static valid dimensions are self-describing; actual dynamic valid extents
+must be provided separately to the host decoder. `tdump` is currently
+supported only by the VPTO backend.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `Tile` | Source UB tile (loc=vec) to dump |
+| `dst` | `PartitionTensorView` | GM destination; header is written at the view base |
+
+**Constraints**:
+
+- Source and destination element types must have the same bitwidth; the
+  payload preserves raw tile bits without numeric conversion.
+- The source tile must have a static positive 2-D full shape whose dimensions
+  fit in the 32-bit header. The valid shape must also be 2-D; dynamic valid
+  dimensions are encoded as `0xFFFFFFFF` in the header, and the caller must
+  ensure destination sizes equal the runtime valid dimensions. The sentinel
+  means unknown, not an actual extent; full tile shape cannot replace the
+  runtime valid shape when decoding the payload.
+- v1 supports `loc=vec` tiles with dumpable element types
+  (`f16`, `bf16`, `f32`, `i8`, `i16`, `i32`, `i64`).
+- `dst` must have one dimension per tile valid dimension, with the same static
+  extents: a same-element-count reshape (`64x1` for a `4x16` valid region) is
+  rejected.
+- Each destination dimension must be both static or both dynamic with the
+  matching tile valid dimension. Padded destination rows are unsupported: the
+  destination row stride must equal its row width, in elements; a dynamic
+  stride and width must be provably equal. Static valid dimensions require
+  matching constant destination size operands. Any extra leading normalized
+  destination dimensions must have constant size operands equal to 1.
+- The destination address must be 4-byte aligned, because the header is written
+  with 32-bit stores. Dynamic offsets are accepted only when their strides
+  preserve this alignment; the caller must ensure the buffer base is aligned.
+- The backing buffer must reserve space for the 64-byte header plus the
+  complete payload beyond the destination view base.
+- The destination buffer must be unique per block. Every block executing the dump
+  writes the same header and payload (last-writer-wins), so a multi-block kernel
+  must derive the destination from the block id instead of sharing one buffer.
+  Each block's reserved region must include both the 64-byte header and its
+  complete payload.
+- The caller allocates the buffer and transfers its contents to the host;
+  `tdump` does not allocate storage, copy to host memory, or save a file.
+- A complete or host-readable dump is not guaranteed after `pto.assert_`
+  fails, `pto.trap()` executes, or the kernel otherwise terminates abnormally.
+- `tdump` is not supported by the EmitC backend; use `@pto.jit(..., backend="vpto")`.
+
+**Example**:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"compute_ops.tdump","symbol":"compute_ops_tdump_probe","compile":{}} -->
+```python
+view = pto.make_tensor_view(out, shape=[8, 16], strides=[16, 1])
+part = pto.partition_view(view, offsets=[0, 0], sizes=[8, 16])
+tile = pto.alloc_tile(shape=[8, 16], dtype=pto.f32)
+pto.tile.dump(tile, part)
+```
+
 ---
 
 ## 8.2 Vector compute (L3 — `@pto.tileop`)
@@ -1780,11 +1996,17 @@ exp_vec = pto.vexp(s_row, col_mask)
 #### `pto.vadd(v0: VRegType, v1: VRegType, mask: MaskType) -> VRegType`
 #### `pto.vsub(v0: VRegType, v1: VRegType, mask: MaskType) -> VRegType`
 #### `pto.vmul(v0: VRegType, v1: VRegType, mask: MaskType) -> VRegType`
-#### `pto.vdiv(v0: VRegType, v1: VRegType, mask: MaskType) -> VRegType`
+#### `pto.vdiv(v0: VRegType, v1: VRegType, mask: MaskType, *, precision: str = None) -> VRegType`
 #### `pto.vmax(v0: VRegType, v1: VRegType, mask: MaskType) -> VRegType`
 #### `pto.vmin(v0: VRegType, v1: VRegType, mask: MaskType) -> VRegType`
 
 **Description**: Element-wise binary operation: `result[i] = v0[i] <op> v1[i]` for lanes where `mask[i]` is true.
+
+For `pto.vdiv`, `precision` names an `DivAlgo` algorithm (see
+[Division algorithms](#division-algorithms)). The three software selectors are
+expanded through SoftLib, which can substantially increase the generated
+instruction count and execution latency; the native selectors keep the ordinary
+vector division path.
 
 **Parameters**:
 
@@ -1799,6 +2021,48 @@ exp_vec = pto.vexp(s_row, col_mask)
 | Return Value | Type | Description |
 |--------------|------|-------------|
 | `result` | `VRegType` | Result vector |
+
+
+---
+
+### 8.2.3 Carry vector ops
+
+#### `pto.vaddc(v0: VRegType, v1: VRegType, mask: MaskType) -> (VRegType, MaskType)`
+#### `pto.vsubc(v0: VRegType, v1: VRegType, mask: MaskType) -> (VRegType, MaskType)`
+#### `pto.vaddcs(v0: VRegType, v1: VRegType, carry_in: MaskType, mask: MaskType) -> (VRegType, MaskType)`
+#### `pto.vsubcs(v0: VRegType, v1: VRegType, carry_in: MaskType, mask: MaskType) -> (VRegType, MaskType)`
+
+**Description**: Carry-family operations compute lane-wise integer arithmetic and return both the arithmetic result and a per-lane carry predicate. `vsubc` and `vsubcs` use the carry predicate as **not-borrow**: `carry[i] = 1` means the subtraction completed without borrow, and `carry[i] = 0` means a borrow occurred. The comparison in this definition is unsigned, even for `si32` vectors.
+
+For `pto.vsubc`, each active lane `i` obeys:
+
+```text
+difference[i] = (v0[i] - v1[i]) modulo 2^32
+carry[i] = (uint32(v0[i]) >= uint32(v1[i]))
+```
+
+The subtraction result is reduced modulo `2^32`. Carry-family operations
+support only `i32`, `si32`, and `ui32` vector elements. The two input vectors
+must have the same type. Both `mask` and the returned `carry` must use `b32`
+granularity, for example `pto.pset_b32(...)`. Inactive lanes have unspecified
+result values.
+
+```python
+mask32 = pto.make_mask(pto.ui32, pto.MaskPattern.ALL)
+difference, carry = pto.vsubc(lhs_u32, rhs_u32, mask32)
+```
+
+For `pto.vsubcs`, each active lane `i` obeys:
+
+```text
+difference[i] = (v0[i] - v1[i] - (1 - carry_in[i])) modulo 2^32
+carry_out[i] = (uint32(v0[i]) >= uint32(v1[i]) + (1 - carry_in[i]))
+```
+
+Here `carry_in[i] = 1` means no incoming borrow and `carry_in[i] = 0` means
+an incoming borrow. The returned `carry_out[i]` uses the same not-borrow
+polarity: `1` means no borrow and `0` means borrow. The comparison is unsigned,
+even for `si32` vectors.
 
 ---
 
@@ -1820,7 +2084,7 @@ not defined by the current contract.
 
 ---
 
-### 8.2.3 Vector-scalar ops
+### 8.2.4 Vector-scalar ops
 
 #### `pto.vadds(vec: VRegType, scalar: ScalarType, mask: MaskType) -> VRegType`
 #### `pto.vsubs(vec: VRegType, scalar: ScalarType, mask: MaskType) -> VRegType`
@@ -1872,7 +2136,7 @@ as `vbr(scalar)` followed by `vand(...)`, `vor(...)`, or `vxor(...)`.
 
 ---
 
-### 8.2.3.1 Vector duplication: `pto.vdup`
+### 8.2.4.1 Vector duplication: `pto.vdup`
 
 #### `pto.vdup(input: ScalarType, mask: MaskType) -> VRegType`
 #### `pto.vdup(input: VRegType, mask: MaskType, position: PositionMode = PositionMode.LOWEST) -> VRegType`
@@ -1931,13 +2195,34 @@ dup_highest = pto.vdup(vec, mask32, pto.PositionMode.HIGHEST)
 
 ---
 
-### 8.2.4 Full-vector and group reductions
+### 8.2.5 Full-vector and group reductions
 
 #### Full-vector reductions
+
+All three row reduction entry points accept only 16/32-bit integers
+(signless, signed, or unsigned), `f16`, and `f32`. Eight-bit integers, BF16,
+FP8, and HiF8 are rejected before IR emission; convert them explicitly first.
+`pto.vcadd` widens 16-bit integer results to 32 bits with matching signedness
+and half as many lanes. Other supported input types retain their result type.
+
+The A5 VPTO TileLib implementations of `trowmax`, `trowmin`, `trowargmax`,
+and `trowargmin` use these row operations and follow the vector source-type
+restriction, with one addition: on A5, the `trowmax` and `trowmin` tile
+entries also accept `i8`/`si8`/`ui8` sources. Their template widens 8-bit
+rows losslessly to 16 bits for the vector reduction, so no explicit
+conversion is needed for row min/max. `trowsum`, `trowprod`, and the arg
+reductions still reject 8-bit sources; the template selector rejects all
+unsupported source types.
 
 #### `pto.vcadd(vec: VRegType, mask: MaskType) -> VRegType`
 
 **Description**: Full-vector sum reduction. Result placed in lane 0.
+
+**Types**: 16/32-bit integers (signed, unsigned, or signless), `f16`, and `f32`.
+Eight-bit integer inputs are rejected; explicitly convert to a supported type
+before reducing. A 16-bit integer input returns 32-bit integer elements with the
+same signedness and half as many lanes. Other supported inputs preserve their
+vector type.
 
 #### `pto.vcmax(vec: VRegType, mask: MaskType) -> VRegType`
 
@@ -1988,13 +2273,35 @@ group_sum = pto.vcgadd(p_row, col_mask)
 
 ---
 
-### 8.2.5 Fused and compound ops
+#### `pto.dhistv2(acc: VRegType, source: VRegType, mask: MaskType, bin_val: ScalarType) -> VRegType`
+
+**Description**: Update a distribution histogram from active 8-bit source
+lanes. `acc` supplies the incoming 128 16-bit bin accumulators, and the result
+contains the updated accumulators.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `acc` | `VRegType` | 128-lane, 16-bit integer accumulator vector |
+| `source` | `VRegType` | 256-lane, 8-bit integer sample vector |
+| `mask` | `MaskType` | `b8` predicate selecting active source lanes |
+| `bin_val` | `ScalarType` | `i32` histogram bin/control operand |
+
+**Returns**: A vector with exactly the same type as `acc`.
+
+The frontend forwards these operands to the VPTO operation; PTOAS verification
+rejects an incompatible accumulator, source, mask granularity, or bin type.
+
+---
+
+### 8.2.6 Fused and compound ops
 
 These combine an arithmetic operation with a math function or activation in a single instruction.
 
-#### `pto.vexpdif(vec: VRegType, max_vec: VRegType, mask: MaskType, *, part: PartMode = PartMode.ODD) -> VRegType`
+#### `pto.vexpdif(vec: VRegType, max_vec: VRegType, mask: MaskType, *, part: PartMode | None = None) -> VRegType`
 
-**Description**: `exp(vec[i] - max_vec[i])` — the stable softmax numerator. `part` controls which half of the vector is computed: `EVEN` or `ODD`. The result keeps the same `VRegType` as the input vector.
+**Description**: `exp(vec[i] - max_vec[i])` — the stable softmax numerator. `part` selects which 16-bit half of every 32-bit lane feeds the mixed precision subtraction: `EVEN` or `ODD`. `f16` inputs pack two elements per 32-bit lane and consume only one half per instruction, so they must pass `part` explicitly; `f32` inputs are covered by a single instruction that computes the whole vector, so `part` may be omitted. The result keeps the same `VRegType` as the input vector.
 
 ---
 
@@ -2067,7 +2374,7 @@ exp_f16_odd  = pto.vmulscvt(exp_f32_odd, 1.0, mask, rnd=pto.VcvtRoundMode.A, par
 
 ---
 
-### 8.2.6 Comparison and selection
+### 8.2.7 Comparison and selection
 
 #### `pto.vcmp(v0: VRegType, v1: VRegType, seed_mask: MaskType, cmp_mode: CmpMode) -> MaskType`
 
@@ -2116,7 +2423,7 @@ exp_f16_odd  = pto.vmulscvt(exp_f32_odd, 1.0, mask, rnd=pto.VcvtRoundMode.A, par
 
 ---
 
-### 8.2.7 Vector type conversion and packing
+### 8.2.8 Vector type conversion and packing
 
 These ops change the element type or layout of vector registers. They are distinct from the tile-level `tile.cvt` — they operate on `VRegType` values inside `@pto.tileop` and are the explicit micro-op counterparts to higher-level conversion helpers.
 
@@ -2147,6 +2454,7 @@ These ops change the element type or layout of vector registers. They are distin
 - `f32 -> hif8` requires `rnd=A/H`, `sat`, and `part=P0/P1/P2/P3`.
 - `f16/bf16 -> f8e4m3/f8e5m2` requires `rnd=R/A/F/Z/C`, `sat`, and `part=EVEN/ODD`.
 - `f16 -> hif8` requires `rnd=A/H`, `sat`, and `part=EVEN/ODD`.
+- `f16 -> bf16` requires `rnd=R/A/F/Z/C`; it does not take `sat` or `part`.
 - `bf16 -> f4e1m2x2/f4e2m1x2` requires `rnd=R/A/F/Z/C` and `part=P0/P1/P2/P3`; it does not take `sat`.
 - `f8e4m3/f8e5m2/hif8 -> f32` and `f4e1m2x2/f4e2m1x2 -> bf16` require `part=P0/P1/P2/P3`; they do not take `rnd` or `sat`.
 
@@ -2216,7 +2524,37 @@ packed_high = pto.vpack(vec_i32, pto.VPackPart.HIGHER)  # upper 64 lanes -> 128�
 
 ---
 
-### 8.2.7.1 Index generation
+#### `pto.vunpack(src: VRegType, part: IndexLike) -> VRegType`
+
+**Description**: Widen the selected half of an integer vector. `part=0`
+selects the lower half and `part=1` selects the higher half. The result has
+half as many lanes, twice the element width, and the same total payload size.
+
+**Signedness rule**:
+
+- Signed input uses `pto.vsunpack`, sign-extends, and produces a signed result.
+- Unsigned input uses `pto.vzunpack`, zero-extends, and produces an unsigned result.
+- Signless input follows `pto.vpack`'s convention: it uses `pto.vzunpack` and
+  produces an explicitly unsigned result.
+
+For example, `si8` produces `si16`, while both `ui8` and signless `i8`
+produce `ui16`. Likewise, `si16` produces `si32`, while `ui16` and signless
+`i16` produce `ui32`.
+
+**Constraints**:
+
+- Only 8-bit to 16-bit and 16-bit to 32-bit widening are supported.
+- The source lane count must be even.
+- A statically known `part` must be `0` or `1`; a dynamic index must evaluate
+  to one of those values at runtime.
+
+For example, unpacking the lower half of `!pto.vreg<256xsi8>` with `part=0`
+produces `!pto.vreg<128xsi16>`. Unpacking the higher half of signless
+`!pto.vreg<256xi8>` with `part=1` produces `!pto.vreg<128xui16>`.
+
+---
+
+### 8.2.8.1 Index generation
 
 #### `pto.vci(base: ScalarType | int, order: OrderMode | None = None) -> VRegType`
 
@@ -2234,7 +2572,7 @@ typed_idx = pto.vci(pto.i32(16), order=pto.OrderMode.ASC)
 
 ---
 
-### 8.2.8 Vector rearrangement
+### 8.2.9 Vector rearrangement
 
 These ops rearrange data between vector registers without touching UB memory.
 They are useful for switching between interleaved layouts (`x0, y0, x1, y1,
@@ -2280,7 +2618,17 @@ contents but does not itself perform any store.
 a UB base through the alignment-coupled store chain. `vsqz` only compacts the
 register; the dense store must be performed with `pto.vstur` (the required
 consumer that lets the VPTO LLVM emitter set `VSQZ #st=1`), followed by
-`pto.vstar` to flush the trailing bytes. Do **not** feed the compacted vector
+`pto.vstar` to flush the trailing bytes. `pto.vstur` takes its store length
+from SPR `SQZN`, which only `pto.vsqz` writes, and only when the `VSQZ #st`
+hint is 1; `pto.init_align` does not initialize it. Keep the `vsqz` result
+feeding the `vstur` (directly or through `pto.vbitcast`) in the same
+function — that is what makes the emitter set `#st=1`, and the verifier
+rejects the store otherwise. If `SQZN` is Undefined, the store length — and
+therefore whether and what it writes — is undefined. The 1:1
+`VSTUR` / `VSQZ #st=1` FIFO pairing is still the programmer's/emitter's
+responsibility. See
+[the `vstur` requirement](07-data-movement-ops.md#stateful-store-family).
+Do **not** feed the compacted vector
 back to `pto.vsts(..., mask)` with the original mask — the original mask selects
 source lanes, not the compacted positions, so it would write the surviving
 elements to the wrong destinations.
@@ -2293,6 +2641,26 @@ align0 = pto.init_align()
 align1 = pto.vstur(align0, compacted, store_base, pto.PostUpdate.ON)
 pto.vstar(align1, store_base)
 ```
+
+---
+
+#### `pto.vusqz(vec: VRegType, mask: MaskType) -> VRegType`
+
+**Description**: Generate exclusive prefix counts from `mask`. Result lane
+`i` contains the number of active predicate lanes before lane `i`; therefore
+lane 0 is always zero. `vec` is retained by the VPTO interface for operand
+compatibility, while the observable count values are determined by `mask`.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `vec` | `VRegType` | Signed or signless 8-, 16-, or 32-bit integer carrier |
+| `mask` | `MaskType` | Predicate from which prefix counts are generated |
+
+**Returns**: A prefix-count vector with exactly the same type as `vec`.
+Unsigned carrier element types and widths other than 8, 16, or 32 bits are
+rejected by PTOAS verification.
 
 ---
 
@@ -2371,22 +2739,23 @@ even_lanes, odd_lanes = pto.vdintlv(packed_low, packed_high)
 
 ---
 
-### 8.2.9 Vector compute quick reference
+### 8.2.10 Vector compute quick reference
 
 | Category | Operations |
 |----------|------------|
 | Unary | `vexp`, `vln`, `vsqrt`, `vabs`, `vneg`, `vrec`, `vrsqrt`, `vrelu`, `vnot` |
 | Binary | `vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, `vmin`, `vand`, `vor`, `vxor`, `vshl`, `vshr` |
+| Carry | `vaddc`, `vsubc`, `vaddcs`, `vsubcs` |
 | Vector-scalar | `vadds`, `vsubs`, `vmuls`, `vmaxs`, `vmins`, `vlrelu`, `vands`, `vors`, `vxors`, `vshls`, `vshrs` |
 | Broadcast | `vbr`, `vdup` |
-| Full reduction | `vcadd`, `vcmax`, `vcmin` |
+| Full reduction | `vcadd`, `vcmax`, `vcmin`, `dhistv2` |
 | Group reduction | `vcgadd`, `vcgmax`, `vcgmin` |
 | Scan | `vcpadd` |
 | Fused | `vexpdif`, `vaxpy`, `vmula`, `vmadd`, `vaddrelu`, `vsubrelu`, `vmulscvt` |
 | Compare/select | `vcmp`, `vcmps`, `vsel` |
-| Conversion | `vcvt`, `vpack`, `vbitcast`, `pbitcast` |
+| Conversion | `vcvt`, `vpack`, `vunpack`, `vbitcast`, `pbitcast` |
 | Index generation | `vci` |
-| Rearrangement | `vsqz`, `vintlv`, `vdintlv` |
+| Rearrangement | `vsqz`, `vusqz`, `vintlv`, `vdintlv` |
 
 ---
 
@@ -2488,6 +2857,47 @@ pto.mad(
 )
 ```
 
+### 8.3.2a Runtime mad flags (new)
+
+`pto.mad`, `pto.mad_acc`, and `pto.mad_bias` additionally accept the four
+control flags as **runtime values** (any `scalar.*` expression producing an
+i32/i1), in addition to the static keywords above:
+
+| Keyword | Runtime type | Meaning |
+|---------|--------------|---------|
+| `unit_flag` | i32 in `{0, 2, 3}` | Runtime unit-flag control; replaces the static `unit_flag(...)` clause |
+| `disable_gemv` | i1 | Runtime GEMV-disable; replaces the static keyword |
+| `init` | i1 | Runtime acc-init selector: 1 = zero-Cmatrix rewrite, 0 = accumulate into `dst` |
+| `bias_init` | i1 | Runtime BTbuf selector on `mad_bias`: 1 = C source is the bias buffer, 0 = C source is `dst` |
+
+A runtime value is packed into the mad `xt` immediate at expansion time and
+**takes precedence over the static semantics encoded by the op kind** — this
+is the documented contract, and it is what lets a template emit a single op
+for a data-dependent choice instead of forking with `pto.if_`:
+
+```python
+# first sub-K block: clear or accumulate depending on a runtime flag
+pto.mad_acc(
+    a_l0.as_ptr(), b_l0.as_ptr(), acc.as_ptr(), m, n, k,
+    init=clear_accum,                       # runtime i1
+    unit_flag=scalar.select(uf == 3, pto.const(2, dtype=pto.si32), uf),
+)
+```
+
+Rules:
+
+- Passing a runtime `unit_flag`/`disable_gemv` together with the same-named
+  static clause/keyword is rejected (mutually exclusive).
+- Passing a **static** (Python int/bool) `init`/`bias_init` is rejected;
+  the accumulate/bias-init choice is the op kind's job (`mad` vs `mad_acc`,
+  `mad_bias`), and only runtime values may override it per instruction.
+- The mx family (`mad_mx*`) does **not** accept runtime flags yet; passing
+  one raises a `TypeError`. The IR layer already carries the operands and
+  interfaces, so lifting this restriction later is additive.
+- Capability probing: `ptodsl.MAD_RUNTIME_FLAGS` is the package-level
+  switch declaring this support (see the tilelang PTO GEMM template for a
+  downstream consumer).
+
 ### 8.3.3 Typical cube matmul pattern
 
 A full cube matmul follows a three-stage pattern: stage operands into L0A/L0B, compute, write back to UB.
@@ -2530,8 +2940,8 @@ arithmetic in SIMT scalar code after contiguous scalar loads or explicit
 
 <!-- ptodsl-doc-pending: {"reason":"illustrative fragment; covered by test_jit_compile scalar contiguous vector probes"} -->
 ```python
-x4 = scalar.load(ptr, offset, contiguous=4)
+x4 = pto.load(ptr, offset, contiguous=4)
 rstd4 = pto.Vec(pto.f32, 4, init=rstd)
 y4 = x4 * rstd4
-scalar.store(y4, ptr, offset)
+pto.store(y4, ptr, offset)
 ```

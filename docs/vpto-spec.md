@@ -300,6 +300,16 @@ pto.dsb "ALL"
 
 Without proper barriers, loads may see stale data or stores may be reordered incorrectly.
 
+Automatic vecscope memory-barrier analysis can also prove loop-carried UB
+accesses disjoint. For a runtime upper bound such as `min(n, 64)`, it uses
+a constant iteration-domain envelope when the lower bound and positive step
+are constant. A barrier is omitted only if the address-intersection relation
+is empty over that envelope; a nonempty or unmodelled relation retains the
+conservative dynamic-loop barrier. The envelope does not change the actual
+loop bound. Distinct allocations and invariant disjoint footprints are checked
+before the dynamic-loop fallback.
+
+
 #### Execution Scopes (__VEC_SCOPE__)
 
 `__VEC_SCOPE__` is the IR-level representation of a Vector Function (VF) launch. In the PTO architecture, it defines the hardware interface between the Scalar Unit and the Vector Thread.
@@ -324,9 +334,9 @@ The execution model follows non-blocking fork semantics:
 ```mlir
 pto.vecscope {
   %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
-  %v = pto.vlds %ub[%lane] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+  %v = pto.vlds %ub[%lane] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
   %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-  pto.vsts %abs, %ub_out[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+  pto.vsts %abs, %ub_out[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
 }
 ```
 
@@ -336,9 +346,9 @@ pto.vecscope {
 pto.strict_vecscope(%ub, %ub_out, %lane) {
 ^bb0(%in: !pto.ptr<f32, ub>, %out: !pto.ptr<f32, ub>, %iv: index):
   %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
-  %v = pto.vlds %in[%iv] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+  %v = pto.vlds %in[%iv] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
   %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-  pto.vsts %abs, %out[%iv], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+  pto.vsts %abs, %out[%iv], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
 } : (!pto.ptr<f32, ub>, !pto.ptr<f32, ub>, index) -> ()
 ```
 
@@ -370,9 +380,9 @@ pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
 pto.vecscope {
   scf.for %lane = %c0 to %9 step %c64 {
     %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
-    %v = pto.vlds %2[%lane] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+    %v = pto.vlds %2[%lane] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
     %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-    pto.vsts %abs, %8[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+    pto.vsts %abs, %8[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
   }
 }
 
@@ -389,9 +399,9 @@ pto.mte_ub_gm %8, %14, %c128_i64
 pto.strict_vecscope(%ub_in, %ub_out, %lane, %remaining) {
 ^bb0(%in: !pto.ptr<f32, ub>, %out: !pto.ptr<f32, ub>, %iv: index, %rem: i32):
   %mask, %next_remaining = pto.plt_b32 %rem : i32 -> !pto.mask<b32>, i32
-  %v = pto.vlds %in[%iv] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+  %v = pto.vlds %in[%iv] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
   %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-  pto.vsts %abs, %out[%iv], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+  pto.vsts %abs, %out[%iv], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
 } : (!pto.ptr<f32, ub>, !pto.ptr<f32, ub>, index, i32) -> ()
 ```
 
@@ -688,7 +698,9 @@ libraries on top of these primitives; they are not part of the ISA itself.
 
 ### Scope
 
-This document is the interface specification centered on the `mlir::pto` dialect and the shared MLIR surface used alongside it in PTO micro Instruction programs.
+This document is the interface specification centered on the `mlir::pto`
+dialect and the structured MLIR control-flow surface used alongside it in PTO
+micro Instruction programs.
 
 It only describes:
 
@@ -700,17 +712,25 @@ It only describes:
 
 It does not describe lowering strategy.
 
-PTO micro Instruction source programs are not restricted to `pto` operations alone. In practice they also use shared MLIR dialect ops, most notably the full scalar operation surface of `arith` together with structured control-flow ops from `scf`, to express scalar constants, scalar arithmetic, type conversion, comparisons, and structured control flow around PTO vector or tile regions. These shared-dialect ops are part of the supported PTO micro Instruction source surface and should be regarded as part of PTO-ISA alongside `pto` dialect operations.
+PTO micro Instruction source programs use common `pto.*` value operations for
+scalar and builtin-vector constants, arithmetic, and comparison, together with
+scalar conversion, selection, and math.
+They use `scf` for structured control flow around PTO vector or tile regions.
+This keeps the authored scalar interface uniform while retaining standard MLIR
+control-flow semantics.
 
 ### Shared MLIR Dialects
 
-- `arith`: the full scalar `arith` surface is supported in PTO micro Instruction programs, covering scalar integer, floating-point, boolean, and `index` operations. In current samples the most common uses are still constants, offset/bounds arithmetic, casts, compares, and selects.
 - `scf`: structured control flow used to model counted loops, conditional regions, loop-carried state, and break-like control around PTO compute and data-movement ops.
-- Shared dialect ops remain in standard MLIR form so that PTO analyses and backend passes can reason about control flow and scalar state without re-encoding them as PTO-specific instructions.
+- `arith`, `math`, and LLVM operations may appear as compiler legalization
+  results, but they are not a parallel public scalar authoring interface.
 
-### BlockDim Query Operations
+### Runtime Query Operations
 
-These ops expose the current kernel instance's execution coordinates to scalar code. They are the PTO-level equivalent of runtime queries such as `GetBlockIdx()` and `GetBlockNum()` in kernel programming models.
+These ops expose runtime values for the current kernel instance to scalar code.
+The block and subblock queries report execution coordinates and launch extents;
+`pto.get_l2_cache_offset` reports the runtime-configured byte offset used for
+L2 cache address mapping.
 
 Use them when the same kernel body is launched across multiple blocks or subblocks and each execution instance must figure out which slice of the global workload it owns.
 
@@ -718,7 +738,7 @@ A common pattern is:
 
 - split the full input/output tensor into `block_num` disjoint block-sized regions
 - let each block compute its own starting offset from `block_idx`
-- within one block, further tile the local region and drive the tile loop with ordinary scalar `arith` / `scf` ops
+- within one block, further tile the local region and drive the tile loop with common `pto` scalar operations and `scf`
 
 For example, if a tensor is split evenly across 8 blocks and each block handles `block_length = 2048` elements, then block `b` owns the global range `[b * block_length, (b + 1) * block_length)`. The per-block GM base pointer can be formed by adding `block_idx * block_length` elements to the original base pointer.
 
@@ -729,19 +749,20 @@ At the PTO micro Instruction level, these runtime-query ops are pure scalar prod
 ```mlir
 %block = pto.get_block_idx
 %block_num = pto.get_block_num
-%block_len = arith.constant 2048 : index
-%base = arith.index_cast %block : i64 to index
-%offset = arith.muli %base, %block_len : index
-%block_in = pto.addptr %gm_in, %offset : !pto.ptr<f32, gm> -> !pto.ptr<f32, gm>
-%block_out = pto.addptr %gm_out, %offset : !pto.ptr<f32, gm> -> !pto.ptr<f32, gm>
+%block_len = pto.constant 2048 : index
+%base = pto.index_cast %block signed : i64 -> index
+%offset = pto.muli %base, %block_len : index
+%block_in = pto.addptr %gm_in, %offset : !pto.ptr<f32, gm>, index -> !pto.ptr<f32, gm>
+%block_out = pto.addptr %gm_out, %offset : !pto.ptr<f32, gm>, index -> !pto.ptr<f32, gm>
 ```
 
 In this pattern, all blocks execute the same kernel body, but each block sees a different `%block` value and therefore computes a different GM window.
 
 The complete syntax, result types, constraints, semantics, pseudocode, and
 partitioning example for `pto.get_block_idx`, `pto.get_subblock_idx`,
-`pto.get_block_num`, and `pto.get_subblock_num` are documented in
-[Special Scalar Operations](isa/micro-isa/18-special-scalar.md#kernel-execution-query-operations).
+`pto.get_block_num`, `pto.get_subblock_num`, and
+`pto.get_l2_cache_offset` are documented in
+[Special Scalar Operations](isa/micro-isa/18-special-scalar.md#runtime-query-operations).
 
 #### `pto.store_vfsimt_info`
 
@@ -834,7 +855,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     %lane_base = arith.muli %ty, %c32_i32 : i32
     %tid = arith.addi %lane_base, %tx : i32
     %tid_idx = arith.index_castui %tid : i32 to index
-    pto.store %xyz, %dst[%tid_idx] : !pto.ptr<i32, ub>, i32
+    pto.store %xyz, %dst[%tid_idx] : !pto.ptr<i32, ub>, index, i32
     return
   }
 }
@@ -918,7 +939,7 @@ Typical pointer construction and pointer arithmetic follow the same `!pto.ptr<..
 
 ```mlir
 %0 = pto.castptr %c0 : i64 -> !pto.ptr<f32, ub>
-%1 = pto.addptr %0, %c1024 : !pto.ptr<f32, ub> -> !pto.ptr<f32, ub>
+%1 = pto.addptr %0, %c1024 : !pto.ptr<f32, ub>, index -> !pto.ptr<f32, ub>
 ```
 
 ### `!pto.ptr<T, space>`
@@ -939,13 +960,13 @@ Typical examples:
 
 ### Pointer Operations
 
-The complete contracts for `pto.castptr`, `pto.addptr`, `pto.load_scalar`, and
-`pto.store_scalar` are documented in
-[Special Scalar Operations](isa/micro-isa/18-special-scalar.md#typed-pointer-and-address-operations).
+The complete contracts for `pto.castptr`, `pto.addptr`, `pto.load`, and
+`pto.store` are documented in
+[Special Scalar Operations](isa/micro-isa/18-special-scalar.md).
 
 #### `pto.load`
 
-- **syntax:** `%value = pto.load %ptr[%offset] : !pto.ptr<T, space> -> T`
+- **syntax:** `%value = pto.load %ptr[%offset] : !pto.ptr<T, space>, index -> T`
 - **semantics:** Load one scalar element from a VPTO pointer-like operand.
 
 ```c
@@ -955,16 +976,16 @@ value = ptr[offset];
 - **inputs:**
   `%ptr` is a typed PTO pointer `!pto.ptr<T, space>` or a memref operand that
   will be normalized to a PTO pointer before LLVM emission. `%offset` is an
-  `index` displacement counted in elements.
+  element displacement (`index`, `i32` or `i64`) counted in elements.
 - **outputs:**
-  `%value` is the loaded scalar element.
+  `%value` is the loaded scalar or contiguous packed element.
 - **constraints and limitations:**
-  The result type MUST match the element type of `%ptr`. This is the preferred
-  scalar memory op for VPTO/SIMT authoring.
+  The result type MUST match the element type of `%ptr`. This is the ordinary
+  typed memory op for PTO-pointer access in either AICore or SIMT code.
 
 #### `pto.store`
 
-- **syntax:** `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, T`
+- **syntax:** `pto.store %value, %ptr[%offset] : !pto.ptr<T, space>, index, T`
 - **semantics:** Store one scalar element to a VPTO pointer-like operand.
 
 ```c
@@ -974,11 +995,12 @@ ptr[offset] = value;
 - **inputs:**
   `%value` is the scalar value to store. `%ptr` is a typed PTO pointer
   `!pto.ptr<T, space>` or a memref operand that will be normalized to a PTO
-  pointer before LLVM emission. `%offset` is an `index` displacement counted in
-  elements.
+  pointer before LLVM emission. `%offset` is an element displacement (`index`,
+  `i32` or `i64`) counted in elements.
 - **constraints and limitations:**
   The stored value type MUST match the element type of `%ptr`. This is the
-  preferred scalar memory op for VPTO/SIMT authoring.
+  ordinary typed memory op for PTO-pointer access in either AICore or SIMT
+  code.
 
 The complete syntax, type restrictions, execution-scope rules, cache behavior,
 target availability, and examples for `pto.ld_dev` and `pto.st_dev` are
@@ -995,15 +1017,15 @@ UB vector loads/stores:
 
 ```mlir
 %0 = pto.castptr %c0 : i64 -> !pto.ptr<f32, ub>
-%1 = pto.addptr %0, %c1024 : !pto.ptr<f32, ub> -> !pto.ptr<f32, ub>
+%1 = pto.addptr %0, %c1024 : !pto.ptr<f32, ub>, index -> !pto.ptr<f32, ub>
 pto.vecscope {
   %16 = scf.for %arg3 = %c0 to %11 step %c64 iter_args(%arg4 = %12) -> (i32) {
     %mask, %scalar_out = pto.plt_b32 %arg4 : i32 -> !pto.mask<b32>, i32
-    %s = pto.load %1[%c4] : !pto.ptr<f32, ub> -> f32
-    pto.store %s, %1[%c8] : !pto.ptr<f32, ub>, f32
-    %17 = pto.vlds %1[%arg3] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+    %s = pto.load %1[%c4] : !pto.ptr<f32, ub>, index -> f32
+    pto.store %s, %1[%c8] : !pto.ptr<f32, ub>, index, f32
+    %17 = pto.vlds %1[%arg3] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
     %18 = pto.vabs %17, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-    pto.vsts %18, %10[%arg3], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+    pto.vsts %18, %10[%arg3], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
     scf.yield %scalar_out : i32
   }
 }
@@ -1125,15 +1147,15 @@ All PTO micro Instruction operations follow standard MLIR syntax. The common pat
 **Load (memory to register):**
 
 ```mlir
-%result = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>
-%result, %updated_base = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>, !pto.ptr<T, ub>
+%result = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub>, index -> !pto.vreg<NxT>
+%result, %updated_base = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub>, index -> !pto.vreg<NxT>, !pto.ptr<T, ub>
 ```
 
 **Store (register to memory):**
 
 ```mlir
-pto.vsts %value, %destination[%offset] {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>
-%updated_base = pto.vsts %value, %destination[%offset] {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub> -> !pto.ptr<T, ub>
+pto.vsts %value, %destination[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, index, !pto.mask<G>
+%updated_base = pto.vsts %value, %destination[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, index, !pto.mask<G> -> !pto.ptr<T, ub>
 ```
 
 **Dual Load (one load, two results — deinterleave):**
@@ -1179,34 +1201,39 @@ pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
 
 ```mlir
 %ptr = pto.castptr %addr : i64 -> !pto.ptr<T, SPACE>
-%ptr2 = pto.addptr %ptr, %offset : !pto.ptr<T, SPACE> -> !pto.ptr<T, SPACE>
+%ptr2 = pto.addptr %ptr, %offset : !pto.ptr<T, SPACE>, index -> !pto.ptr<T, SPACE>
 ```
 
-### Shared Dialect Syntax Patterns
+### Scalar and Shared Control-Flow Syntax Patterns
 
-PTO micro Instruction programs may interleave PTO ops with standard MLIR `arith` and `scf` ops.
-The examples below emphasize common index-heavy patterns, but `arith` support is not limited to index arithmetic.
+PTO micro Instruction programs use `pto` scalar and builtin-vector value
+operations together with standard MLIR `scf` control flow.
 
 **Scalar / index constant:**
 
 ```mlir
-%c0 = arith.constant 0 : index
-%zero = arith.constant 0.0 : f32
+%c0 = pto.constant 0 : index
+%zero = pto.constant 0.000000e+00 : f32
 ```
 
-**Scalar arithmetic (integer / float / boolean-style bitwise):**
+**Scalar and builtin-vector arithmetic:**
 
 ```mlir
-%sum_i = arith.addi %lhs_i, %rhs_i : i32
-%sum_f = arith.addf %lhs_f, %rhs_f : f32
-%bits = arith.andi %flags0, %flags1 : i32
+%sum_i = pto.addi %lhs_i, %rhs_i : i32
+%sum_f = pto.addf %lhs_f, %rhs_f : f32
+%bits = pto.and %flags0, %flags1 : i32
+%sum4 = pto.addf %lhs4, %rhs4 : vector<4xf32>
+%neg4 = pto.negf %sum4 : vector<4xf32>
+%groups = pto.ceildiv %count, %width signed : index
+%shifted = pto.shr %bits, %amount unsigned : i32
 ```
 
 **Scalar compare and select:**
 
 ```mlir
-%cond = arith.cmpi eq, %lhs, %rhs : index
-%bound = arith.select %cond, %a, %b : index
+%cond = pto.cmpi eq %lhs, %rhs signed : index
+%lane_cond = pto.cmpf gt %lhs4, %rhs4 : vector<4xf32>
+%bound = pto.select %cond, %a, %b : index
 ```
 
 **Counted loop with loop-carried values:**
@@ -1214,7 +1241,7 @@ The examples below emphasize common index-heavy patterns, but `arith` support is
 ```mlir
 %result = scf.for %iv = %lb to %ub step %step
     iter_args(%acc = %init) -> (index) {
-  %next = arith.addi %acc, %iv : index
+  %next = pto.addi %acc, %iv : index
   scf.yield %next : index
 }
 ```
@@ -1270,25 +1297,42 @@ for (int i = 0; i < N; i++)
 
 **Example — pto.vcgadd (group reduction per VLane) semantics:**
 
+`U` is the hardware sum type: `i32/u32` for `i16/u16` input, otherwise `T`.
+`sum_view` aliases the destination register as elements of `U`; the VPTO
+operation retains the input-shaped register type.
+
 ```c
 int groups = 8;
 int K = 32 / sizeof(T);  // elements per 32-byte VLane
+int M = 256 / sizeof(U);
 for (int g = 0; g < 8; g++) {
-    T sum = 0;
+    U sum = 0;
     for (int i = 0; i < K; i++)
         if (mask[g*K + i])
-            sum += src[g*K + i];
-    dst[g] = sum;
+            sum += (U)src[g*K + i];
+    sum_view[g] = sum;
 }
-for (int i = groups; i < N; i++)
-    dst[i] = 0;
+for (int i = groups; i < M; i++)
+    sum_view[i] = 0;
 ```
+
+A5 `pto.vcadd`, `pto.vcmax`, and `pto.vcmin` accept only 16/32-bit integers
+(signless, signed, or unsigned), `f16`, and `f32`. Their operation verifiers
+reject eight-bit integer, BF16, FP8, and HiF8 inputs. Explicitly convert such
+inputs to a supported element type before reduction.
 
 For A5 reduction result types:
 
-- `pto.vcadd` widens `i8 -> i16`, `u8 -> u16`, `i16 -> i32`, and `u16 -> u32`,
-  with the lane count halved in each widening case.
-- `pto.vcadd` keeps the same result type for `f16`, `f32`, `i32`, and `u32`.
+- `pto.vcadd` rejects 8-bit integer inputs, including direct micro IR.
+- `pto.vcadd` widens 16-bit integers to 32-bit integers, preserving signedness
+  (signed, unsigned, or signless) and halving the lane count.
+- `pto.vcadd` keeps the same result type for `f16`, `f32`, and 32-bit integers.
+- A5 has no native 8-bit row or VLane reduction instruction.
+- For native 16-bit integer `pto.vcgadd`, the destination contains eight
+  consecutive 32-bit sums, while the declared register type retains 16-bit
+  elements. Its first sixteen declared elements therefore hold alternating
+  low/high halfwords of those sums. See
+  [Reduction Ops](isa/micro-isa/10-reduction-ops.md#ptovcgadd).
 
 ### Template Placeholder Conventions
 
@@ -1310,7 +1354,10 @@ For A5 reduction result types:
 ## Part III: ISA Instruction Reference
 # Part III: ISA Instruction Reference — Summary
 
-This section provides a categorized overview of all PTO micro Instruction operations plus the shared MLIR `arith` and `scf` ops that may appear in PTO micro Instruction programs. Detailed documentation for each group is available in the linked files.
+This section provides a categorized overview of all PTO micro Instruction
+operations plus the shared MLIR `scf` ops that may appear in PTO micro
+Instruction programs. Detailed documentation for each group is available in
+the linked files.
 
 ---
 
@@ -1331,11 +1378,12 @@ This section provides a categorized overview of all PTO micro Instruction operat
 | 11 | [Compare & Select](isa/micro-isa/11-compare-select.md) | Comparison and conditional selection | 4 (+1 not A5) | `pto.vcmp`, `pto.vcmps`, `pto.vsel`, `pto.vselr` (`pto.vselrv2` removed: not A5) |
 | 12 | [Data Rearrangement](isa/micro-isa/12-data-rearrangement.md) | In-register data movement and permutation | 2 (+2 not A5) | `pto.vintlv`, `pto.vdintlv` (`pto.vintlvv2`, `pto.vdintlvv2` removed: not A5) |
 | 13 | [DSA/SFU Ops](isa/micro-isa/13-dsa-sfu-ops.md) | Specialized ops, index generation, and sorting helpers | 11 | `pto.vlrelu`, `pto.vprelu`, `pto.vexpdif`, `pto.vaxpy`, `pto.vmulscvt`, `pto.vmull`, `pto.vmula`, `pto.vci`, `pto.vbitsort`, `pto.vmrgsort4`, `pto.get_vms4_sr` |
-| 14 | [Arith (Shared MLIR Dialect)](isa/micro-isa/14-shared-arith.md) | Full scalar `arith` surface used around PTO ops; the companion page lists categories and representative examples | all scalar ops | `arith.constant`, `arith.addi`, `arith.addf`, `arith.cmpi`, `arith.cmpf`, `arith.select`, `arith.index_cast`, `arith.extsi`, `arith.trunci`, `arith.andi`, `arith.shli`, etc. |
+| 14 | [Generic Scalar and Builtin Vector Operations](isa/micro-isa/14-generic-scalar-ops.md) | Uniform common PTO value operations | ~48 | `pto.constant`, arithmetic with semantic attributes, extended integer arithmetic, explicit `pto.*div*`/`pto.*rem*`, shifts, comparison, bitwise ops, integer extrema, both floating extrema contracts, ordinary and scaling conversions, selection, and common floating math |
 | 15 | [SCF (Shared MLIR Dialect)](isa/micro-isa/15-shared-scf.md) | Structured loops, branches, and loop-carried state around PTO regions | 5 | `scf.for`, `scf.if`, `scf.while`, `scf.condition`, `scf.yield` |
-| 16 | [Cube Matrix Multiply](isa/micro-isa/16-cube-matmul.md) | GM↔L1 (`l1`/cbuf) staging, L1 raw fill and L1 (`l1`)↔UB/BT/FB side moves, L1→L0A/L0B loads, L0C (`l0c`) matmul, and FIXPIPE MTE writeback | 20 | `pto.mte_gm_l1`, `pto.raw_fill_l1`, `pto.mte_l1_ub`, `pto.mte_gm_l1_frac`, `pto.mte_l1_bt`, `pto.mte_l1_fb`, `pto.mte_l1_l0a`, `pto.mte_l1_l0b`, `pto.mte_l1_l0a_mx`, `pto.mte_l1_l0b_mx`, `pto.mad`, `pto.mad_acc`, `pto.mad_bias`, `pto.mad_mx`, `pto.mad_mx_acc`, `pto.mad_mx_bias`, `pto.mte_l0c_l1`, `pto.mte_l0c_gm`, `pto.mte_l0c_ub` |
-| 17 | [SIMT Ops](isa/micro-isa/17-simt.md) | SIMT launch, thread/lane queries, vote/shuffle/redux, scalar memory, atomics, scalar math, conversion, entry synchronization, and state preservation | ~65 | `pto.store_vfsimt_info`, `pto.simt_launch`, `pto.get_tid_x`, `pto.get_laneid`, `pto.vote_*`, `pto.shuffle_*`, `pto.redux_*`, `pto.load`, `pto.store`, `pto.atomic_*`, `pto.convert`, `pto.syncthreads`, `pto.keep`, `pto.resume`, etc. |
-| 18 | [Special Scalar Operations](isa/micro-isa/18-special-scalar.md) | PTO scalar kernel queries, typed pointer/address calculation, scalar-pipeline memory, and ordinary AICore GM L1-bypass access | 10 | `pto.get_block_idx`, `pto.get_subblock_idx`, `pto.get_block_num`, `pto.get_subblock_num`, `pto.castptr`, `pto.addptr`, `pto.load_scalar`, `pto.store_scalar`, `pto.ld_dev`, `pto.st_dev` |
+| 16 | [Cube Matrix Multiply](isa/micro-isa/16-cube-matmul.md) | GM↔L1 (`l1`/cbuf) staging, L1 raw fill and L1 (`l1`)↔UB/BT/FB side moves, L1→L0A/L0B loads, L0C (`l0c`) matmul, and FIXPIPE MTE writeback | 20 | `pto.mte_gm_l1`, `pto.raw_fill_l1`, `pto.mte_l1_ub`, `pto.mte_gm_l1_frac`, `pto.mte_l1_bt`, `pto.mte_l1_fb`, `pto.mte_l1_l0a`, `pto.mte_l1_l0b`, `pto.mte_l1_l0a_mx`, `pto.mte_l1_l0b_mx`, `pto.mte_l1_l0a_3d`, `pto.mad`, `pto.mad_acc`, `pto.mad_bias`, `pto.mad_mx`, `pto.mad_mx_acc`, `pto.mad_mx_bias`, `pto.mte_l0c_l1`, `pto.mte_l0c_gm`, `pto.mte_l0c_ub` |
+| 17 | [SIMT Ops](isa/micro-isa/17-simt.md) | SIMT launch, thread/lane queries, vote/shuffle/redux, cache-controlled GM access, atomics, target-specific scalar forms, conversion, synchronization, and state preservation | ~63 | `pto.store_vfsimt_info`, `pto.simt_launch`, `pto.get_tid_x`, `pto.get_laneid`, `pto.vote_*`, `pto.shuffle_*`, `pto.redux_*`, `pto.ldg`, `pto.stg`, `pto.atomic_*`, SIMT-controlled `pto.cast` conversions, `pto.syncthreads`, `pto.keep`, `pto.resume`, etc. |
+| 18 | [Special Scalar Operations](isa/micro-isa/18-special-scalar.md) | PTO scalar runtime queries, typed pointer/address calculation, scalar-pipeline memory, and AICore GM L1-bypass access | 11 | `pto.get_block_idx`, `pto.get_subblock_idx`, `pto.get_block_num`, `pto.get_subblock_num`, `pto.get_l2_cache_offset`, `pto.castptr`, `pto.addptr`, `pto.load`, `pto.store`, `pto.ld_dev`, `pto.st_dev` |
+| 19 | [Async Comm](isa/micro-isa/19-async-comm.md) | Async GM↔GM SDMA copy; session filled from a host template | 2 | `pto.session_init`, `pto.sdma_gm_gm` |
 
 ---
 
@@ -1353,14 +1401,16 @@ This section provides a categorized overview of all PTO micro Instruction operat
 | L1→UB | 16 | `pto.mte_l1_ub` |
 | L1→BT | 16 | `pto.mte_l1_bt` |
 | L1→FB | 16 | `pto.mte_l1_fb` |
-| L1→L0A / L1→L0B | 16 | `pto.mte_l1_l0a`, `pto.mte_l1_l0b`, `pto.mte_l1_l0a_mx`, `pto.mte_l1_l0b_mx` |
+| L1→L0A / L1→L0B | 16 | `pto.mte_l1_l0a`, `pto.mte_l1_l0b`, `pto.mte_l1_l0a_mx`, `pto.mte_l1_l0b_mx`, `pto.mte_l1_l0a_3d` |
 | L0C→L1 / GM / UB (FIXPIPE MTE) | 16 | `pto.mte_l0c_l1`, `pto.mte_l0c_gm`, `pto.mte_l0c_ub` |
 | Contiguous Load | 3 | `pto.vlds` with `NORM` dist |
 | Broadcast Load | 3 | `pto.vlds` with `BRC` family dist |
 | Gather | 3 | `pto.vgather2`, `pto.vgatherb` |
 | Contiguous Store | 3 | `pto.vsts` with `NORM_B8` / `NORM_B16` / `NORM_B32` dist |
 | Scatter | 3 | `pto.vscatter` |
+| Ordinary typed scalar/packed access | 18 | `pto.load`, `pto.store` |
 | Scalar GM access bypassing local L1 data cache | 18 | `pto.ld_dev`, `pto.st_dev` |
+| GM→GM SDMA copy | 19 | `pto.sdma_gm_gm` |
 
 ### Compute Operations
 
@@ -1392,25 +1442,26 @@ This section provides a categorized overview of all PTO micro Instruction operat
 
 ### Scalar & Control Operations
 
-Group 14 covers shared MLIR scalar arithmetic. Group 18 catalogs PTO scalar
-queries, pointer/address operations, and scalar-memory operations. SIMT scalar
-operations remain in Group 17, while
-shared structured-control semantics remain in Group 15.
+Group 14 covers the common PTO scalar value operations. Group 18 catalogs PTO
+scalar queries, pointer/address operations,
+and ordinary scalar-memory operations. Group 19 covers session fill and GM↔GM
+SDMA copies. Workitem-dependent and target-specific SIMT operations remain in
+Group 17, while shared structured-control semantics remain in Group 15.
 
 | Operation | Group | Description |
 |-----------|-------|-------------|
-| Scalar Constants | 14 | `arith.constant` |
-| Scalar Integer / Index Arithmetic | 14 | `arith.addi`, `arith.subi`, `arith.muli`, `arith.divsi`, `arith.remui`, `arith.ceildivsi`, etc. |
-| Scalar Floating-Point Arithmetic | 14 | `arith.addf`, `arith.subf`, `arith.mulf`, `arith.divf`, `arith.maximumf`, etc. |
-| Scalar Compare & Select | 14 | `arith.cmpi`, `arith.cmpf`, `arith.select` |
-| Scalar Casts / Width Changes | 14 | `arith.index_cast`, `arith.index_castui`, `arith.extsi`, `arith.extui`, `arith.trunci`, `arith.sitofp`, etc. |
-| Scalar Bitwise / Shift Ops | 14 | `arith.andi`, `arith.ori`, `arith.xori`, `arith.shli`, `arith.shrsi`, `arith.shrui`, etc. |
-| Kernel Execution Queries | 18 | `pto.get_block_idx`, `pto.get_subblock_idx`, `pto.get_block_num`, `pto.get_subblock_num` |
+| Scalar Constants | 14 | `pto.constant` |
+| Scalar and Builtin Vector Arithmetic | 14 | `pto.addi`, `pto.addf`, `pto.subi`, `pto.subf`, `pto.muli`, `pto.mulf`, `pto.negi`, `pto.negf`, `pto.divi`, `pto.divf`, `pto.floordiv`, `pto.ceildiv`, `pto.remi`, `pto.remf`, `pto.shl`, `pto.shr` |
+| Scalar Comparison / Bitwise | 14 | `pto.cmpi`, `pto.cmpf`, `pto.and`, `pto.or`, `pto.xor` |
+| PTO Scalar Extrema / Absolute Value | 14 | `pto.maxi`, `pto.maxf`, `pto.mini`, `pto.minf`, `pto.maximum`, `pto.minimum`, `pto.absi`, `pto.absf` |
+| PTO Scalar Conversion / Select | 14 | `pto.exti`, `pto.trunci`, `pto.ftof`, `pto.ftoi`, `pto.itof`, `pto.bitcast`, `pto.index_cast`, `pto.select` |
+| PTO Scalar Floating Math | 14 | `pto.exp`, `pto.log`, `pto.sqrt`, `pto.pow`, `pto.fma` |
+| Runtime Queries | 18 | `pto.get_block_idx`, `pto.get_subblock_idx`, `pto.get_block_num`, `pto.get_subblock_num`, `pto.get_l2_cache_offset` |
 | Typed Pointer / Address Operations | 18 | `pto.castptr`, `pto.addptr` |
-| Scalar-Pipeline Memory | 18 | `pto.load_scalar`, `pto.store_scalar` |
+| Scalar-Pipeline Memory | 18 | `pto.load`, `pto.store` |
 | AICore Scalar GM L1-Bypass | 18 | `pto.ld_dev`, `pto.st_dev` |
-| SIMT Scalar Memory / Atomics | 17 | `pto.load`, `pto.store`, `pto.ldg`, `pto.stg`, `pto.atomic_*` |
-| SIMT Scalar Math / Conversion | 17 | `pto.prmt`, `pto.mulhi`, `pto.sqrt`, `pto.exp`, `pto.fma`, `pto.convert`, etc. |
+| SIMT GM Memory / Atomics | 17 | `pto.ldg`, `pto.stg`, `pto.atomic_*` |
+| Target-Specific Scalar Math / Conversion | 17 | `pto.prmt`, `pto.mulhi`, `pto.ftof`, `pto.ftoi`, or `pto.itof`, controlled rounding operations, etc. |
 | Counted Loops | 15 | `scf.for` |
 | Conditional Regions | 15 | `scf.if`, `scf.yield` |
 | Break-like Structured Loops | 15 | `scf.while`, `scf.condition`, `scf.yield` |
@@ -1425,6 +1476,7 @@ shared structured-control semantics remain in Group 15.
 - `pto.mte_l1_ub`
 - `pto.mte_l1_l0a`
 - `pto.mte_l1_l0b`
+- `pto.mte_l1_l0a_3d`
 - `pto.mte_l1_l0a_mx`
 - `pto.mte_l1_l0b_mx`
 - `pto.mad`
@@ -1460,16 +1512,16 @@ shared structured-control semantics remain in Group 15.
 ```mlir
 // 1. Find max
 %max_vec = pto.vcmax %logits, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-pto.vsts %max_vec, %ub_tmp[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
-%max_bc = pto.vlds %ub_tmp[%c0] {dist = "BRC_B32"} : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+pto.vsts %max_vec, %ub_tmp[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
+%max_bc = pto.vlds %ub_tmp[%c0] {dist = "BRC_B32"} : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
 
 // 2. exp(x - max) using fused op
 %exp = pto.vexpdif %logits, %max_bc, %mask, "ODD" : !pto.vreg<64xf32>, !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
 
 // 3. Sum
 %sum = pto.vcadd %exp, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-pto.vsts %sum, %ub_tmp[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
-%sum_bc = pto.vlds %ub_tmp[%c0] {dist = "BRC_B32"} : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+pto.vsts %sum, %ub_tmp[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
+%sum_bc = pto.vlds %ub_tmp[%c0] {dist = "BRC_B32"} : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
 
 // 4. Divide
 %softmax = pto.vdiv %exp, %sum_bc, %mask : !pto.vreg<64xf32>, !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
@@ -1526,9 +1578,8 @@ For the boundary between Tile Instruction and the micro instruction surface (whe
 
 ### Part I
 
-1. **mem_bar as pto op:** Should `pto.mem_bar` be a formal pto dialect op, or is there an existing mechanism?
-2. **UB size parameterization:** Is 256KB always fixed, or should spec allow for architecture variants?
-3. **MERGING predication:** Intentionally omitted (SW-emulated, perf overhead). Revisit if needed later.
+1. **UB size parameterization:** Is 256KB always fixed, or should spec allow for architecture variants?
+2. **MERGING predication:** Intentionally omitted (SW-emulated, perf overhead). Revisit if needed later.
 
 ### Part II
 

@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,6 +6,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """
 Lazy MLIR type descriptors and eager type constructors.
 
@@ -19,8 +21,9 @@ where the annotation is evaluated at *import* time (no active context), and
 the actual type is materialised later by the ``@pto.jit`` decorator.
 """
 
+from __future__ import annotations
+
 from ptoas.mlir.dialects import pto as _pto
-from ptoas.mlir.dialects import arith
 from ptoas.mlir.dialects.builtin import UnrealizedConversionCastOp
 from ptoas.mlir.ir import (
     BF16Type,
@@ -30,7 +33,9 @@ from ptoas.mlir.ir import (
     Float8E5M2Type,
     FloatAttr,
     IndexType,
+    IntegerAttr,
     IntegerType,
+    Operation,
     ShapedType,
     Type,
     VectorType,
@@ -76,7 +81,11 @@ class _DType:
         target_type = self.resolve()
         kind = _classify_scalar_type(target_type)
         if kind == "float":
-            return arith.ConstantOp(target_type, _parse_float_attr(target_type, value)).result
+            return Operation.create(
+                "pto.constant",
+                results=[target_type],
+                attributes={"value": _parse_float_attr(target_type, value)},
+            ).results[0]
         if kind == "integer":
             return _materialize_integer_literal(target_type, value)
         raise TypeError(f"unsupported eager constructor target type {target_type}")
@@ -193,31 +202,31 @@ class _VMIVRegDescriptor(_DType):
     def __init__(self, lanes: int, elem):
         if lanes not in VMI_LANE_COUNTS:
             raise ValueError(
-                "pto.vmi.vreg(...) requires lanes to be one of "
+                "pto.vmi.vreg_type(...) requires lanes to be one of "
                 "1, 2, 4, 8, 64, 128, 256"
             )
         self._lanes = lanes
         self._elem = elem
 
     def resolve(self) -> Type:
-        elem = _ensure_tensor_storage_dtype(self._elem, context="pto.vmi.vreg(...)")
+        elem = _ensure_tensor_storage_dtype(self._elem, context="pto.vmi.vreg_type(...)")
         vreg_type_cls = getattr(_pto, "VMIVRegType", None)
         if vreg_type_cls is None:
             raise TypeError(
                 "The current PTO Python bindings do not expose VMIVRegType. "
-                "Rebuild the PTO Python extension before using pto.vmi.vreg(...)."
+                "Rebuild the PTO Python extension before using pto.vmi.vreg_type(...)."
             )
         return vreg_type_cls.get(self._lanes, elem)
 
     def __repr__(self):
-        return f"<pto.vmi.vreg {self._lanes}x{self._elem}>"
+        return f"<pto.vmi.vreg_type {self._lanes}x{self._elem}>"
 
 
 class _VMIMaskDescriptor(_DType):
     def __init__(self, lanes: int):
         if lanes not in VMI_LANE_COUNTS:
             raise ValueError(
-                "pto.vmi.mask(...) requires lanes to be one of "
+                "pto.vmi.mask_type(...) requires lanes to be one of "
                 "1, 2, 4, 8, 64, 128, 256"
             )
         self._lanes = lanes
@@ -228,12 +237,12 @@ class _VMIMaskDescriptor(_DType):
         if mask_type_cls is None:
             raise TypeError(
                 "The current PTO Python bindings do not expose VMIMaskType. "
-                "Rebuild the PTO Python extension before using pto.vmi.mask(...)."
+                "Rebuild the PTO Python extension before using pto.vmi.mask_type(...)."
             )
         return mask_type_cls.get(self._lanes, self._granularity)
 
     def __repr__(self):
-        return f"<pto.vmi.mask {self._lanes}x{self._granularity}>"
+        return f"<pto.vmi.mask_type {self._lanes}x{self._granularity}>"
 
 class _VecDescriptor(_DType):
     def __init__(self, elem, size: int):
@@ -425,12 +434,14 @@ def _restore_integer_signedness(value, target_type):
 def _materialize_integer_literal(target_type, value):
     if not IntegerType.isinstance(target_type):
         raise TypeError(f"unsupported eager integer constructor target type {target_type}")
-    signless_type = _signless_integer_type(target_type)
     raw_value = _parse_integer_value(value, target_type=target_type)
-    constant = arith.ConstantOp(signless_type, raw_value).result
-    if target_type == signless_type:
-        return constant
-    return _restore_integer_signedness(constant, target_type)
+    signless_type = _signless_integer_type(target_type)
+    result = Operation.create(
+        "pto.constant",
+        results=[signless_type],
+        attributes={"value": IntegerAttr.get(signless_type, raw_value)},
+    ).results[0]
+    return _restore_integer_signedness(result, target_type)
 
 
 def _parse_integer_value(value, *, target_type=None):
@@ -598,6 +609,48 @@ def struct_type(*field_types) -> _StructDescriptor:
     return _StructDescriptor(field_types)
 
 
+# Engines an async session can drive, as named in ``!pto.dma_session<...>``.
+_DMA_ENGINES = ("sdma", "urma", "rdma")
+
+
+class _DmaSessionDescriptor(_DType):
+    """Deferred ``!pto.dma_session<engine>`` type."""
+
+    def __init__(self, engine: str):
+        self._engine = engine
+        super().__init__(factory=self._resolve_engine_type)
+
+    @property
+    def engine(self) -> str:
+        return self._engine
+
+    def _resolve_engine_type(self) -> Type:
+        session_type_cls = getattr(_pto, "DmaSessionType", None)
+        if session_type_cls is None:
+            raise TypeError(
+                "The current PTO Python bindings do not expose DmaSessionType. "
+                "Rebuild the PTO Python extension before using "
+                "pto.dma_session_type(...)."
+            )
+        engine_enum = getattr(_pto.DmaEngine, self._engine.capitalize())
+        return session_type_cls.get(engine=engine_enum)
+
+
+def dma_session_type(engine: str = "sdma") -> _DmaSessionDescriptor:
+    """Return the session type ``pto.session_init`` produces for ``engine``.
+
+    A session is opaque: what it holds is the expansion's business, and the only
+    way to get one is ``pto.session_init``. This exists to name the type, not to
+    build a session.
+    """
+    if engine not in _DMA_ENGINES:
+        raise ValueError(
+            f"pto.dma_session_type(...): unknown engine '{engine}'; "
+            f"known: {list(_DMA_ENGINES)}"
+        )
+    return _DmaSessionDescriptor(engine)
+
+
 def vmi_vreg_type(lanes: int, elem) -> _VMIVRegDescriptor:
     """Return a lazy descriptor for ``!pto.vmi.vreg<lanesxelem>``."""
     return _VMIVRegDescriptor(lanes, elem)
@@ -714,7 +767,7 @@ __all__ = [
     "si8", "si16", "si32", "si64",
     "ui8", "ui16", "ui32", "ui64",
     "index",
-    "ptr", "vreg_type", "vec_type", "mask_type", "struct_type",
+    "ptr", "vreg_type", "vec_type", "mask_type", "struct_type", "dma_session_type",
     "vmi_vreg_type", "vmi_mask_type",
     "tile_buf_type", "tensor_view_type", "tensor_view_type_from_dims",
     "part_tensor_view_type", "part_tensor_view_type_from_dims",

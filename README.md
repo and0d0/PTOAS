@@ -145,6 +145,13 @@ PTO_BUILD_DIR="$PTO_SOURCE_DIR/build" \
 
 安装完成后，必须先按第 4 节配置运行环境，再执行 `ptoas` 或 `check-pto`。
 
+GitCode/CANN 构建入口 `bash build.sh --build` 保留 `build/`，由 Ninja
+增量更新受影响的目标。`bash build.sh --pkg` 使用独立的 `build/wheel/`
+构建 wheel，再由 `build/package/` 封装安装包，不重复编译 PTOAS。
+需要清理 PTOAS 中间产物（例如切换工具链）时，使用 `--clean --build`
+或 `--clean --pkg`；此选项不清理共享 LLVM 缓存。跨 CI 任务的编译结果
+复用由 `BuildAccelerate`/xcache 提供，工作区内的增量构建需要保留对应目录。
+
 ### 3.4 Python 安装合同 (Python Distribution Contract)
 
 如果你要使用 Python 绑定、PTODSL资源，推荐使用仓库根目录
@@ -170,7 +177,7 @@ cd $PTO_SOURCE_DIR
 
 ```python
 import ptodsl
-from ptodsl import pto, scalar
+from ptodsl import pto
 from ptoas.mlir.dialects import pto as mlir_pto
 ```
 
@@ -184,6 +191,31 @@ from ptoas.mlir.dialects import pto as mlir_pto
 > - `ptoas-bin-*.tar.gz` 这类 compiler-only 二进制 tarball 只提供 CLI/toolchain，
 >   **不是** PTODSL-capable Python distribution；仅解压 tarball 不能保证
 >   `import ptodsl` 可用。
+> - **跨 Python 版本**：wheel 内的四个版本敏感 pybind11 扩展（`ptoas._core` 与
+>   `ptoas.mlir` 家族的 `_mlir`、`_mlirDialectsLLVM`、`_site_initialize_0`）按
+>   构建时的解释器 ABI 打 tag。在 ABI 匹配的解释器上直接加载预编译产物；在不
+>   匹配的解释器上，首次 `import ptodsl`/`import ptoas.mlir.*` 会由 `sys.meta_path`
+>   finder 触发一次在线 CMake 重编（针对随包发的版本无关 `libPTOASCompiler` +
+>   共享 `libLLVMSupport`），耗时数十秒并缓存到包目录或 `~/.cache/cann/ptoas/<ver>`，
+>   之后二次导入直接命中缓存。在线编出的 `ptoas._core` 是**全功能**（含 `main`
+>   与 TileLib/SoftLib 桥），并非仅 dialect，因此 `ptoas` CLI（如
+>   `ptoas --version`、编译）在 ABI 不匹配的解释器上同样可用。此路径要求 wheel 以
+>   `PTOAS_ENABLE_ONLINE_CORE_COMPILE=ON` 构建（`build.sh` 默认开启，并以 shared
+>   方式产出 `libLLVMSupport`），且目标机上有系统级 `cmake`、`python3-dev` 头与
+>   合适版本的 `pybind11`。具体版本约束：
+>   - **Python**：在线编译驱动要求解释器 **>= 3.8**（更低版本会直接报错）。3.8 上
+>     随包运行时已消除 3.9-only API 依赖（`str.removesuffix` 等）；`ast.unparse`
+>     缺失时错误信息会降级但不影响编译。
+>   - **pybind11（`ptoas._core`）**：**>= 2.13.6**，不限上界，任意 3.x 均可。
+>   - **pybind11（`ptoas.mlir` 家族）**：`2.13.6 <= pybind11 < 3.0.2`。自 3.0.2 起
+>     `def_property` 系列禁用 `keep_alive`，上游 MLIR 绑定因此无法编译；家族因而
+>     不会被自动重编，但仅用 CLI（`_core`）不受影响。
+>   - **Python 3.14**：需要 `pybind11 >= 3.0.0`，与家族上界叠加后，3.14 上家族的
+>     可用窗口仅为 **3.0.0 / 3.0.1**；若目标机只需 `ptoas` CLI（`_core`），则
+>     3.14 上任意 `>= 3.0.0` 的 pybind11 均可。
+>   注意：上面 3.2 的 `pybind11<3` 约束针对的是**从源码构建** LLVM/MLIR 与 PTOAS
+>   的构建机（该场景解释器固定，家族必须能编译）；此处是**目标机在线重编**的运行
+>   期约束，两者场景不同，不要混淆。
 > - release tag 约定：`ptoas-vX.Y` 发布主工具链，`vmi-vA.B.C` 发布
 >   `ptoas-vmi` distribution。创建 VMI release tag 前，应通过发布 PR 将
 >   `packaging/ptoas-vmi/pyproject.toml.patch` 中的版本更新为相同的 `A.B.C`。
@@ -287,14 +319,71 @@ ptoas test/lit/vmi_new/vmi_ptoas_cli_pipeline.pto --pto-arch=a5 --pto-backend=vp
 ptoas input.pto --pto-arch=a5 --pto-backend=vpto --emit-vpto \
   --vpto-scheduler=analyze -o output.cpp
 
-# off（默认）完全禁用；on 执行相同分析，不重排 IR
+# A5 默认启用 on；显式 off 禁用，on 会检查并应用合法的新顺序
 ptoas input.pto --pto-arch=a5 --pto-backend=vpto --emit-vpto \
   --vpto-scheduler=on -o output.cpp
+
+# 显式启用“调度 → 有界重物化 → 再调度”，并输出决策信息
+ptoas input.pto --pto-arch=a5 --pto-backend=vpto --emit-vpto \
+  --vpto-scheduler=on --vpto-scheduler-remat --vpto-scheduler-trace -o output.cpp
+
+# A5 默认随 scheduler=on 启用重物化；需要时可显式关闭
+ptoas input.pto --pto-arch=a5 --pto-backend=vpto --emit-vpto \
+  --vpto-scheduler-remat=false -o output.cpp
+
+# 选择哪些 family / 操作走 VPTO C++ bridge（默认见下）
+ptoas input.pto --pto-arch=a5 --pto-backend=vpto \
+  --vpto-bridge-policy=my-policy.yaml -o output.o
+
+# 打印 kernel 如何拿到 DebugTunnel 指针：implicit（真实 NPU）/ explicit（simulator）
+ptoas input.pto --pto-arch=a5 --pto-backend=vpto \
+  --vpto-print-dtdata=explicit -o output.o
+
+# 输出可重定位 AI Core device object（跳过 host stub 编译与 fatobj 打包）
+# 需要 --pto-backend=vpto 与显式 -o 路径；不支持 mixed pto.backend 输入
+ptoas input.pto --pto-arch=a5 --pto-backend=vpto \
+  --emit-vpto-device-object -o output.o
 
 # 查看当前 ptoas release 版本号
 ptoas --version
 
 ```
+
+`--vpto-bridge-policy` 指定一份 route policy YAML，决定哪些 family 与操作
+经由 VPTO C++ bridge 下降到 PTO-ISA wrapper。它只做选择，ABI 与 wrapper
+细节由编译器内的 registry 拥有：
+
+```yaml
+version: 1
+families:
+  pipe: { enabled: true }
+  cube: { enabled_ops: [pto.tmatmul, pto.tmatmul.acc] }
+  print: { enabled_ops: [pto.print, pto.tprint] }
+```
+
+内置默认开启 pipe 与 print（`pto.print` / `pto.tprint` 在 VPTO 上没有非
+bridge 实现，不经 bridge 无法编译），cube 操作默认保持原有 `ExpandTileOp`
+路径，需要时逐个选入。`--vpto-print-dtdata` 选择打印 kernel 的 DebugTunnel
+指针投递约定，这取决于运行时而非签名，因此必须显式指定。设计与分期验收详见
+[`docs/designs/vpto-bridge-reimplementation.md`](docs/designs/vpto-bridge-reimplementation.md)。
+
+当前 `pto.tprint` bridge 支持有已规划地址的二维、row-major ND Vec tile，
+按静态 `valid_shape` 打印，使用物理列数作为行跨度。支持 f16、bf16、f32 和
+无符号性标记的 i8/i16/i32；动态有效尺寸、其他布局、`tmp` 或显式
+`printFormat` 会明确报错。Pipe/Cube bridge 的 tile specialization 也要求
+静态有效尺寸。模块启用打印时，kernel entry 会追加独立的隐藏 DTData 槽，
+用户参数的位置和类型保持不变，不会被重新命名为 DTData。
+
+`--emit-vpto-device-object` 让 VPTO 后端把可重定位的 AI Core device
+object（`ld.lld -r` 合并后的 ELF，cube/vector 同时存在时合并为单个 `.o`）
+直接写入 `-o`，跳过 host stub 编译与 fatobj 打包；默认的 fatobj 输出不受
+影响。该产物面向自带 kernel entry 包装和最终 device 链接的运行时（如
+PyPTO persistent runtime）。导出符号命名规则：kernel entry 为
+`<logical>_mix_aiv`（vector 侧）/ `<logical>_mix_aic`（cube 侧）；其余
+外部可见函数为逻辑名追加 target ABI 后缀——CANN ≥ 9.0.0-beta.2 使用
+`.vector`/`.cube`，更早版本使用 `_mix_aiv`/`_mix_aic`；逻辑名即去掉
+对应后缀后的名字。该模式要求 `--pto-backend=vpto` 与显式 `-o` 路径，
+不支持 mixed `pto.backend` 输入（会得到明确的报错诊断）。
 
 `--vpto-scheduler` 在 VPTO 发射流水线的最终 CSE 之后、发射合法性校验之前运行。
 目标模型仅支持 A5 Vector kernel；规范化后的 Cube 子模块会被跳过，不生成
@@ -302,6 +391,10 @@ ptoas --version
 `analyze`/`on` 的确定性报告写入标准错误，包括区域边界、依赖 DAG、关键路径、
 目标资源占用和寄存器压力；生成代码仍写入正常输出。设计与分析格式详见
 [`docs/designs/vpto-scheduler-framework.md`](docs/designs/vpto-scheduler-framework.md)。
+
+`--vpto-scheduler-remat` 是 A5 VPTO Vector 优化，必须使用 `--pto-backend=vpto`，且只能与 `--vpto-scheduler=on` 配合。A5 driver 在用户没有显式指定时会随默认的 scheduler `on` 一起启用；可通过 `--vpto-scheduler-remat=false` 单独关闭。它会在首次调度后分析静态压力，但仅在某个调度区间的 vector 峰值严格超过模型上限 32 时，从循环携带值递归构造由目标模型认可的 cheap producer DAG，在前驱深度和代码膨胀预算内于消费点附近重建计算，再重新分析并调度一次；predicate 峰值超过模型上限 7 不会单独触发 vector remat。Planner 会把预算内的候选交给二次调度，即使估算尚未完全达到降压目标；第二次调度失败、没有降低静态 vector 峰值或任一有上限的寄存器压力集最终仍超限时，会回滚全部克隆、use 替换和首次调度顺序。
+
+`--vmi-fastmath` 默认开启。它记录整条 VMI 流水线的转换状态（`vmi-layout-assignment` 与 `vmi-to-vpto` 读取同一个值），因此它不仅选择可能改变 NaN 结果的转换快速路径，也决定布局关系：单源分片（K=1）的 `f32` 到 `bf16` `Z` 舍入且不饱和窄化只有在开启时才允许使用稠密 `c -> c` 关系（例如 `0x7F800001` 可被截断为正无穷 `0x7F80`）；需要保留这类 NaN 转换结果时，可显式传入 `--vmi-fastmath=false`，此时该窄化使用 `lane_stride = 2` 关系并在稠密消费者前插入一次打包。详见[编译选项说明](docs/zh/tileop/user_guide/compile_options.md)。
 
 ### 5.2 Python 接口 (Python API)
 
@@ -311,13 +404,13 @@ ptoas --version
 from ptoas.mlir.ir import Context, Module, Location
 # PTOAS 自带的 MLIR Python API 位于 ptoas.mlir 命名空间。
 from ptoas.mlir.dialects import pto
-from ptodsl import pto as jit_pto, scalar
+from ptodsl import pto as jit_pto
 
 with Context() as ctx, Location.unknown():
     pto.register_dialect(ctx, load=True)
     module = Module.create()
     print("PTO Dialect registered successfully!")
-    print("PTODSL imported successfully!", jit_pto, scalar)
+    print("PTODSL imported successfully!", jit_pto)
 
 ```
 

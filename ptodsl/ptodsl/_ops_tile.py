@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,6 +6,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Tile ops: views, allocation, and the T-op family."""
 
 from functools import wraps
@@ -717,13 +719,15 @@ def tstore(tile, part, *, fp=None):
     )
 
 
-def tmov(src, dst, *, fp=None, mode=None):
+def tmov(src, dst, *, fp=None, mode=None, st_phase=None):
     """``pto.tmov ins(src) outs(dst)`` – move data between tile domains."""
     kwargs = {}
     if fp is not None:
         kwargs["fp"] = unwrap_surface_value(fp)
     if mode is not None:
         kwargs["accToVecMode"] = _normalize_acc_to_vec_mode(mode, context="tmov(..., mode=...)")
+    if st_phase is not None:
+        kwargs["stPhase"] = st_phase
     _pto.TMovOp(None, unwrap_surface_value(src), unwrap_surface_value(dst), **kwargs)
 
 
@@ -802,6 +806,17 @@ def tmatmul_acc(acc_in, lhs, rhs, dst):
     )
 
 
+def tmatmul_bias(lhs, rhs, bias, dst):
+    """``pto.tmatmul.bias ins(lhs, rhs, bias) outs(dst)``."""
+    _pto.TMatmulBiasOp(
+        None,
+        unwrap_surface_value(lhs),
+        unwrap_surface_value(rhs),
+        unwrap_surface_value(bias),
+        unwrap_surface_value(dst),
+    )
+
+
 def tmatmul_mx(lhs, lhs_scale, rhs, rhs_scale, dst, *, acc_phase=None):
     """``pto.tmatmul.mx ins(lhs, lhs_scale, rhs, rhs_scale) outs(dst)``."""
     _pto.TMatmulMxOp(
@@ -829,7 +844,7 @@ def tmatmul_mx_acc(acc_in, lhs, lhs_scale, rhs, rhs_scale, dst, *, acc_phase=Non
     )
 
 
-def tmatmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, dst):
+def tmatmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, dst, *, acc_phase=None):
     """``pto.tmatmul.mx.bias ins(lhs, lhs_scale, rhs, rhs_scale, bias) outs(dst)``."""
     _pto.TMatmulMxBiasOp(
         None,
@@ -839,6 +854,7 @@ def tmatmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, dst):
         unwrap_surface_value(rhs_scale),
         unwrap_surface_value(bias),
         unwrap_surface_value(dst),
+        accPhase=acc_phase,
     )
 
 
@@ -903,7 +919,7 @@ def tgemv_mx_acc(acc_in, lhs, lhs_scale, rhs, rhs_scale, dst, *, acc_phase=None)
     )
 
 
-def tgemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, dst):
+def tgemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, dst, *, acc_phase=None):
     """``pto.tgemv.mx.bias ins(lhs, lhs_scale, rhs, rhs_scale, bias) outs(dst)``."""
     _pto.TGemvMxBiasOp(
         None,
@@ -913,6 +929,7 @@ def tgemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, dst):
         unwrap_surface_value(rhs_scale),
         unwrap_surface_value(bias),
         unwrap_surface_value(dst),
+        accPhase=acc_phase,
     )
 
 
@@ -1286,6 +1303,22 @@ def print(fmt, scalar):
     _pto.PrintOp(str(fmt), raw_scalar)
 
 
+def _require_vpto_tdump_backend():
+    from ._tracing.active import current_runtime
+
+    runtime = current_runtime()
+    module_spec = getattr(runtime, "module_spec", None)
+    backend = getattr(module_spec, "backend", None)
+    if backend == "emitc":
+        raise ValueError("pto.tdump is supported only by the VPTO backend; got backend='emitc'")
+
+
+def tdump(src, dst):
+    """``pto.tdump ins(src) outs(dst)`` – persistent tile dump to GM."""
+    _require_vpto_tdump_backend()
+    _pto.TensorDumpOp(unwrap_surface_value(src), unwrap_surface_value(dst))
+
+
 def tprint(src, tmp=None, *, print_format=None):
     """``pto.tprint ins(src[, tmp])``."""
     _require_emitc_tprint_backend()
@@ -1405,21 +1438,23 @@ def trowprod(src, tmp, dst):
     )
 
 
-def trowargmax(src, tmp, dst):
-    """``pto.trowargmax ins(src, tmp) outs(dst)``."""
+def trowargmax(src, dst_idx, dst_val=None, *, tmp=None):
+    """Write row-wise argmax indexes and, when requested, maximum values."""
     _pto.trowargmax(
         unwrap_surface_value(src),
-        unwrap_surface_value(dst),
-        tmp=unwrap_surface_value(tmp),
+        unwrap_surface_value(dst_idx),
+        tmp=None if tmp is None else unwrap_surface_value(tmp),
+        dst_val=None if dst_val is None else unwrap_surface_value(dst_val),
     )
 
 
-def trowargmin(src, tmp, dst):
-    """``pto.trowargmin ins(src, tmp) outs(dst)``."""
+def trowargmin(src, dst_idx, dst_val=None, *, tmp=None):
+    """Write row-wise argmin indexes and, when requested, minimum values."""
     _pto.trowargmin(
         unwrap_surface_value(src),
-        unwrap_surface_value(dst),
-        tmp=unwrap_surface_value(tmp),
+        unwrap_surface_value(dst_idx),
+        tmp=None if tmp is None else unwrap_surface_value(tmp),
+        dst_val=None if dst_val is None else unwrap_surface_value(dst_val),
     )
 
 
@@ -1457,21 +1492,23 @@ def tcolprod(src, dst):
     )
 
 
-def tcolargmax(src, tmp, dst):
-    """``pto.tcolargmax ins(src, tmp) outs(dst)``."""
+def tcolargmax(src, dst_idx, dst_val=None, *, tmp=None):
+    """Write column-wise argmax indexes and optional maximum values."""
     _pto.tcolargmax(
         unwrap_surface_value(src),
-        unwrap_surface_value(dst),
-        tmp=unwrap_surface_value(tmp),
+        unwrap_surface_value(dst_idx),
+        tmp=None if tmp is None else unwrap_surface_value(tmp),
+        dst_val=None if dst_val is None else unwrap_surface_value(dst_val),
     )
 
 
-def tcolargmin(src, tmp, dst):
-    """``pto.tcolargmin ins(src, tmp) outs(dst)``."""
+def tcolargmin(src, dst_idx, dst_val=None, *, tmp=None):
+    """Write column-wise argmin indexes and optional minimum values."""
     _pto.tcolargmin(
         unwrap_surface_value(src),
-        unwrap_surface_value(dst),
-        tmp=unwrap_surface_value(tmp),
+        unwrap_surface_value(dst_idx),
+        tmp=None if tmp is None else unwrap_surface_value(tmp),
+        dst_val=None if dst_val is None else unwrap_surface_value(dst_val),
     )
 
 

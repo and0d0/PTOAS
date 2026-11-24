@@ -8,8 +8,6 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
-include(cmake/fetch_cann_cmake.cmake)
-
 # CANN/Ascend CMake packages used by downstream PTOAS builds may still use the
 # pre-CMake-3.30 FetchContent_Populate(<declared-name>) pattern. Keep that
 # compatibility path enabled so CMake 4.x developer warnings do not become
@@ -19,6 +17,11 @@ if(POLICY CMP0169)
   cmake_policy(SET CMP0169 OLD)
   set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
 endif()
+
+# Include after the policy above: fetch_cann_cmake.cmake calls
+# FetchContent_Populate(), and a policy set after the include is too late for
+# the call inside it, so the strict CMake 4 gate fails on CMP0169.
+include(cmake/fetch_cann_cmake.cmake)
 
 # LLVM 19's AddMLIRPython.cmake still passes PRE_BUILD to the OUTPUT form of
 # add_custom_command(). CMake 4.1 diagnoses that legacy combination under the
@@ -46,10 +49,22 @@ if((NOT DEFINED MLIR_DIR OR MLIR_DIR STREQUAL "")
       "MLIR package directory derived from LLVM_BUILD_DIR")
 endif()
 
-project(ptoas VERSION 0.61)
+project(ptoas VERSION 0.78)
 
+# cann-cmake otherwise replaces an explicit CI launcher with its local ccache.
+if(CMAKE_C_COMPILER_LAUNCHER OR CMAKE_CXX_COMPILER_LAUNCHER)
+  set(ENABLE_CCACHE OFF)
+endif()
 init_cann_project()
 add_cann_target_options()
+
+# The installer consumes the wheel and its CMake metadata without configuring
+# LLVM/MLIR or registering native targets a second time.
+option(PTOAS_PACKAGE_ONLY "Package an already built PTOAS wheel" OFF)
+if(PTOAS_PACKAGE_ONLY)
+  include(cmake/PackageWheel.cmake)
+  return()
+endif()
 
 # Wheel builds carry the same Linux hardening policy as release CMake builds.
 # Including the cache settings here keeps the policy backend-independent.
@@ -168,6 +183,15 @@ if(PTOAS_ENABLE_WERROR)
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/WX>")
   endif()
 endif()
+# The devtoolset sysroot build and newer MLIR headers mark some legacy
+# rewrite-driver entry points (e.g. applyPatternsAndFoldGreedily) as
+# deprecated; upstream LLVM deprecation churn must not break the build.
+# Keep deprecated warnings visible but non-fatal on every entrypoint,
+# including the internal farmland pipeline that does not route through
+# build.sh's CMAKE_CXX_FLAGS.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wno-error=deprecated-declarations>")
+endif()
 
 # macOS: 移除已废弃的 -undefined suppress，避免 ld 警告（保留 -undefined dynamic_lookup 即可）
 if(APPLE)
@@ -220,6 +244,7 @@ add_subdirectory(tools)
 # =========================================================
 if(BUILD_TESTING)
   enable_testing()
+  add_subdirectory(test/bridge)
   if(PTO_ENABLE_PYTHON_BINDING)
     get_filename_component(_pto_python_bin_dir "${Python3_EXECUTABLE}" DIRECTORY)
     set(_pto_python_test_pythonpath
@@ -261,11 +286,56 @@ if(BUILD_TESTING)
       ENVIRONMENT "${_pto_python_test_env}"
     )
     add_test(
+      NAME pto_tload_cache_policy_bindings
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/python/tload_cache_policy_bindings.py"
+    )
+    set_tests_properties(pto_tload_cache_policy_bindings PROPERTIES
+      LABELS "PTO"
+      ENVIRONMENT "${_pto_python_test_env}"
+    )
+    add_test(
+      NAME pto_transfer_l2_hint_bindings
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/python/transfer_l2_hint_bindings.py"
+    )
+    set_tests_properties(pto_transfer_l2_hint_bindings PROPERTIES
+      LABELS "PTO"
+      ENVIRONMENT "${_pto_python_test_env}"
+    )
+    add_test(
+      NAME pto_urma_gather_bindings
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/python/urma_gather_bindings.py"
+    )
+    set_tests_properties(pto_urma_gather_bindings PROPERTIES
+      LABELS "PTO"
+      ENVIRONMENT "${_pto_python_test_env}"
+    )
+    add_test(
       NAME pto_install_nightly_wheel
       COMMAND "${Python3_EXECUTABLE}"
               "${CMAKE_CURRENT_SOURCE_DIR}/test/python/test_install_nightly_wheel.py"
     )
     set_tests_properties(pto_install_nightly_wheel PROPERTIES
+      LABELS "PTO"
+      ENVIRONMENT "${_pto_python_test_env}"
+    )
+    add_test(
+      NAME pto_as_reinstall_wheel_cleanup
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/python/test_pto_as_reinstall.py"
+    )
+    set_tests_properties(pto_as_reinstall_wheel_cleanup PROPERTIES
+      LABELS "PTO"
+      ENVIRONMENT "${_pto_python_test_env}"
+    )
+    add_test(
+      NAME pto_online_core_build
+      COMMAND "${Python3_EXECUTABLE}" -S
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/python/test_online_core_build.py"
+    )
+    set_tests_properties(pto_online_core_build PROPERTIES
       LABELS "PTO"
       ENVIRONMENT "${_pto_python_test_env}"
     )
@@ -329,12 +399,15 @@ install(DIRECTORY ${PROJECT_BINARY_DIR}/include/PTO
 
 # 6. 定义 CMake 配置文件安装位置 (例如 lib/cmake/PTOAS)
 set(PTOAS_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/PTOAS")
+# Keep the native build's exact install layout available to package-only mode.
+set(PTOAS_CMAKE_INSTALL_DIR "${PTOAS_CMAKE_INSTALL_DIR}" CACHE INTERNAL "PTOAS CMake metadata directory" FORCE)
 
 # 7. 导出 Targets (PTOASTargets.cmake) 供 find_package 使用
 install(EXPORT PTOASTargets
         FILE PTOASTargets.cmake
         NAMESPACE PTOAS::
         DESTINATION ${PTOAS_CMAKE_INSTALL_DIR}
+        COMPONENT PTOAS_CMake
 )
 
 # 8. 生成 Config 文件 (PTOASConfig.cmake)
@@ -350,6 +423,7 @@ configure_package_config_file(
 install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/PTOASConfig.cmake"
     DESTINATION ${PTOAS_CMAKE_INSTALL_DIR}
+    COMPONENT PTOAS_CMake
 )
 
 if(NOT DEFINED PACKAGE_TYPE)

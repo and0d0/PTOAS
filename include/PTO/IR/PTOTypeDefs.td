@@ -46,20 +46,30 @@ def TensorViewType : TypeDef<PTO_Dialect, "TensorView"> {
   let mnemonic = "tensor_view";
   let parameters = (ins
     ArrayRefParameter<"int64_t">:$shape,
-    "mlir::Type":$elementType
+    "mlir::Type":$elementType,
+    "mlir::Attribute":$layout
   );
   let hasCustomAssemblyFormat = 1;
 
-  // Convenience builders: explicit shape, or rank -> all dynamic ("?")
+  // A null layout preserves the historical spelling and means the default ND
+  // layout. Non-ND layouts are materialized in the type when they cross an SSA
+  // merge or a function boundary.
   let builders = [
+    TypeBuilder<(ins "ArrayRef<int64_t>":$shape,
+                     "Type":$elementType), [{
+      return Base::get($_ctxt, shape, elementType, mlir::Attribute{});
+    }]>,
     TypeBuilder<(ins "int64_t":$rank,
                      "Type":$elementType), [{
       SmallVector<int64_t, 4> shp(rank, mlir::ShapedType::kDynamic);
-      return Base::get($_ctxt, shp, elementType);
+      return Base::get($_ctxt, shp, elementType, mlir::Attribute{});
     }]>
   ];
 
   let extraClassDeclaration = [{
+    LayoutAttr getLayoutAttr() const {
+      return ::llvm::dyn_cast_or_null<LayoutAttr>(getLayout());
+    }
     int64_t getRank() const { return getShape().size(); }
     int64_t getDimSize(unsigned idx) const { return getShape()[idx]; }
     int64_t getNumElements() const {
@@ -90,21 +100,28 @@ def PartitionTensorViewType : TypeDef<PTO_Dialect, "PartitionTensorView"> {
 
   let parameters = (ins
     ArrayRefParameter<"int64_t">:$shape,
-    "mlir::Type":$elementType
+    "mlir::Type":$elementType,
+    "mlir::Attribute":$layout
   );
 
   let hasCustomAssemblyFormat = 1;
 
-  // Convenience builders: explicit shape, or rank -> all dynamic ("?")
   let builders = [
+    TypeBuilder<(ins "ArrayRef<int64_t>":$shape,
+                     "Type":$elementType), [{
+      return Base::get($_ctxt, shape, elementType, mlir::Attribute{});
+    }]>,
     TypeBuilder<(ins "int64_t":$rank,
                      "Type":$elementType), [{
       SmallVector<int64_t, 4> shp(rank, mlir::ShapedType::kDynamic);
-      return Base::get($_ctxt, shp, elementType);
+      return Base::get($_ctxt, shp, elementType, mlir::Attribute{});
     }]>
   ];
 
   let extraClassDeclaration = [{
+    LayoutAttr getLayoutAttr() const {
+      return ::llvm::dyn_cast_or_null<LayoutAttr>(getLayout());
+    }
     int64_t getRank() const { return getShape().size(); }
     int64_t getDimSize(unsigned idx) const { return getShape()[idx]; }
     
@@ -228,6 +245,48 @@ def TileBufType : TypeDef<PTO_Dialect, "TileBuf"> {
   }];
 }
 
+def ConvTileBufType : TypeDef<PTO_Dialect, "ConvTileBuf"> {
+  let mnemonic = "conv_tile_buf";
+  let parameters = (ins
+    ArrayRefParameter<"int64_t">:$shape,
+    "mlir::Type":$elementType,
+    "mlir::IntegerAttr":$bufferSize,
+    "mlir::pto::AddressSpaceAttr":$memorySpace,
+    "mlir::pto::ConvLayoutAttr":$layout,
+    ArrayRefParameter<"int64_t">:$validShape
+  );
+
+  let hasCustomAssemblyFormat = 1;
+  // The type carries only the storage identity (dtype, capacity, loc,
+  // layout, shape); the conv geometry lives on the allocating op's config
+  // attribute instead, so tiles with identical storage share one type.
+  // genVerifyDecl also constrains rank/layout/memory-space for every
+  // getChecked construction path (CAPI and Python bindings).
+  let genVerifyDecl = 1;
+
+  let extraClassDeclaration = [{
+    int64_t getRank() const { return getShape().size(); }
+    int64_t getDimSize(unsigned idx) const { return getShape()[idx]; }
+    int64_t getNumElements() const {
+      int64_t num = 1;
+      for (int64_t dim : getShape()) num *= dim;
+      return num;
+    }
+
+    int64_t getBufferSizeValue() const { return getBufferSize().getInt(); }
+
+    // validShape is the logical tensor the tile actually holds, mirroring
+    // the runtime ConvTile ValidShape_ template parameter. The empty list
+    // is the canonical "valid == declared" form; a non-empty list shrinks
+    // only the non-blocked (outer) dims -- the blocked minor dims are
+    // hardware-fixed and never shrink.
+    bool hasValidShape() const { return !getValidShape().empty(); }
+    ArrayRef<int64_t> getValidOrShape() const {
+      return getValidShape().empty() ? getShape() : getValidShape();
+    }
+  }];
+}
+
 // =============================================================================
 // MultiTileBufType
 // =============================================================================
@@ -277,14 +336,13 @@ def EventIdArrayType : TypeDef<PTO_Dialect, "EventIdArray"> {
 }
 
 // ---- !pto.local_array<D1 x D2 x ... x Dk x T> ----
-// Statically-shaped C++ stack-local array. Lowers to a plain `T a[D1][D2]...;`
-// declaration in the emitted C++. Element type is restricted to scalars
-// (integer / float). This type does NOT participate in PTO memory planning
-// lowering; the underlying address is decided by the
-// host C++ compiler, not by PTOAS.
+// Statically-shaped stack-local array. Lowers to a plain `T a[D1][D2]...;`
+// declaration in emitted C++ or equivalent LLVM stack storage. Element type is
+// restricted to scalars (integer / float). This type does NOT participate in
+// PTO memory planning lowering; its storage is owned by the enclosing function.
 def LocalArrayType : TypeDef<PTO_Dialect, "LocalArray"> {
   let mnemonic = "local_array";
-  let summary = "C++ stack-local statically-sized array";
+  let summary = "Stack-local statically-sized scalar array";
   let parameters = (ins
     ArrayRefParameter<"int64_t">:$shape,
     "mlir::Type":$elementType
@@ -345,12 +403,43 @@ def PipeType : TypeDef<PTO_Dialect, "Pipe"> {
   let summary = "Opaque pipe handle type for TPUSH/TPOP communication";
 }
 
-def AsyncSessionType : TypeDef<PTO_Dialect, "AsyncSession"> {
+class PTO_AsyncHandleType<string name> : TypeDef<PTO_Dialect, name> {
+  let parameters = (ins OptionalParameter<
+      "::std::optional<::mlir::pto::DmaEngine>">:$engine);
+  let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
+  let builders = [
+    TypeBuilder<(ins), [{ return Base::get($_ctxt, ::std::nullopt); }]>
+  ];
+}
+
+def AsyncSessionType : PTO_AsyncHandleType<"AsyncSession"> {
   let mnemonic = "async_session";
   let summary = "Opaque async DMA session handle type";
 }
 
-def AsyncEventType : TypeDef<PTO_Dialect, "AsyncEvent"> {
+// ---- !pto.dma_session<sdma> ----
+//
+// A configured asynchronous session at the micro-instruction layer, as
+// pto.session_init produces it.
+//
+// The engine is a type parameter rather than a session field, so a session
+// built for one engine cannot reach another engine's kick: pto.sdma_gm_gm
+// accepts only !pto.dma_session<sdma>, and that is checked by type equality
+// instead of by a verifier reading a field back out.
+//
+// The type is deliberately opaque. The physical session is a struct whose field
+// order and widths PTO/Support/AsyncSessionABI.h owns; that struct is
+// materialized during wrapper expansion, so it never appears in the IR a user
+// writes and its layout is not part of this contract.
+def DmaSessionType : TypeDef<PTO_Dialect, "DmaSession"> {
+  let mnemonic = "dma_session";
+  let summary = "Configured async DMA session, parameterized by engine";
+  let parameters = (ins EnumParameter<PTO_DmaEngineEnum>:$engine);
+  let assemblyFormat = "`<` params `>`";
+}
+
+def AsyncEventType : PTO_AsyncHandleType<"AsyncEvent"> {
   let mnemonic = "async_event";
   let summary = "Opaque async DMA event handle type";
 }

@@ -148,7 +148,7 @@ Example (SIMT double-buffering with `iter & 1`):
 mem_bar(barrier_type);
 ```
 
-**Barrier types** are organized into three families by the scope of prior vs. subsequent instructions:
+**Barrier types** are organized into four families by the scope of prior vs. subsequent instructions:
 
 | Family | Barrier type | Prior instructions | Subsequent instructions |
 |--------|-------------|-------------------|------------------------|
@@ -164,13 +164,32 @@ mem_bar(barrier_type);
 | | `ST_VLD` | All scalar store | All vector load |
 | | `LD_VST` | All scalar load | All vector store |
 | | `ST_VST` | All scalar store | All vector store |
+| **SS** (scalar→scalar) | `SS_ALL` | All scalar load/store | All scalar load/store |
+| | `ST_LD` | All scalar store | All scalar load |
+| | `LD_ST` | All scalar load | All scalar store |
+| | `ST_ST` | All scalar store | All scalar store |
 
 **Example:** Ensure vector stores are visible before subsequent vector loads to the same UB region:
 ```mlir
-pto.vsts %v0, %ub[%c0] : !pto.vreg<64xf32>, !pto.ptr<f32, ub>
+pto.vsts %v0, %ub[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
 pto.mem_bar "VST_VLD"
-%v1 = pto.vlds %ub[%c0] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+%v1 = pto.vlds %ub[%c0] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
 ```
+
+**Scope and provision of barriers.** `pto.mem_bar` only orders operations inside a single `__VEC_SCOPE__` region. Making one vecscope's UB writes visible to a later sibling vecscope is a cross-region ordering concern and must be managed with `pto.set_flag` / `pto.wait_flag` (or `pto.get_buf` / `pto.rls_buf`); a `pto.mem_bar` cannot express it.
+
+Barrier insertion modes:
+
+- **Manual:** written in the source. In the ordinary automatic mode, the ordering established by a manual barrier counts as already provided when its type and placement cover the dependency. An adjacent barrier can be combined with a newly required barrier of the same family into that family’s `ALL` barrier. The current insertion pass does not generally remove standalone redundant manual barriers. Conservative insertion can add barriers even when a manual barrier already orders the accesses.
+- **Automatic insertion (VPTO):** `--enable-vecscope-mem-bar` is enabled by default. PTOAS analyzes UB access footprints and inserts barriers where overlapping accesses still require ordering. Scalar-to-scalar accesses are ordered by the scalar pipeline and do not require automatically inserted barriers; use `--enable-vecscope-mem-bar=false` to disable it.
+- **Conservative insertion (VPTO):** `--enable-vecscope-mem-bar-all` defaults to off and takes precedence over the ordinary mode when enabled. It inserts `SV_ALL` and `VV_ALL` before each UB vector access, and only `VS_ALL` before each UB scalar access. Scalar-to-scalar accesses are already ordered by the scalar pipeline, so no `SS_ALL` is inserted. This mode performs no dependence, footprint, or redundancy analysis and preserves manual barriers.
+
+**Device-compiler automatic synchronization.** The device compiler (Bisheng) can also insert vector-pipeline synchronization on its own. Who owns that insertion depends on the compilation route:
+
+- When the kernel is compiled through the VMI tile-fusion pipeline (`--enable-vmi` with `--enable-op-fusion=true` on the A5 VPTO backend at `--pto-level=level2` or `level3`), the program PTOAS emits already carries its synchronization, so PTOAS disables the device compiler's automatic vector-pipeline synchronization and its own vector-fusion transformations for that device compilation.
+- On every other route, device-compiler automatic vector-pipeline synchronization also defaults to off. PTOAS barrier insertion remains controlled independently by the options above.
+- `--bisheng-vf-auto-sync=off|fused|global` selects the device-compiler synchronization mode (default: `off`). An explicit choice is honored on any route, including the VMI route.
+- `--bisheng-vec-misched=auto|on|off` selects the device compiler's vector-instruction scheduling policy: `off` disables the vector scheduler, `on` keeps the device compiler's default scheduling, and `auto` (the default) keeps default scheduling and retries with the scheduler disabled when compilation fails or the reported vector-stack usage is nonzero, preferring the smaller vector stack. On the VMI tile-fusion route the scheduler likewise defaults to off; an explicit choice is honored on any route.
 
 ---
 
@@ -354,10 +373,10 @@ pto.set_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
 pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
 
 pto.vecscope {
-  %v   = pto.vlds %ub_ptr[%lane] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+  %v   = pto.vlds %ub_ptr[%lane] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
   %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
   %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-  pto.vsts %abs, %ub_out[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+  pto.vsts %abs, %ub_out[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
 }
 
 // Vector signals: "UB output is ready for MTE3"
@@ -394,9 +413,9 @@ pto.get_buf "PIPE_V", %bufid_ub_out, %c0 : i64, i64
 
 pto.vecscope {
   %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
-  %v   = pto.vlds %ub_ptr[%lane] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+  %v   = pto.vlds %ub_ptr[%lane] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
   %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-  pto.vsts %abs, %ub_out[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+  pto.vsts %abs, %ub_out[%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
 }
 
 // Vector done reading ub_ptr — release so MTE2 can reuse it in next iteration
@@ -470,10 +489,10 @@ scf.for %i = %c0 to %N step %c1 {
   // WAR: wait for MTE3 to finish reading buf_out[i%2] from iteration i-2
   pto.wait_flag["PIPE_MTE3", "PIPE_V", "EVT_OUT_REV_{pp}"]
   scf.for %dummy = %c0 to %c1 step %c1 {
-    %v   = pto.vlds %ub_in[%pp][%lane] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+    %v   = pto.vlds %ub_in[%pp][%lane] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
     %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
     %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-    pto.vsts %abs, %ub_out[%pp][%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+    pto.vsts %abs, %ub_out[%pp][%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
   } {llvm.loop.aivector_scope}
   // WAR: tell MTE2 "done reading buf_in[i%2]"
   pto.set_flag["PIPE_V", "PIPE_MTE2", "EVT_IN_REV_{pp}"]
@@ -522,10 +541,10 @@ scf.for %i = %c0 to %N step %c1 {
   pto.get_buf "PIPE_V", %bufid_buf[%pp], %c0 : i64, i64
   pto.get_buf "PIPE_V", %bufid_out[%pp], %c0 : i64, i64
   scf.for %dummy = %c0 to %c1 step %c1 {
-    %v   = pto.vlds %ub_buf[%pp][%lane] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+    %v   = pto.vlds %ub_buf[%pp][%lane] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
     %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
     %abs = pto.vabs %v, %mask : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
-    pto.vsts %abs, %ub_out[%pp][%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+    pto.vsts %abs, %ub_out[%pp][%lane], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
   } {llvm.loop.aivector_scope}
   // Release buf[i%2] — MTE2 can reuse in iteration i+2 (WAR resolved)
   pto.rls_buf "PIPE_V", %bufid_buf[%pp], %c0 : i64, i64
@@ -662,11 +681,17 @@ V→C on A5 (1:1, no reduce — need two waits):
 
 - **syntax:** `pto.set_intra_block %block_id, %event_id : i64, i64`
 - **semantics:** Signal event within a block (A5). Specifies **trigger pipe**. 1:1 per subblock.
+- **accepted pipes (A5):** `PIPE_FIX`, `PIPE_MTE1`, `PIPE_MTE2`, `PIPE_MTE3`, `PIPE_V` and the
+  scalar pipe `PIPE_S`. The scalar pipe is what the native A5 PTO-ISA `TPush` V2C
+  control path and the CANN A5 kernel sync layer use. On A2/A3 the op lowers to an
+  FFTS mode-2 cross-core signal and keeps the five non-scalar pipes.
 
 ### `pto.wait_intra_core`
 
 - **syntax:** `pto.wait_intra_core %block_id, %event_id : i64, i64`
 - **semantics:** Wait for event within block (A5). Specifies **which pipeline should wait** — only that pipe stalls, SU and other pipes continue.
+- **accepted pipes (A5):** same set as `pto.set_intra_block`, including `PIPE_S` (waiting on
+  the scalar pipe stalls the SU only, not the vector/data-movement pipes).
 
 ### Wait Granularity Comparison
 

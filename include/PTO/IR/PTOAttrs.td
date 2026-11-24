@@ -39,6 +39,45 @@ class PTO_Attr<string attrName, string attrMnemonic, list<Trait> traits = []>
 }
 
 include "PTO/IR/VMIAttrs.td"
+include "PTO/IR/PTOGenericAttrs.td"
+
+// Logical bridge entries are compiler-owned IDs. Route policy may select an
+// operation, but it cannot redefine this ABI contract or its renderer.
+def PTO_BridgeEntryEnum : PTO_I32Enum<
+  "BridgeEntry", "VPTO bridge logical entry", [
+    I32EnumAttrCase<"PipeInit", 0, "pipe_init">,
+    I32EnumAttrCase<"PipePush", 2, "pipe_push">,
+    I32EnumAttrCase<"PipePop", 3, "pipe_pop">,
+    I32EnumAttrCase<"PipeFree", 4, "pipe_free">,
+    I32EnumAttrCase<"CubeTMatmul", 5, "cube_tmatmul">,
+    I32EnumAttrCase<"CubeTMatmulAcc", 12, "cube_tmatmul_acc">,
+    I32EnumAttrCase<"PrintF32", 6, "print_f32">,
+    I32EnumAttrCase<"PrintI64", 7, "print_i64">,
+    I32EnumAttrCase<"PrintU64", 8, "print_u64">,
+    I32EnumAttrCase<"PrintString", 9, "print_string">,
+    I32EnumAttrCase<"PrintInit", 10, "print_init">,
+    I32EnumAttrCase<"PrintFinish", 11, "print_finish">
+  ]>;
+
+def PTO_BridgeEntryAttr : EnumAttr<PTO_Dialect, PTO_BridgeEntryEnum,
+                                   "bridge_entry"> {
+  let assemblyFormat = "`<` params `>`";
+}
+
+// Core of a resolved bridge instance. Registry entries declare the core they
+// require; Any entries take the core of their context when one exists.
+def PTO_BridgeCoreKindEnum : PTO_I32Enum<
+  "BridgeCoreKind", "VPTO bridge instance core", [
+    I32EnumAttrCase<"Any", 0, "any">,
+    I32EnumAttrCase<"Vector", 1, "vector">,
+    I32EnumAttrCase<"Cube", 2, "cube">
+  ]>;
+
+def PTO_BridgeCoreKindAttr : EnumAttr<PTO_Dialect, PTO_BridgeCoreKindEnum,
+                                      "bridge_core"> {
+  let assemblyFormat = "`<` params `>`";
+}
+
 
 //===----------------------------------------------------------------------===//
 // Address Space
@@ -76,6 +115,125 @@ def PTO_AddressSpaceAttr : PTO_Attr<"AddressSpace", "address_space"> {
 }
 
 //===----------------------------------------------------------------------===//
+// DMA engine
+//===----------------------------------------------------------------------===//
+
+def PTO_DmaEngine_Sdma : I32EnumAttrCase<"Sdma", 0, "sdma">;
+def PTO_DmaEngine_Urma : I32EnumAttrCase<"Urma", 1, "urma">;
+def PTO_DmaEngine_Rdma : I32EnumAttrCase<"Rdma", 2, "rdma">;
+
+// The engine that drives an asynchronous session. Numbered to match
+// MlirPTODmaEngine / !pto.dma_session<engine>.
+def PTO_DmaEngineEnum : PTO_I32Enum<
+  "DmaEngine", "DMA engine driving an async session", [
+    PTO_DmaEngine_Sdma,
+    PTO_DmaEngine_Urma,
+    PTO_DmaEngine_Rdma
+  ]>;
+
+def PTO_UrmaCqePolicyEnum : PTO_I32Enum<
+  "UrmaCqePolicy", "URMA Gather completion notification policy", [
+    I32EnumAttrCase<"NoCqe", 0, "no_cqe">,
+    I32EnumAttrCase<"OneCqe", 1, "one_cqe">,
+    I32EnumAttrCase<"Final", 2, "final">
+  ]>;
+
+def PTO_UrmaCqePolicyAttr
+    : EnumAttr<PTO_Dialect, PTO_UrmaCqePolicyEnum, "urma_cqe_policy"> {
+  let assemblyFormat = "`<` params `>`";
+}
+
+def PTO_AsyncSubmitModeEnum : PTO_I32Enum<
+  "AsyncSubmitMode", "Asynchronous communication publication mode", [
+    I32EnumAttrCase<"Immediate", 0, "immediate">,
+    I32EnumAttrCase<"Defer", 1, "defer">,
+    I32EnumAttrCase<"DeferAndSubmit", 2, "defer_and_submit">
+  ]>;
+
+def PTO_AsyncSubmitModeAttr
+    : EnumAttr<PTO_Dialect, PTO_AsyncSubmitModeEnum, "async_submit_mode"> {
+  let assemblyFormat = "`<` params `>`";
+}
+
+//===----------------------------------------------------------------------===//
+// Tile load cache policy
+//===----------------------------------------------------------------------===//
+
+def PTO_LoadCachePolicyEnum : PTO_I32Enum<
+  "LoadCachePolicy", "PTO tile load cache policy", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"L2Bypass", 1, "l2_bypass">
+  ]>;
+
+def PTO_LoadCachePolicyAttr
+    : EnumAttr<PTO_Dialect, PTO_LoadCachePolicyEnum, "load_cache_policy"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "cache allocation policy for a tile load";
+  let description = [{
+    Selects the cache allocation policy for one GM-to-tile transfer. The
+    default policy preserves the target's ordinary load behavior. L2Bypass
+    requests a target-defined load path that does not allocate in L2.
+  }];
+}
+
+// A5 per-transfer instruction fields, kept separate from the generic cache
+// policy and from each other: NotAllocClean has direction-specific encodings.
+def PTO_LoadL2HintEnum : PTO_I32Enum<
+  "LoadL2Hint", "A5 tile load L2 hint", [
+    I32EnumAttrCase<"NormalFirstVictim", 0, "normal_first_victim">,
+    I32EnumAttrCase<"NormalLastVictim", 1, "normal_last_victim">,
+    I32EnumAttrCase<"NormalPersistent", 2, "normal_persistent">,
+    I32EnumAttrCase<"NotAllocKeep", 4, "not_alloc_keep">,
+    I32EnumAttrCase<"NotAllocClean", 5, "not_alloc_clean">,
+    I32EnumAttrCase<"NotAllocDrop", 6, "not_alloc_drop">
+  ]>;
+
+def PTO_LoadL2HintAttr
+    : EnumAttr<PTO_Dialect, PTO_LoadL2HintEnum, "load_l2_hint"> {
+  let assemblyFormat = "`<` params `>`";
+}
+
+def PTO_StoreL2HintEnum : PTO_I32Enum<
+  "StoreL2Hint", "A5 tile store L2 hint", [
+    I32EnumAttrCase<"NormalFirstVictim", 0, "normal_first_victim">,
+    I32EnumAttrCase<"NormalLastVictim", 1, "normal_last_victim">,
+    I32EnumAttrCase<"NormalPersistent", 2, "normal_persistent">,
+    I32EnumAttrCase<"NotAllocClean", 4, "not_alloc_clean">
+  ]>;
+
+def PTO_StoreL2HintAttr
+    : EnumAttr<PTO_Dialect, PTO_StoreL2HintEnum, "store_l2_hint"> {
+  let assemblyFormat = "`<` params `>`";
+}
+
+//===----------------------------------------------------------------------===//
+// Implicit state resource and access kind
+//===----------------------------------------------------------------------===//
+
+// Enumerates the implicit hardware state resources that PTO state interfaces
+// describe. The values only generate C++ enums; they are never stored as
+// guard attributes.
+def PTO_StateResource_Ctrl : I32EnumAttrCase<"Ctrl", 0, "ctrl">;
+
+def PTO_StateResourceEnum : PTO_I32Enum<
+  "StateResource", "PTO implicit state resource", [
+    PTO_StateResource_Ctrl
+  ]>;
+
+def PTO_StateAccessKind_Query : I32EnumAttrCase<"Query", 0, "query">;
+def PTO_StateAccessKind_Write : I32EnumAttrCase<"Write", 1, "write">;
+def PTO_StateAccessKind_Consume : I32EnumAttrCase<"Consume", 2, "consume">;
+def PTO_StateAccessKind_Clobber : I32EnumAttrCase<"Clobber", 3, "clobber">;
+
+def PTO_StateAccessKindEnum : PTO_I32Enum<
+  "StateAccessKind", "PTO implicit state access kind", [
+    PTO_StateAccessKind_Query,
+    PTO_StateAccessKind_Write,
+    PTO_StateAccessKind_Consume,
+    PTO_StateAccessKind_Clobber
+  ]>;
+
+//===----------------------------------------------------------------------===//
 // Signedness
 //===----------------------------------------------------------------------===//
 
@@ -92,6 +250,28 @@ def PTO_SignednessAttr : PTO_Attr<"Signedness", "signedness"> {
   let parameters = (ins EnumParameter<PTO_SignednessEnum>:$value);
   let assemblyFormat = "`<` params `>`";
   let summary = "Integer signedness control for semantic ops";
+}
+
+//===----------------------------------------------------------------------===//
+// FMATRIX mode
+//===----------------------------------------------------------------------===//
+
+def PTO_FmatrixMode_AutoA : I32EnumAttrCase<"FMATRIX_A_AUTO", 0, "a_auto">;
+def PTO_FmatrixMode_AutoB : I32EnumAttrCase<"FMATRIX_B_AUTO", 1, "b_auto">;
+def PTO_FmatrixMode_ManualA : I32EnumAttrCase<"FMATRIX_A_MANUAL", 2, "a_manual">;
+def PTO_FmatrixMode_ManualB : I32EnumAttrCase<"FMATRIX_B_MANUAL", 3, "b_manual">;
+
+def PTO_FmatrixModeEnum : PTO_I32Enum<
+  "FmatrixMode", "PTO FMATRIX selector", [
+    PTO_FmatrixMode_AutoA,
+    PTO_FmatrixMode_AutoB,
+    PTO_FmatrixMode_ManualA,
+    PTO_FmatrixMode_ManualB
+  ]>;
+
+def PTO_FmatrixModeAttr : EnumAttr<PTO_Dialect, PTO_FmatrixModeEnum, "fmatrix_mode"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "A/B selector for FMATRIX-related ops";
 }
 
 //===----------------------------------------------------------------------===//
@@ -484,6 +664,10 @@ def PTO_Layout_DN : I32EnumAttrCase<"DN", 1, "dn">;
 def PTO_Layout_NZ : I32EnumAttrCase<"NZ", 2, "nz">;
 def PTO_Layout_MX_A_ZZ : I32EnumAttrCase<"MX_A_ZZ", 3, "mx_a_zz">;
 def PTO_Layout_MX_B_NN : I32EnumAttrCase<"MX_B_NN", 4, "mx_b_nn">;
+def PTO_Layout_MX_A_ND : I32EnumAttrCase<"MX_A_ND", 5, "mx_a_nd">;
+def PTO_Layout_MX_A_DN : I32EnumAttrCase<"MX_A_DN", 6, "mx_a_dn">;
+def PTO_Layout_MX_B_ND : I32EnumAttrCase<"MX_B_ND", 7, "mx_b_nd">;
+def PTO_Layout_MX_B_DN : I32EnumAttrCase<"MX_B_DN", 8, "mx_b_dn">;
 
 def PTO_LayoutEnum : PTO_I32Enum<
   "Layout", "Global tensor layout (row/col/fractal)", [
@@ -491,16 +675,64 @@ def PTO_LayoutEnum : PTO_I32Enum<
     PTO_Layout_DN,
     PTO_Layout_NZ,
     PTO_Layout_MX_A_ZZ,
-    PTO_Layout_MX_B_NN
+    PTO_Layout_MX_B_NN,
+    PTO_Layout_MX_A_ND,
+    PTO_Layout_MX_A_DN,
+    PTO_Layout_MX_B_ND,
+    PTO_Layout_MX_B_DN
   ]>;
 
 def PTO_LayoutAttr : PTO_Attr<"Layout", "layout"> {
   let parameters = (ins EnumParameter<PTO_LayoutEnum>:$layout);
   let assemblyFormat = "`<` params `>`";
   let description = [{
-    Layout inferred from shape/stride for GlobalTensor:
+    GlobalTensor source layout:
       ND (row-major), DN (col-major), NZ (fractal),
-      MX_A_ZZ (A-side MX scale), MX_B_NN (B-side MX scale).
+      MX_A_ND/DN/ZZ (A-side MX scale), MX_B_ND/DN/NN (B-side MX scale).
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// ConvTile layout
+//===----------------------------------------------------------------------===//
+
+def PTO_ConvLayout_NC1HWC0 :
+    I32EnumAttrCase<"NC1HWC0", 0, "nc1hwc0">;
+def PTO_ConvLayout_NDC1HWC0 :
+    I32EnumAttrCase<"NDC1HWC0", 1, "ndc1hwc0">;
+def PTO_ConvLayout_FRACTAL_Z :
+    I32EnumAttrCase<"FRACTAL_Z", 2, "fractal_z">;
+def PTO_ConvLayout_FRACTAL_Z_3D :
+    I32EnumAttrCase<"FRACTAL_Z_3D", 3, "fractal_z_3d">;
+def PTO_ConvLayout_NCHW :
+    I32EnumAttrCase<"NCHW", 4, "nchw">;
+def PTO_ConvLayout_NHWC :
+    I32EnumAttrCase<"NHWC", 5, "nhwc">;
+def PTO_ConvLayout_GNCHW :
+    I32EnumAttrCase<"GNCHW", 6, "gnchw">;
+def PTO_ConvLayout_GNC1HWC0 :
+    I32EnumAttrCase<"GNC1HWC0", 7, "gnc1hwc0">;
+def PTO_ConvLayout_NCDHW :
+    I32EnumAttrCase<"NCDHW", 8, "ncdhw">;
+
+def PTO_ConvLayoutEnum : PTO_I32Enum<
+  "ConvLayout", "PTO ConvTile storage layout", [
+    PTO_ConvLayout_NC1HWC0,
+    PTO_ConvLayout_NDC1HWC0,
+    PTO_ConvLayout_FRACTAL_Z,
+    PTO_ConvLayout_FRACTAL_Z_3D,
+    PTO_ConvLayout_NCHW,
+    PTO_ConvLayout_NHWC,
+    PTO_ConvLayout_GNCHW,
+    PTO_ConvLayout_GNC1HWC0,
+    PTO_ConvLayout_NCDHW
+  ]>;
+
+def PTO_ConvLayoutAttr : PTO_Attr<"ConvLayout", "conv_layout"> {
+  let parameters = (ins EnumParameter<PTO_ConvLayoutEnum>:$value);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Physical layout carried by a PTO ConvTile.
   }];
 }
 
@@ -722,13 +954,17 @@ def PTO_SaturationModeAttr : EnumAttr<PTO_Dialect, PTO_SaturationModeEnum, "satu
 //===----------------------------------------------------------------------===//
 
 def PTO_DivPrecisionEnum : PTO_I32Enum<
-  "DivPrecision", "PTO TDIV precision mode", [
-    I32EnumAttrCase<"Default", 0, "default">,
-    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  "DivPrecision", "PTO division algorithm selector", [
+    I32EnumAttrCase<"Intrinsic", 0, "intrinsic">,
+    I32EnumAttrCase<"DiffCompensation", 1, "diff_compensation">,
+    I32EnumAttrCase<"Precision1UlpFtzTrue", 2, "precision_1ulp_ftz_true">,
+    I32EnumAttrCase<"Precision0UlpFtzTrue", 3, "precision_0ulp_ftz_true">,
+    I32EnumAttrCase<"Precision0UlpFtzFalse", 4, "precision_0ulp_ftz_false">,
+    I32EnumAttrCase<"Precision1UlpFtzFalse", 5, "precision_1ulp_ftz_false">
   ]>;
 
 def PTO_DivPrecisionAttr : EnumAttr<PTO_Dialect, PTO_DivPrecisionEnum, "div_precision"> {
-  let summary = "TDIV precision mode attribute";
+  let summary = "division algorithm attribute";
 }
 //===----------------------------------------------------------------------===//
 // TEXP template controls
@@ -870,6 +1106,49 @@ def PTO_AccPhaseEnum : PTO_I32Enum<
 def PTO_AccPhaseAttr : EnumAttr<PTO_Dialect, PTO_AccPhaseEnum, "acc_phase"> {
   let summary = "TMATMUL / TMATMUL_ACC accumulation phase attribute";
 }
+
+// Bridge specializations stay structured until WrapperGen renders C++ tokens.
+// Equal specs are equal uniqued attributes, which is the instance identity.
+def PTO_BridgeTileSpecAttr : PTO_Attr<"BridgeTileSpec", "bridge_tile_spec"> {
+  let summary = "Tile facts of one bridge operand (kind, dtype, shapes, layout)";
+  let parameters = (ins "mlir::pto::TileBufType":$tile);
+  let assemblyFormat = "`<` $tile `>`";
+  let genVerifyDecl = 1;
+}
+
+def PTO_BridgePipeSpecAttr : PTO_Attr<"BridgePipeSpec", "bridge_pipe_spec"> {
+  let summary = "Pipe object specialization shared by its whole lifecycle";
+  let parameters = (ins
+    "int32_t":$dirMask,
+    "int32_t":$slotSize,
+    "int32_t":$slotNum,
+    "int32_t":$localSlotNum,
+    "int32_t":$flagBase,
+    "mlir::BoolAttr":$nosplit,
+    OptionalParameter<"std::optional<int32_t>">:$split,
+    OptionalParameter<"mlir::pto::BridgeTileSpecAttr">:$producer,
+    OptionalParameter<"mlir::pto::BridgeTileSpecAttr">:$consumer
+  );
+  let assemblyFormat = "`<` struct(params) `>`";
+  let genVerifyDecl = 1;
+}
+
+def PTO_BridgeCubeSpecAttr : PTO_Attr<"BridgeCubeSpec", "bridge_cube_spec"> {
+  let summary = "Direct Cube specialization: destination, operands and phase";
+  let parameters = (ins
+    "mlir::pto::BridgeTileSpecAttr":$dst,
+    "mlir::pto::BridgeTileSpecAttr":$lhs,
+    "mlir::pto::BridgeTileSpecAttr":$rhs,
+    "mlir::pto::AccPhaseAttr":$accPhase,
+    // Present for the accumulate form, whose destination and accumulator are
+    // separate tiles.
+    OptionalParameter<"mlir::pto::BridgeTileSpecAttr">:$accIn
+  );
+  let assemblyFormat = "`<` struct(params) `>`";
+  let genVerifyDecl = 1;
+}
+
+def PTO_BridgeSpecAttr : AnyAttrOf<[PTO_BridgePipeSpecAttr, PTO_BridgeCubeSpecAttr]>;
 
 def PTO_AtomicTypeEnum : PTO_I32Enum<
   "AtomicType", "PTO TSTORE atomic mode", [
@@ -1234,6 +1513,40 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
                                 mlir::IntegerAttr sFractalSize,
                                 mlir::Attribute pad,
                                 mlir::Attribute compactMode);
+  }];
+}
+
+// ---------- conv_tile_config ----------
+def ConvTileConfigAttr : AttrDef<PTO_Dialect, "ConvTileConfig"> {
+  let mnemonic = "conv_tile_config";
+  let parameters = (ins
+    "mlir::IntegerAttr":$fmapH,
+    "mlir::IntegerAttr":$fmapW,
+    ArrayRefParameter<"int64_t">:$padList,
+    "mlir::IntegerAttr":$filterH,
+    "mlir::IntegerAttr":$filterW,
+    "mlir::IntegerAttr":$dilationH,
+    "mlir::IntegerAttr":$dilationW,
+    "mlir::IntegerAttr":$strideH,
+    "mlir::IntegerAttr":$strideW,
+    "mlir::Attribute":$padValue,
+    "mlir::IntegerAttr":$channelSize,
+    "mlir::IntegerAttr":$repeatStride,
+    "mlir::IntegerAttr":$repeatTime,
+    "mlir::IntegerAttr":$repeatMode,
+    "mlir::IntegerAttr":$dstStride,
+    "mlir::IntegerAttr":$dstMposition,
+    "mlir::BoolAttr":$transpose
+  );
+
+  let hasCustomAssemblyFormat = 1;
+  // Generates getChecked (used by the parser and CAPI) wired to the
+  // field-range verify implemented in PTOAttrs.cpp.
+  let genVerifyDecl = 1;
+
+  let extraClassDeclaration = [{
+    static ConvTileConfigAttr getDefault(MLIRContext *ctx);
+    bool isDefault() const;
   }];
 }
 

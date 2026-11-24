@@ -11,6 +11,7 @@
 #include "PTO/Transforms/VPTOScheduler/VPTOSchedDAGBuilder.h"
 
 #include "PTO/Analysis/PTOAddressAnalysis.h"
+#include "PTO/Analysis/PTOMemoryAliasAnalysis.h"
 #include "PTO/IR/PTO.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -24,9 +25,10 @@
 #include "llvm/Support/MathExtras.h"
 
 #include <array>
+#include <climits>
 #include <limits>
 
-#include "../Utils.h"
+#include "Utils.h"
 
 using namespace mlir;
 using namespace mlir::pto;
@@ -54,6 +56,9 @@ FailureOr<std::unique_ptr<VPTOSchedDAG>> VPTOSchedDAGBuilder::build(
     return mlir::failure();
   }
   if (failed(buildImplicitAndSyncEdges(*dag, failure))) {
+    return mlir::failure();
+  }
+  if (failed(buildRematerializationClusterEdges(*dag, failure))) {
     return mlir::failure();
   }
   if (failed(buildModelFallbackEdges(*dag, failure))) {
@@ -109,527 +114,12 @@ LogicalResult VPTOSchedDAGBuilder::addEdge(
 }
 
 namespace {
-struct IntegerRange {
-  int64_t lowerInclusive = 0;
-  int64_t upperInclusive = 0;
-};
-
-struct ResolvedMemoryAccess {
-  VPTOMemoryAccess semantics;
-  Value aliasRoot;
-  std::optional<int64_t> absoluteByteOffset;
-  std::optional<IntegerRange> absoluteByteRange;
-  std::optional<PTOAddressExpr> addressExpression;
-};
+constexpr unsigned kVisitedOperationInlineCapacity = mlir::pto::kValue8;
 
 struct FrontierAccess {
-  VPTOSUnit *unit = nullptr;
+  const VPTOSUnit *unit = nullptr;
   ResolvedMemoryAccess access;
 };
-
-static std::optional<int64_t> getConstantInteger(Value value) {
-  IntegerAttr constant;
-  bool invalidConstant = !value ||
-                         !matchPattern(value, m_Constant(&constant)) ||
-                         !constant.getValue().isSignedIntN(64);
-  if (invalidConstant) {
-    return std::nullopt;
-  }
-  return constant.getValue().getSExtValue();
-}
-
-static std::optional<ConstantIntRanges> getIntegerRanges(Value value,
-                                                         unsigned depth = 0);
-
-static std::optional<ConstantIntRanges>
-getLoopInductionRange(BlockArgument argument, unsigned bitWidth) {
-  auto forOp = dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
-  bool isLoopInduction = forOp && forOp.getInductionVar() == argument;
-  if (!isLoopInduction) {
-    return std::nullopt;
-  }
-  std::optional<int64_t> lower = getConstantIntValue(forOp.getLowerBound());
-  std::optional<int64_t> step = getConstantIntValue(forOp.getStep());
-  if (!lower || !step || *lower < 0 || *step <= 0) {
-    return std::nullopt;
-  }
-  APInt lowerBound(bitWidth, static_cast<uint64_t>(*lower),
-                   /*isSigned=*/true);
-  return ConstantIntRanges::fromSigned(lowerBound,
-                                       APInt::getSignedMaxValue(bitWidth));
-}
-
-static std::optional<SmallVector<ConstantIntRanges>>
-getOperandRanges(Operation &operation, unsigned depth) {
-  SmallVector<ConstantIntRanges> ranges;
-  ranges.reserve(operation.getNumOperands());
-  for (Value operand : operation.getOperands()) {
-    std::optional<ConstantIntRanges> range =
-        getIntegerRanges(operand, depth + 1);
-    if (!range) {
-      return std::nullopt;
-    }
-    ranges.push_back(std::move(*range));
-  }
-  return ranges;
-}
-
-static std::optional<ConstantIntRanges> getIntegerRanges(Value value,
-                                                         unsigned depth) {
-  constexpr unsigned maxDepth = 32;
-  if (!value || depth > maxDepth) {
-    return std::nullopt;
-  }
-  IntegerAttr constant;
-  if (matchPattern(value, m_Constant(&constant))) {
-    return ConstantIntRanges::constant(constant.getValue());
-  }
-  unsigned bitWidth = ConstantIntRanges::getStorageBitwidth(value.getType());
-  if (bitWidth == 0) {
-    return std::nullopt;
-  }
-  if (auto argument = dyn_cast<BlockArgument>(value)) {
-    return getLoopInductionRange(argument, bitWidth);
-  }
-  Operation *definingOp = value.getDefiningOp();
-  auto rangeInterface = dyn_cast_or_null<InferIntRangeInterface>(definingOp);
-  if (!rangeInterface) {
-    return std::nullopt;
-  }
-  std::optional<SmallVector<ConstantIntRanges>> ranges =
-      getOperandRanges(*definingOp, depth);
-  if (!ranges) {
-    return std::nullopt;
-  }
-  std::optional<ConstantIntRanges> result;
-  rangeInterface.inferResultRanges(
-      *ranges, [&](Value resultValue, const ConstantIntRanges &range) {
-        if (resultValue == value) {
-          result = range;
-        }
-      });
-  return result;
-}
-
-static std::optional<IntegerRange> getIntegerRange(Value value) {
-  std::optional<ConstantIntRanges> range = getIntegerRanges(value);
-  bool invalidRange = !range || !range->smin().isSignedIntN(64) ||
-                      !range->smax().isSignedIntN(64);
-  if (invalidRange) {
-    return std::nullopt;
-  }
-  return IntegerRange{range->smin().getSExtValue(),
-                      range->smax().getSExtValue()};
-}
-
-static std::optional<std::pair<__int128, __int128>>
-getMathematicalResultRange(Operation *operation) {
-  bool isAdd = isa_and_nonnull<arith::AddIOp>(operation);
-  bool isSub = isa_and_nonnull<arith::SubIOp>(operation);
-  bool isMul = isa_and_nonnull<arith::MulIOp>(operation);
-  if (!isAdd && !isSub && !isMul) {
-    return std::nullopt;
-  }
-  std::optional<IntegerRange> lhs = getIntegerRange(operation->getOperand(0));
-  std::optional<IntegerRange> rhs = getIntegerRange(operation->getOperand(1));
-  if (!lhs || !rhs) {
-    return std::nullopt;
-  }
-
-  if (isAdd) {
-    return std::make_pair(
-        static_cast<__int128>(lhs->lowerInclusive) + rhs->lowerInclusive,
-        static_cast<__int128>(lhs->upperInclusive) + rhs->upperInclusive);
-  }
-  if (isSub) {
-    return std::make_pair(
-        static_cast<__int128>(lhs->lowerInclusive) - rhs->upperInclusive,
-        static_cast<__int128>(lhs->upperInclusive) - rhs->lowerInclusive);
-  }
-  std::array<__int128, 4> products = {
-      static_cast<__int128>(lhs->lowerInclusive) * rhs->lowerInclusive,
-      static_cast<__int128>(lhs->lowerInclusive) * rhs->upperInclusive,
-      static_cast<__int128>(lhs->upperInclusive) * rhs->lowerInclusive,
-      static_cast<__int128>(lhs->upperInclusive) * rhs->upperInclusive};
-  auto bounds = std::minmax_element(products.begin(), products.end());
-  return std::make_pair(*bounds.first, *bounds.second);
-}
-
-static bool isProvenNoSignedWrap(Value value) {
-  Operation *operation = value.getDefiningOp();
-  auto overflow =
-      dyn_cast_or_null<arith::ArithIntegerOverflowFlagsInterface>(operation);
-  if (overflow && overflow.hasNoSignedWrap()) {
-    return true;
-  }
-  unsigned bitWidth = ConstantIntRanges::getStorageBitwidth(value.getType());
-  auto resultRange = getMathematicalResultRange(operation);
-  if (bitWidth == 0 || bitWidth > 64 || !resultRange) {
-    return false;
-  }
-  __int128 signedMinimum = -(__int128{1} << (bitWidth - 1));
-  __int128 signedMaximum = (__int128{1} << (bitWidth - 1)) - 1;
-  return signedMinimum <= resultRange->first &&
-         resultRange->second <= signedMaximum;
-}
-
-/// Remove finite-width source boundaries only when range inference proves
-/// that the source operation cannot wrap. Remaining source values are kept as
-/// opaque atoms, so equal dynamic terms can cancel without reassociating
-/// unproven arithmetic.
-static PTOTypedExprRef expandProvenPointExpression(
-    const PTOTypedExprRef &expression) {
-  if (!expression) {
-    return {};
-  }
-  if (expression->kind == PTOTypedExpr::Kind::Constant ||
-      expression->kind == PTOTypedExpr::Kind::Opaque ||
-      expression->kind == PTOTypedExpr::Kind::Cast) {
-    return expression;
-  }
-  if (expression->sourceValue &&
-      !isProvenNoSignedWrap(expression->sourceValue)) {
-    return makePTOOpaqueExpr(expression->sourceValue);
-  }
-
-  PTOTypedExprRef lhs = expandProvenPointExpression(expression->lhs);
-  PTOTypedExprRef rhs = expandProvenPointExpression(expression->rhs);
-  switch (expression->kind) {
-  case PTOTypedExpr::Kind::Add:
-    return makePTOAddExpr(lhs, rhs, expression->type);
-  case PTOTypedExpr::Kind::Sub:
-    return makePTOSubExpr(lhs, rhs, expression->type);
-  case PTOTypedExpr::Kind::Mul:
-    return makePTOMulExpr(lhs, rhs, expression->type);
-  default:
-    return expression;
-  }
-}
-
-static FailureOr<PTOTypedExprRef>
-getOperationOffsetBytes(const PTOAddressExpr &address, int64_t scale) {
-  if (!address.offset) {
-    return makePTOConstantExpr(0);
-  }
-  if (!address.offset->unitBytes || *address.offset->unitBytes <= 0) {
-    return failure();
-  }
-  int64_t coefficient;
-  if (llvm::MulOverflow(scale, *address.offset->unitBytes, coefficient)) {
-    return failure();
-  }
-  PTOTypedExprRef offset =
-      expandProvenPointExpression(address.offset->value);
-  Type type = offset ? offset->type : Type();
-  return makePTOMulExpr(offset, makePTOConstantExpr(coefficient, type), type);
-}
-
-static std::optional<int64_t>
-getExactByteDifference(const ResolvedMemoryAccess &from,
-                       const ResolvedMemoryAccess &to) {
-  if (!from.addressExpression || !to.addressExpression) {
-    return std::nullopt;
-  }
-  const PTOAddressExpr &fromAddress = *from.addressExpression;
-  const PTOAddressExpr &toAddress = *to.addressExpression;
-  if (fromAddress.rootOrBase != toAddress.rootOrBase ||
-      fromAddress.elementBytes <= 0 ||
-      fromAddress.elementBytes != toAddress.elementBytes) {
-    return std::nullopt;
-  }
-
-  PTOTypedExprRef fromElements =
-      expandProvenPointExpression(fromAddress.elementOffset);
-  PTOTypedExprRef toElements =
-      expandProvenPointExpression(toAddress.elementOffset);
-  Type expressionType = toElements ? toElements->type : Type();
-  PTOTypedExprRef difference = makePTOMulExpr(
-      makePTOSubExpr(toElements, fromElements, expressionType),
-      makePTOConstantExpr(toAddress.elementBytes, expressionType),
-      expressionType);
-
-  FailureOr<PTOTypedExprRef> fromOperation =
-      getOperationOffsetBytes(fromAddress, -1);
-  FailureOr<PTOTypedExprRef> toOperation =
-      getOperationOffsetBytes(toAddress, 1);
-  bool operationOffsetsUnavailable =
-      failed(fromOperation) || failed(toOperation);
-  if (operationOffsetsUnavailable) {
-    return std::nullopt;
-  }
-  difference = makePTOAddExpr(difference, *fromOperation, expressionType);
-  difference = makePTOAddExpr(difference, *toOperation, expressionType);
-
-  std::optional<PTOLinearExpr> linear = normalizePTOLinearExpr(difference);
-  if (!linear || !linear->terms.empty()) {
-    return std::nullopt;
-  }
-  return linear->constant;
-}
-
-/// Resolve a conservative byte-address range for pointer-producing operations
-/// explicit at the VPTO scheduling boundary. Unknown transforms and possible
-/// integer overflow deliberately fall back to may-alias.
-static std::optional<IntegerRange>
-addDisplacement(int64_t address, const IntegerRange &displacement) {
-  IntegerRange result;
-  if (llvm::AddOverflow(address, displacement.lowerInclusive,
-                        result.lowerInclusive) ||
-      llvm::AddOverflow(address, displacement.upperInclusive,
-                        result.upperInclusive)) {
-    return std::nullopt;
-  }
-  return result;
-}
-
-static std::optional<int64_t> getAddPtrElementByteSize(AddPtrOp addPtr) {
-  auto pointerType = dyn_cast<PtrType>(addPtr.getPtr().getType());
-  if (!pointerType) {
-    return std::nullopt;
-  }
-  Type elementType = pointerType.getElementType();
-  bool invalidElementType = !elementType.isIntOrFloat() ||
-                            elementType.getIntOrFloatBitWidth() % 8 != 0;
-  if (invalidElementType) {
-    return std::nullopt;
-  }
-  return static_cast<int64_t>(elementType.getIntOrFloatBitWidth() / 8);
-}
-
-static LogicalResult accumulateAddPtrDisplacement(AddPtrOp addPtr,
-                                                  IntegerRange &displacement) {
-  std::optional<IntegerRange> elementOffset =
-      getIntegerRange(addPtr.getOffset());
-  std::optional<int64_t> elementByteSize = getAddPtrElementByteSize(addPtr);
-  if (!elementOffset || !elementByteSize) {
-    return failure();
-  }
-  int64_t minimumByteOffset = 0;
-  int64_t maximumByteOffset = 0;
-  return failure(
-      llvm::MulOverflow(elementOffset->lowerInclusive, *elementByteSize,
-                        minimumByteOffset) ||
-      llvm::MulOverflow(elementOffset->upperInclusive, *elementByteSize,
-                        maximumByteOffset) ||
-      llvm::AddOverflow(displacement.lowerInclusive, minimumByteOffset,
-                        displacement.lowerInclusive) ||
-      llvm::AddOverflow(displacement.upperInclusive, maximumByteOffset,
-                        displacement.upperInclusive));
-}
-
-static std::optional<IntegerRange> getPointerAddressRange(Value value) {
-  SmallPtrSet<Operation *, 8> visited;
-  IntegerRange displacement;
-  while (Operation *definingOp = value.getDefiningOp()) {
-    if (!visited.insert(definingOp).second) {
-      return std::nullopt;
-    }
-    if (auto cast = dyn_cast<CastPtrOp>(definingOp)) {
-      Value input = cast.getInput();
-      if (std::optional<int64_t> address = getConstantInteger(input)) {
-        return addDisplacement(*address, displacement);
-      }
-      if (!isa<PtrType>(input.getType())) {
-        return std::nullopt;
-      }
-      value = input;
-      continue;
-    }
-    if (auto intToPtr = dyn_cast<IntToPtrOp>(definingOp)) {
-      std::optional<int64_t> address = getConstantInteger(intToPtr.getAddr());
-      if (!address) {
-        return std::nullopt;
-      }
-      return addDisplacement(*address, displacement);
-    }
-    if (auto addPtr = dyn_cast<AddPtrOp>(definingOp)) {
-      if (failed(accumulateAddPtrDisplacement(addPtr, displacement))) {
-        return std::nullopt;
-      }
-      value = addPtr.getPtr();
-      continue;
-    }
-    return std::nullopt;
-  }
-  return std::nullopt;
-}
-
-static Value getAliasRoot(Value value) {
-  SmallPtrSet<Operation *, 8> visited;
-  while (Operation *definingOp = value.getDefiningOp()) {
-    if (!visited.insert(definingOp).second)
-      break;
-    std::optional<std::pair<Value, Value>> alias =
-        getOperationAliasInfo(definingOp);
-    if (!alias || alias->first != value || !alias->second)
-      break;
-    value = alias->second;
-  }
-  return value;
-}
-
-static const PTOAddressExpr *
-findUniqueAddressExpression(Value address,
-                            ArrayRef<PTOAddressExpr> expressions) {
-  const PTOAddressExpr *matching = nullptr;
-  for (const PTOAddressExpr &expression : expressions) {
-    if (expression.currentBase != address) {
-      continue;
-    }
-    if (matching) {
-      return nullptr;
-    }
-    matching = &expression;
-  }
-  return matching;
-}
-
-static void resolveAbsoluteByteRange(ResolvedMemoryAccess &access) {
-  std::optional<IntegerRange> pointerRange =
-      getPointerAddressRange(access.semantics.address);
-  if (!pointerRange || !access.semantics.byteOffset) {
-    return;
-  }
-  IntegerRange byteRange;
-  bool overflow =
-      llvm::AddOverflow(pointerRange->lowerInclusive,
-                        *access.semantics.byteOffset,
-                        byteRange.lowerInclusive) ||
-      llvm::AddOverflow(pointerRange->upperInclusive,
-                        *access.semantics.byteOffset, byteRange.upperInclusive);
-  if (overflow) {
-    return;
-  }
-  access.absoluteByteRange = byteRange;
-  if (byteRange.lowerInclusive == byteRange.upperInclusive) {
-    access.absoluteByteOffset = byteRange.lowerInclusive;
-  }
-}
-
-static ResolvedMemoryAccess
-resolveMemoryAccess(const VPTOMemoryAccess &memoryAccess,
-                    ArrayRef<PTOAddressExpr> addressExpressions) {
-  ResolvedMemoryAccess access{
-      memoryAccess, {}, std::nullopt, std::nullopt, std::nullopt};
-  if (!access.semantics.address) {
-    return access;
-  }
-  if (const PTOAddressExpr *expression = findUniqueAddressExpression(
-          access.semantics.address, addressExpressions)) {
-    access.addressExpression = *expression;
-  }
-  resolveAbsoluteByteRange(access);
-  access.aliasRoot = getAliasRoot(access.semantics.address);
-  if (access.aliasRoot != access.semantics.address) {
-    access.semantics.byteOffset.reset();
-  }
-  return access;
-}
-
-static SmallVector<ResolvedMemoryAccess>
-resolveMemoryAccesses(Operation *operation,
-                      const VPTOSchedulingSemantics &semantics,
-                      PTOAddressAnalysis *addressAnalysis) {
-  SmallVector<PTOAddressExpr> addressExpressions;
-  if (addressAnalysis) {
-    auto result = addressAnalysis->getAddresses(operation);
-    if (result) {
-      addressExpressions = std::move(*result.value);
-    }
-  }
-  SmallVector<ResolvedMemoryAccess> accesses;
-  accesses.reserve(semantics.memoryAccesses.size());
-  for (const VPTOMemoryAccess &memoryAccess : semantics.memoryAccesses) {
-    accesses.push_back(resolveMemoryAccess(memoryAccess, addressExpressions));
-  }
-  return accesses;
-}
-
-static std::optional<bool>
-getExactDifferenceOverlap(const ResolvedMemoryAccess &lhs,
-                          const ResolvedMemoryAccess &rhs) {
-  bool hasPositiveSizes = lhs.semantics.byteSize &&
-                          *lhs.semantics.byteSize > 0 &&
-                          rhs.semantics.byteSize && *rhs.semantics.byteSize > 0;
-  if (!hasPositiveSizes) {
-    return std::nullopt;
-  }
-  std::optional<int64_t> rhsBegin = getExactByteDifference(lhs, rhs);
-  int64_t rhsEnd = 0;
-  if (!rhsBegin ||
-      llvm::AddOverflow(*rhsBegin, *rhs.semantics.byteSize, rhsEnd)) {
-    return std::nullopt;
-  }
-  return *rhsBegin < *lhs.semantics.byteSize && rhsEnd > 0;
-}
-
-static bool hasDisjointAbsoluteRanges(const ResolvedMemoryAccess &lhs,
-                                      const ResolvedMemoryAccess &rhs) {
-  if (!lhs.absoluteByteRange || !lhs.semantics.byteSize ||
-      !rhs.absoluteByteRange || !rhs.semantics.byteSize) {
-    return false;
-  }
-  int64_t lhsLatestEnd = 0;
-  int64_t rhsLatestEnd = 0;
-  bool overflow = llvm::AddOverflow(lhs.absoluteByteRange->upperInclusive,
-                                    *lhs.semantics.byteSize, lhsLatestEnd) ||
-                  llvm::AddOverflow(rhs.absoluteByteRange->upperInclusive,
-                                    *rhs.semantics.byteSize, rhsLatestEnd);
-  return !overflow && (lhsLatestEnd <= rhs.absoluteByteRange->lowerInclusive ||
-                       rhsLatestEnd <= lhs.absoluteByteRange->lowerInclusive);
-}
-
-static std::optional<bool> getOffsetOverlap(std::optional<int64_t> lhsOffset,
-                                            std::optional<int64_t> lhsSize,
-                                            std::optional<int64_t> rhsOffset,
-                                            std::optional<int64_t> rhsSize) {
-  if (!lhsOffset || !lhsSize || !rhsOffset || !rhsSize) {
-    return std::nullopt;
-  }
-  int64_t lhsEnd = 0;
-  int64_t rhsEnd = 0;
-  bool overflow = llvm::AddOverflow(*lhsOffset, *lhsSize, lhsEnd) ||
-                  llvm::AddOverflow(*rhsOffset, *rhsSize, rhsEnd);
-  if (overflow) {
-    return std::nullopt;
-  }
-  return *lhsOffset < rhsEnd && *rhsOffset < lhsEnd;
-}
-
-static bool mayAlias(const ResolvedMemoryAccess &lhs,
-                     const ResolvedMemoryAccess &rhs) {
-  bool differentAddressSpaces =
-      lhs.semantics.addressSpace && rhs.semantics.addressSpace &&
-      lhs.semantics.addressSpace != rhs.semantics.addressSpace;
-  if (differentAddressSpaces) {
-    return false;
-  }
-  if (!lhs.semantics.address || !rhs.semantics.address) {
-    return true;
-  }
-  if (std::optional<bool> overlap = getExactDifferenceOverlap(lhs, rhs)) {
-    return *overlap;
-  }
-  if (hasDisjointAbsoluteRanges(lhs, rhs)) {
-    return false;
-  }
-  if (std::optional<bool> overlap =
-          getOffsetOverlap(lhs.absoluteByteOffset, lhs.semantics.byteSize,
-                           rhs.absoluteByteOffset, rhs.semantics.byteSize)) {
-    return *overlap;
-  }
-  bool hasSameAliasRoot = lhs.aliasRoot == rhs.aliasRoot;
-  if (hasSameAliasRoot) {
-    if (std::optional<bool> overlap = getOffsetOverlap(
-            lhs.semantics.byteOffset, lhs.semantics.byteSize,
-            rhs.semantics.byteOffset, rhs.semantics.byteSize)) {
-      return *overlap;
-    }
-  }
-  // Different roots in the same physical space remain conservative: memory
-  // planning may have assigned overlapping ranges to distinct SSA roots.
-  return true;
-}
 
 static bool needsMemoryOrder(const ResolvedMemoryAccess &lhs,
                              const ResolvedMemoryAccess &rhs) {
@@ -653,7 +143,8 @@ getMemoryRange(std::optional<int64_t> byteOffset,
     return std::nullopt;
   }
   int64_t end;
-  if (llvm::AddOverflow(*byteOffset, *byteSize, end)) {
+  bool overflow = llvm::AddOverflow(*byteOffset, *byteSize, end) != 0;
+  if (overflow) {
     return std::nullopt;
   }
   return MemoryRange{*byteOffset, end};
@@ -680,8 +171,8 @@ static bool containsMemoryRange(const ResolvedMemoryAccess &prior,
     if (std::optional<int64_t> priorBegin =
             getExactByteDifference(current, prior)) {
       int64_t priorEnd;
-      if (!llvm::AddOverflow(*priorBegin, *prior.semantics.byteSize,
-                             priorEnd) &&
+      if (llvm::AddOverflow(*priorBegin, *prior.semantics.byteSize,
+                            priorEnd) == 0 &&
           *priorBegin >= 0 && priorEnd <= *current.semantics.byteSize) {
         return true;
       }
@@ -753,7 +244,7 @@ static LogicalResult
 collectMemoryPredecessors(ArrayRef<FrontierAccess> frontier,
                           ArrayRef<ResolvedMemoryAccess> currentAccesses,
                           ConsumeWork &&consumeWork,
-                          SmallPtrSetImpl<VPTOSUnit *> &predecessors) {
+                          SmallPtrSetImpl<const VPTOSUnit *> &predecessors) {
   for (const FrontierAccess &prior : frontier) {
     for (const ResolvedMemoryAccess &current : currentAccesses) {
       if (failed(consumeWork())) {
@@ -786,7 +277,8 @@ collectResolvedMemoryAccesses(const VPTOSchedDAG &dag,
 }
 
 static void
-updateMemoryFrontier(SmallVectorImpl<FrontierAccess> &frontier, VPTOSUnit &unit,
+updateMemoryFrontier(SmallVectorImpl<FrontierAccess> &frontier,
+                     const VPTOSUnit *unit,
                      ArrayRef<ResolvedMemoryAccess> currentAccesses) {
   llvm::erase_if(frontier, [&](const FrontierAccess &prior) {
     return llvm::any_of(
@@ -795,8 +287,37 @@ updateMemoryFrontier(SmallVectorImpl<FrontierAccess> &frontier, VPTOSUnit &unit,
         });
   });
   for (const ResolvedMemoryAccess &current : currentAccesses) {
-    frontier.push_back({&unit, current});
+    frontier.push_back({unit, current});
   }
+}
+
+template <typename ConsumeWork, typename AddEdge>
+static LogicalResult processMemoryAccess(
+    const VPTOSchedDAG &dag, SmallVectorImpl<FrontierAccess> &frontier,
+    VPTOSUnit &unit, ArrayRef<ResolvedMemoryAccess> currentAccesses,
+    ConsumeWork &&consumeWork, AddEdge &&addEdge) {
+  SmallPtrSet<const VPTOSUnit *, kVisitedOperationInlineCapacity>
+      predecessors;
+  if (failed(collectMemoryPredecessors(frontier, currentAccesses, consumeWork,
+                                       predecessors))) {
+    return mlir::failure();
+  }
+  for (const VPTOSUnit *predecessor : predecessors) {
+    VPTOSUnit *mutablePredecessor =
+        dag.lookup(predecessor->getOperation());
+    if (!mutablePredecessor ||
+        failed(addEdge(*mutablePredecessor, unit))) {
+      return mlir::failure();
+    }
+  }
+
+  // A write (or ordered/unknown access) replaces an earlier entry only when
+  // its may-alias coverage contains that entry. Partial overlap establishes
+  // an edge but cannot remove the old entry: a future access may touch only
+  // the uncovered portion. Read-only accesses remain side by side until a
+  // later closing access safely subsumes them.
+  updateMemoryFrontier(frontier, &unit, currentAccesses);
+  return success();
 }
 
 template <typename AddEdge>
@@ -824,7 +345,10 @@ addImplicitReadEdge(const VPTOSchedulingEffect &effect, VPTOSUnit &unit,
                     llvm::StringMap<SmallVector<VPTOSUnit *>> &readsSinceWrite,
                     AddEdge &&addEdge) {
   if (VPTOSUnit *writer = lastWrite.lookup(effect.resource)) {
-    if (failed(addEdge(*writer, unit, VPTOSchedEdgeKind::Data, 1,
+    // A single operation may read and write the same implicit resource (for
+    // example VSTUR advances AR). Its own write is not a real predecessor.
+    if (writer != &unit &&
+        failed(addEdge(*writer, unit, VPTOSchedEdgeKind::Data, 1,
                        Twine("implicit read of ") + effect.resource))) {
       return mlir::failure();
     }
@@ -846,6 +370,10 @@ static LogicalResult addImplicitWriteEdges(
     }
   }
   for (VPTOSUnit *reader : readsSinceWrite[effect.resource]) {
+    // Skip the reading unit itself: a read-modify-write closes its own read
+    // with the write and must not create a self anti-dependence.
+    if (reader == &unit)
+      continue;
     if (failed(
             addEdge(*reader, unit, VPTOSchedEdgeKind::Anti, 0,
                     Twine("implicit anti-dependence on ") + effect.resource))) {
@@ -956,7 +484,9 @@ LogicalResult VPTOSchedDAGBuilder::buildMemoryEdges(
     }
   }
 
-  auto consume = [&](uint64_t amount) { return consumeWork(failure, amount); };
+  auto consume = [this, &failure](uint64_t amount) {
+    return consumeWork(failure, amount);
+  };
   auto resolved =
       collectResolvedMemoryAccesses(dag, addressAnalysis.get(), consume);
   if (failed(resolved)) {
@@ -964,36 +494,23 @@ LogicalResult VPTOSchedDAGBuilder::buildMemoryEdges(
   }
 
   SmallVector<FrontierAccess> frontier;
+  auto addMemoryEdge = [this, &dag, &failure](VPTOSUnit &predecessor,
+                                               VPTOSUnit &successor) {
+    return addEdge(dag, predecessor, successor, VPTOSchedEdgeKind::Memory,
+                   VPTOSchedEdgeStrength::Must, /*latency=*/0,
+                   "may-alias memory frontier in original order", failure);
+  };
   for (auto indexedAccesses : llvm::enumerate(*resolved)) {
-    size_t unitIndex = indexedAccesses.index();
     ArrayRef<ResolvedMemoryAccess> currentAccesses = indexedAccesses.value();
     if (currentAccesses.empty()) {
       continue;
     }
-    VPTOSUnit *unit = dag.getUnits()[unitIndex].get();
-    SmallPtrSet<VPTOSUnit *, 8> predecessors;
-    auto consumeOne = [&]() { return consumeWork(failure); };
-    if (failed(collectMemoryPredecessors(frontier, currentAccesses, consumeOne,
-                                         predecessors))) {
+    auto consumeOne = [this, &failure]() { return consumeWork(failure); };
+    VPTOSUnit *unit = dag.getUnits()[indexedAccesses.index()].get();
+    if (failed(processMemoryAccess(dag, frontier, *unit, currentAccesses,
+                                   consumeOne, addMemoryEdge))) {
       return mlir::failure();
     }
-    for (VPTOSUnit *predecessor : predecessors) {
-      if (failed(addEdge(dag, *predecessor, *unit,
-                         VPTOSchedEdgeKind::Memory,
-                         VPTOSchedEdgeStrength::Must,
-                         /*latency=*/0,
-                         "may-alias memory frontier in original order",
-                         failure))) {
-        return mlir::failure();
-      }
-    }
-
-    // A write (or ordered/unknown access) replaces an earlier entry only when
-    // its may-alias coverage contains that entry. Partial overlap establishes
-    // an edge but cannot remove the old entry: a future access may touch only
-    // the uncovered portion. Read-only accesses remain side by side until a
-    // later closing access safely subsumes them.
-    updateMemoryFrontier(frontier, *unit, currentAccesses);
   }
   return success();
 }
@@ -1006,8 +523,10 @@ LogicalResult VPTOSchedDAGBuilder::buildImplicitAndSyncEdges(
 
   for (const std::unique_ptr<VPTOSUnit> &unitOwner : dag.getUnits()) {
     VPTOSUnit &unit = *unitOwner;
-    auto add = [&](VPTOSUnit &predecessor, VPTOSUnit &successor,
-                   VPTOSchedEdgeKind kind, unsigned latency, Twine reason) {
+    auto add = [this, &dag, &failure](VPTOSUnit &predecessor,
+                                      VPTOSUnit &successor,
+                                      VPTOSchedEdgeKind kind, unsigned latency,
+                                      Twine reason) {
       return addEdge(dag, predecessor, successor, kind,
                      VPTOSchedEdgeStrength::Must, latency, reason, failure);
     };
@@ -1050,6 +569,25 @@ LogicalResult VPTOSchedDAGBuilder::buildImplicitAndSyncEdges(
   return success();
 }
 
+LogicalResult VPTOSchedDAGBuilder::buildRematerializationClusterEdges(
+    VPTOSchedDAG &dag, VPTOScheduleFailure &failure) const {
+  ArrayRef<std::unique_ptr<VPTOSUnit>> units = dag.getUnits();
+  for (size_t index = 1; index < units.size(); ++index) {
+    VPTOSUnit &current = *units[index];
+    if (!rematerializationAnchors ||
+        !rematerializationAnchors->contains(current.getOperation())) {
+      continue;
+    }
+    if (failed(addEdge(dag, *units[index - 1], current,
+                       VPTOSchedEdgeKind::Cluster,
+                       VPTOSchedEdgeStrength::Must, /*latency=*/0,
+                       "keep rematerialized chain near its use", failure))) {
+      return mlir::failure();
+    }
+  }
+  return success();
+}
+
 LogicalResult VPTOSchedDAGBuilder::buildSSAEdges(
     VPTOSchedDAG &dag, VPTOScheduleFailure &failure) const {
   for (Value value : dag.getRegion().liveThroughs) {
@@ -1064,9 +602,10 @@ LogicalResult VPTOSchedDAGBuilder::buildSSAEdges(
   Operation *lastRegionOperation = dag.getRegion().operations.back();
   for (const std::unique_ptr<VPTOSUnit> &unitOwner : dag.getUnits()) {
     VPTOSUnit &unit = *unitOwner;
-    auto consume = [&]() { return consumeWork(failure); };
-    auto add = [&](VPTOSUnit &predecessor, VPTOSUnit &successor,
-                   unsigned latency, Twine reason) {
+    auto consume = [this, &failure]() { return consumeWork(failure); };
+    auto add = [this, &dag, &failure](VPTOSUnit &predecessor,
+                                      VPTOSUnit &successor, unsigned latency,
+                                      Twine reason) {
       return addEdge(dag, predecessor, successor, VPTOSchedEdgeKind::Data,
                      VPTOSchedEdgeStrength::Must, latency, reason, failure);
     };

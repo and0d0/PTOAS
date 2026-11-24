@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -24,11 +25,11 @@ EMISSION_TEST = ROOT / "ptodsl/tests/test_jit_compile.py"
 BACKEND_CAPABILITY = {
     name: "a5-vpto"
     for name in (
-        "vload vstore vsstb vci vadd vaddc vaddcs vsub vmul vdiv vmax vmin vabs vneg "
+        "vload vstore vci vadd vaddc vsubc vaddcs vsub vsubcs vmul vdiv vmax vmin vabs vneg "
         "vrelu vexp vln vsqrt vand vor vxor vnot vshl vshr vadds vmuls "
         "vmaxs vmins vshls vshrs vcmp vcmps vsel vselr vbrc vcadd vcmax "
         "vcmin vcvt vinterpret_cast vexpdif vaxpy vlrelu vprelu vmull "
-        "vmula vchist vdhist vgather vgatherb vscatter create_mask "
+        "vmula vchist vdhist vgather vscatter create_mask "
         "create_group_mask vintlv vdintlv"
     ).split()
 }

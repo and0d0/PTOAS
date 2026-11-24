@@ -1,4 +1,4 @@
-name: PR-pipeline_pto-as
+name: PR-pipeline_cann_pto-as
 
 concurrency:
   max: 15
@@ -27,6 +27,7 @@ env:
   obs_path: "${{ env.org_name }}/${{ env.repo_name }}/ci/package/${{ env.MERGE_ID }}"
   obs_smoke_path: "${{ env.obs_path }}/presmoke/2"
   online: ${{ vars.APPLY_LABEL }}
+  CANN_HOME: ${{ vars.CANN_HOME || '/home/jenkins/Ascend/cann' }}
 
 stages:
   stage1:
@@ -50,6 +51,9 @@ stages:
         container:
           image: swr.cn-north-4.myhuaweicloud.com/ci_cann/ubuntu20.04.05_x86:k8s_v1.1006
       JOB_pre:
+        permissions:
+          repository: read
+          id-token: write
         name: Test_PreBuild
         uses: cann/.gitcode/.gitcode/workflows/pre_action.yml@master
     pre:
@@ -59,6 +63,9 @@ stages:
     name: Compile
     jobs:
       JOB_x86_compile:
+        permissions:
+          repository: read
+          id-token: write
         name: Compile_x86
         uses: .gitcode/workflows/compile_action.yml
         with:
@@ -67,6 +74,9 @@ stages:
           arch: 'x64'
           package_name: 'cann-pto-as_linux-x86_64.run'
       JOB_arm_compile:
+        permissions:
+          repository: read
+          id-token: write
         name: Compile_arm
         uses: .gitcode/workflows/compile_action.yml
         with:
@@ -74,12 +84,217 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM }}
           arch: 'arm64'
           package_name: 'cann-pto-as_linux-aarch64.run'
+      JOB_build_and_test:
+        name: Build_and_test
+        needs: []
+        steps:
+          - name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+              token: ${{ secrets.GIT_TOKEN }}
+          - name: Build and test PTOAS
+            timeout-minutes: 180
+            uses: build-accelerate
+            with:
+              command: |
+                set -euo pipefail
+                export WORKSPACE="${{ steps.process_checkout.outputs.path }}"
+                cd "${WORKSPACE}"
+                export CMAKE_C_COMPILER_LAUNCHER=/tmp/codearts/cloudcache/xcache
+                export CMAKE_CXX_COMPILER_LAUNCHER=/tmp/codearts/cloudcache/xcache
+                BuildAccelerate bash .gitcode/scripts/build_and_test.sh "${WORKSPACE}"
+              AC_SERVER_IP: ${{ vars.AC_SERVER_IP }}
+        runs-on:
+          - self-hosted
+          - arch=x64
+          - spec=xlarge
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
       JOB_codecheck:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck
         uses: cann/.gitcode/.gitcode/workflows/codecheck_action.yml@master
         with:
           precommit_image_version: ${{ jobs.JOB_image.outputs.precommit }}
           codecheck_image_version: ${{ jobs.JOB_image.outputs.codecheck }}
+      JOB_sim_validation:
+        permissions:
+          repository: read
+          id-token: write
+        name: SIM_VALIDATION
+        steps:
+          - name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+              token: ${{ secrets.GIT_TOKEN }}
+              allow-unsafe-pr-checkout: true
+          - name: Prepare simulator environment
+            timeout-minutes: 300
+            run: |
+              set -euo pipefail
+              # The runner declares its own environment (the systemd unit of the
+              # runner service, or its .env): this workflow spells out no host path
+              # and invents no default. Read values with printenv - the platform
+              # rewrites brace syntax inside run blocks, and a bare test would trip
+              # over set -u. See .gitcode/scripts/setup_sim_runner.sh.
+              #
+              # Both values are mandatory: the gate cannot run without them, so a
+              # gap in the runner environment fails this step instead of skipping
+              # it silently.
+              require_env() {
+                if [ -z "$2" ]; then
+                  echo "ERROR: this runner must provide $1 (runner service environment)" >&2
+                  exit 1
+                fi
+              }
+              require_env SIM_PYTHON_BIN "$(printenv SIM_PYTHON_BIN || true)"
+              require_env ASCEND_3RD_LIB_PATH "$(printenv ASCEND_3RD_LIB_PATH || true)"
+              echo "python: $(printenv SIM_PYTHON_BIN)"
+              echo "llvm cache: $(printenv ASCEND_3RD_LIB_PATH)"
+              echo "pto-isa source: $(printenv PTO_ISA_SOURCE_DIR || echo clone-from-url)"
+              echo "pypto source: $(printenv PYPTO_SOURCE_DIR || echo clone-from-url)"
+              # Bisheng parses host side with this contract; derive it from the
+              # active gcc only when the environment did not provide one.
+              bisheng_flags="$(printenv BISHENG_FLAGS || true)"
+              if [ -z "$bisheng_flags" ] && command -v gcc >/dev/null 2>&1; then
+                gcc_install_dir="$(gcc -print-search-dirs | sed -n "s/^install: //p")"
+                gcc_toolchain="$(printf "%s" "$gcc_install_dir" | sed "s|/lib/gcc/.*||")"
+                if [ -n "$gcc_toolchain" ] && [ -d "$gcc_toolchain" ]; then
+                  export BISHENG_FLAGS="--gcc-toolchain=$gcc_toolchain"
+                fi
+              fi
+              bash "${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/sim_validation.sh" build \
+                "${{ steps.process_checkout.outputs.path }}"
+          - name: Run VPTO simulator validation
+            timeout-minutes: 300
+            run: |
+              set -euo pipefail
+              export SIM_SUITE=vpto
+              bash "${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/sim_validation.sh" test \
+                "${{ steps.process_checkout.outputs.path }}"
+          - name: Run TileLang ST validation
+            if: always()
+            timeout-minutes: 300
+            run: |
+              set -euo pipefail
+              export SIM_SUITE=tilelib
+              bash "${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/sim_validation.sh" test \
+                "${{ steps.process_checkout.outputs.path }}"
+          - name: Run PTODSL ST validation
+            if: always()
+            timeout-minutes: 300
+            run: |
+              set -euo pipefail
+              export SIM_SUITE=ptodsl
+              bash "${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/sim_validation.sh" test \
+                "${{ steps.process_checkout.outputs.path }}"
+          - name: Run PyPTO simulator validation
+            if: always()
+            timeout-minutes: 300
+            run: |
+              set -euo pipefail
+              export SIM_SUITE=pypto
+              bash "${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/sim_validation.sh" test \
+                "${{ steps.process_checkout.outputs.path }}"
+          -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
+          - name: Upload simulator logs
+            if: always()
+            uses: obs-upload
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              artifact-path: |
+                ${{ steps.process_checkout.outputs.path }}/.work/gitcode-vpto-sim/vpto-sim.log
+                ${{ steps.process_checkout.outputs.path }}/.work/gitcode-vpto-sim/tilelib-st.log
+                ${{ steps.process_checkout.outputs.path }}/.work/gitcode-vpto-sim/ptodsl-dsl-st.log
+                ${{ steps.process_checkout.outputs.path }}/.work/gitcode-vpto-sim/pypto-*.log
+                ${{ steps.process_checkout.outputs.path }}/.work/gitcode-vpto-sim/cases/parallel-runner.log
+                ${{ steps.process_checkout.outputs.path }}/.work/gitcode-vpto-sim/cases/parallel-summary.tsv
+              object-prefix: ${{ env.obs_path }}/sim/
+        runs-on: ["self-hosted", "runner=label_1"]
+      PreSmoke_A5:
+        permissions:
+          repository: read
+          id-token: write
+        name: PreSmoke_A5
+        steps:
+          -
+            name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+              token: ${{secrets.GIT_TOKEN}}
+          -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
+          -
+            name: download pr files
+            uses: obs-download
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              key: |
+                ${{ env.obs_path }}/pr_filelist.txt
+                ${{ env.obs_path }}/pr_filelist_mod.txt
+                ${{ env.obs_path }}/update_file_detail.txt
+                ${{ env.obs_path }}/pre_smoke.sh
+              path: ${{ steps.process_checkout.outputs.path }}
+          -
+            name: smoke executor
+            timeout-minutes: 60
+            run: |
+                set -e
+                # set env
+                export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+                export obs_path=${{env.obs_path}}
+                export repo_name=${{env.repo_name}}
+                export obs_smoke_path=${{ env.obs_smoke_path }}
+                export pr_id=${{ env.MERGE_ID }}
+                # Ascend950PR board; keep ST_PART out of build.sh's environment so
+                # this job builds from source (the x86_64 Compile installer carries
+                # no ptobc, which runop --enablebc needs).
+                export SOC_VERSION=Ascend950PR
+                # A job that reserves npu=4 must actually touch the board. Run the
+                # verified 2-case subset (~1 min); the full 713-case manifest is
+                # serial on one DEVICE_ID and stays with the nightly board job.
+                export PTOAS_BOARD_ST_PART=0
+                export PTOAS_BOARD_RUN_ONLY=abs,adds
+                # runop is CPU-only and serial by default; 8 workers cut it from
+                # 154 s to 60 s on the A5 runner with identical OK/FAIL/SKIP counts.
+                export PTOAS_SAMPLE_JOBS=8
+                bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
+          - name: upload
+            uses: obs-upload
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              artifact-path: "${{ steps.process_checkout.outputs.path }}/slog*.tar.gz"
+              object-prefix: ${obs_smoke_path}/plog/a5/
+        if: env.TARGET_BRANCH == 'master'
+        runs-on: ['self-hosted','npu=4','smoke=501']
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/pre_smoke/ubuntu24.04_x86:pre_mindspore_A5_conda_v1.1002
     pre:
     - type: auto
     fail-fast: false
@@ -87,6 +302,9 @@ stages:
     name: PreSmoke
     jobs:
       PreSmoke_A2:
+        permissions:
+          repository: read
+          id-token: write
         name: PreSmoke_A2
         steps:
           -
@@ -97,13 +315,20 @@ stages:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
               token: ${{secrets.GIT_TOKEN}}
           -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
+          -
             name: download pr files
             uses: obs-download
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               key: |
                 ${{ env.obs_path }}/pr_filelist.txt
                 ${{ env.obs_path }}/pr_filelist_mod.txt
@@ -123,8 +348,6 @@ stages:
                 export repo_name=${{env.repo_name}}
                 export obs_smoke_path=${{ env.obs_smoke_path }}
                 export pr_id=${{ env.MERGE_ID }}
-                export AK=${{secrets.AK}}
-                export SK=${{secrets.SK}}
                 export ST_PART=1
                 bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
           - name: upload
@@ -132,8 +355,6 @@ stages:
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               artifact-path: "${{ steps.process_checkout.outputs.path }}/slog*.tar.gz"
               object-prefix: ${obs_smoke_path}/plog/
         if: env.TARGET_BRANCH == 'master'
@@ -148,4 +369,3 @@ post:
     job_post:
       name: Test_post
       uses: cann/.gitcode/.gitcode/workflows/post_action.yml@master
-

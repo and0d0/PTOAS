@@ -16,6 +16,8 @@
  
 #include <cstddef>
 #include <utility>
+
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <deque>
 #include <string>
 #include <map>
@@ -31,6 +33,7 @@
 #include "llvm/ADT/DenseMap.h"
  
 // 引入 PTO Dialect 定义 (获取 AddressSpace 等)
+#include "PTO/Support/CodeConstants.h"
 #include "PTO/IR/PTO.h"
  
 namespace mlir {
@@ -82,90 +85,173 @@ enum class TCoreType {
   CUBE_AND_VECTOR
 };
  
+/// Byte granularity a GM access may touch around the bytes it logically
+/// addresses. `pto.tstore` from `loc=acc` drains through fixpipe, whose burst
+/// unit is 64 bytes (`FIXP_BURST_UNIT_LEN` in pto-isa
+/// `include/pto/common/constants.hpp`); the MTE3 path moves 32-byte DMA blocks
+/// (`BLOCK_BYTE_SIZE`). The ISA does not specify whether the bus
+/// read-modify-writes a partially covered burst, so disjointness is proven at
+/// the coarser of the two units and the proof holds either way.
+inline constexpr uint64_t kGmAccessGranuleBytes = 64;
+
+/// A strided byte-range window selected inside a GM root buffer.
+///
+/// Models what a chain of `pto.make_tensor_view` / `pto.partition_view`
+/// selects: `contigBytes` consecutive bytes, repeated over `outerDims`,
+/// counted from `byteOffset`. Two column slices of the same tensor interleave
+/// in the address space, so their flat bounding intervals always overlap even
+/// when no byte is shared — which a single `baseAddresses`/`allocateSize`
+/// interval cannot express, and enumerating one address per row cannot afford
+/// on GM-sized views (issue #1624).
+struct GMWindow {
+    /// First selected byte, relative to the root buffer.
+    uint64_t byteOffset{0};
+    /// Length of the innermost contiguous run, in bytes.
+    uint64_t contigBytes{0};
+    /// Enclosing dimensions, outermost first: (stride in bytes, trip count).
+    SmallVector<std::pair<uint64_t, uint64_t>, mlir::pto::kValue4> outerDims;
+
+    /// Bytes spanned from `byteOffset` to the last selected byte, inclusive of
+    /// the gaps between runs.
+    uint64_t spanBytes() const
+    {
+        uint64_t span = contigBytes;
+        for (auto [stride, count] : outerDims) {
+            if (count > 1) {
+                span += stride * (count - 1);
+            }
+        }
+        return span;
+    }
+
+    bool operator==(const GMWindow& other) const
+    {
+        return byteOffset == other.byteOffset && contigBytes == other.contigBytes && outerDims == other.outerDims;
+    }
+
+    // std::optional<GMWindow> comparison needs both halves before C++20.
+    bool operator!=(const GMWindow& other) const { return !(*this == other); }
+};
+
 /// Meminfo of the target buffer
 /// 用于追踪 Buffer 的别名和根节点
 struct BaseMemInfo {
-  BaseMemInfo(
-      Value baseBuffer, Value rootBuffer, pto::AddressSpace scope,
-      SmallVector<uint64_t> baseAddresses, uint64_t allocateSize,
-      bool hasKnownPhysicalAddresses = false,
-      bool aliasesUnknownRange = false)
-      : baseBuffer(baseBuffer), rootBuffer(rootBuffer), scope(scope),
-        baseAddresses(std::move(baseAddresses)), allocateSize(allocateSize),
-        hasKnownPhysicalAddresses(hasKnownPhysicalAddresses),
-        aliasesUnknownRange(aliasesUnknownRange) {}
- 
-  /// baseBuffer: 当前操作直接使用的 Buffer (可能是 View 或 Alias)
-  Value baseBuffer;
-  /// rootBuffer: 最底层的分配源头 (alloc_tile 或 Kernel Argument)
-  Value rootBuffer;
-  
-  pto::AddressSpace scope;
-  SmallVector<uint64_t> baseAddresses; // 用于 Offset 分析
-  uint64_t allocateSize;
-  // PlanMemory materializes static local allocations as physical addresses.
-  // This distinguishes their physical addresses from root-relative offsets.
-  bool hasKnownPhysicalAddresses;
-  // Address-preserving provenance can be lost when a pointer is round-tripped
-  // through integer IR. When set, this memory object aliases any range in the
-  // same address space.
-  bool aliasesUnknownRange;
- 
-  bool areVectorEqual(const SmallVector<uint64_t>& vec1,
-                      const SmallVector<uint64_t>& vec2) const {
-    if (vec1.size() != vec2.size()) {
-      return false;
-    }
-    for (size_t i = 0; i < vec1.size(); ++i) {
-      if (vec1[i] != vec2[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
- 
-  bool operator==(const BaseMemInfo &other) const {
-    if (!areVectorEqual(baseAddresses, other.baseAddresses)) {
-      return false;
-    }
-    if (rootBuffer != other.rootBuffer) {
-      return false;
-    }
-    if (scope != other.scope) {
-      return false;
-    }
-    if (hasKnownPhysicalAddresses != other.hasKnownPhysicalAddresses) {
-      return false;
-    }
-    if (aliasesUnknownRange != other.aliasesUnknownRange) {
-      return false;
-    }
-    // allocateSize 和 baseBuffer 的严格相等性在某些别名分析中可能太强了，
-    // 但为了保持原有逻辑，先保留。重点是 rootBuffer 必须一致。
-    if (allocateSize != other.allocateSize) {
-      return false;
-    }
-    if (baseBuffer != other.baseBuffer) {
-      return false;
-    }
-    return true;
-  }
- 
-  std::unique_ptr<BaseMemInfo> clone() const {
-    return std::make_unique<BaseMemInfo>(
-        baseBuffer, rootBuffer, scope, baseAddresses, allocateSize,
-        hasKnownPhysicalAddresses, aliasesUnknownRange);
-  }
+    BaseMemInfo(
+        Value baseBuffer, Value rootBuffer, pto::AddressSpace scope, SmallVector<uint64_t> baseAddresses,
+        uint64_t allocateSize, bool hasKnownPhysicalAddresses = false, bool aliasesUnknownRange = false)
+        : baseBuffer(baseBuffer),
+          rootBuffer(rootBuffer),
+          scope(scope),
+          baseAddresses(std::move(baseAddresses)),
+          allocateSize(allocateSize),
+          hasKnownPhysicalAddresses(hasKnownPhysicalAddresses),
+          aliasesUnknownRange(aliasesUnknownRange)
+    {}
 
-  std::unique_ptr<BaseMemInfo> clone(Value cloneBaseBuffer) const {
-    return std::make_unique<BaseMemInfo>(
-        cloneBaseBuffer, rootBuffer, scope, baseAddresses, allocateSize,
-        hasKnownPhysicalAddresses, aliasesUnknownRange);
-  }
+    /// baseBuffer: 当前操作直接使用的 Buffer (可能是 View 或 Alias)
+    Value baseBuffer;
+    /// rootBuffer: 最底层的分配源头 (alloc_tile 或 Kernel Argument)
+    Value rootBuffer;
+
+    pto::AddressSpace scope;
+    SmallVector<uint64_t> baseAddresses; // 用于 Offset 分析
+    uint64_t allocateSize;
+    // PlanMemory materializes static local allocations as physical addresses.
+    // This distinguishes their physical addresses from root-relative offsets.
+    bool hasKnownPhysicalAddresses;
+    // An explicit dynamic local allocation address or an integer-to-pointer cast
+    // can refer to an unknown physical range. This object and its views may alias
+    // other roots in the same address space; shared-root offsets remain usable.
+    bool aliasesUnknownRange;
+    // The record's base address is a conservative envelope start (e.g. a subview
+    // whose offsets could not be resolved cloned the parent buffer's record),
+    // not the value's actual placement. Set on the conservative-alias path and
+    // carried by every clone, so downstream consumers that narrow records into
+    // byte ranges (macro-derived scratch) cannot mistake the envelope for an
+    // exact base -- regardless of which alias-construction path produced the
+    // value. Value-level alias checks are unchanged: the envelope interval
+    // itself stays usable there.
+    //
+    // Indented one level deeper than the struct's legacy members to satisfy the
+    // repo G.FMT.02 4-space rule for changed lines.
+    bool impreciseBase = false;
+    // Strided GM extent relative to rootBuffer, when the view chain that produced
+    // this object was fully static. Only ever used to prove two accesses on the
+    // SAME root cannot touch a common byte; absent means "no proof available" and
+    // leaves the baseAddresses/allocateSize behaviour untouched. Never set on a
+    // value that crosses a loop boundary, where the modelled offsets would
+    // describe the first iteration only.
+    // (Reindented to the repo 4-space rule together with the neighboring
+    // changed member above.)
+    std::optional<GMWindow> gmWindow;
+
+    bool areVectorEqual(const SmallVector<uint64_t>& vec1, const SmallVector<uint64_t>& vec2) const
+    {
+        if (vec1.size() != vec2.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < vec1.size(); ++i) {
+            if (vec1[i] != vec2[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool operator==(const BaseMemInfo& other) const
+    {
+        if (!areVectorEqual(baseAddresses, other.baseAddresses)) {
+            return false;
+        }
+        if (rootBuffer != other.rootBuffer) {
+            return false;
+        }
+        if (scope != other.scope) {
+            return false;
+        }
+        if (hasKnownPhysicalAddresses != other.hasKnownPhysicalAddresses) {
+            return false;
+        }
+        if (aliasesUnknownRange != other.aliasesUnknownRange) {
+            return false;
+        }
+        // allocateSize 和 baseBuffer 的严格相等性在某些别名分析中可能太强了，
+        // 但为了保持原有逻辑，先保留。重点是 rootBuffer 必须一致。
+        if (allocateSize != other.allocateSize) {
+            return false;
+        }
+        if (baseBuffer != other.baseBuffer) {
+            return false;
+        }
+        if (gmWindow != other.gmWindow) {
+            return false;
+        }
+        return true;
+    }
+
+    std::unique_ptr<BaseMemInfo> clone() const { return clone(baseBuffer); }
+
+    std::unique_ptr<BaseMemInfo> clone(Value cloneBaseBuffer) const
+    {
+        auto cloned = std::make_unique<BaseMemInfo>(
+            cloneBaseBuffer, rootBuffer, scope, baseAddresses, allocateSize, hasKnownPhysicalAddresses,
+            aliasesUnknownRange);
+        cloned->gmWindow = gmWindow;
+        cloned->impreciseBase = impreciseBase;
+        return cloned;
+    }
 };
- 
+
 using DepBaseMemInfoPairVec =
     SmallVector<std::pair<const BaseMemInfo *, const BaseMemInfo *>>;
+
+// Exact boundary tokens for a proven constant-bounded slot rotation. Bit i
+// refers to the physical slot, before event IDs are assigned. An absent value
+// retains the existing conservative boundary handling.
+struct SlotEventBoundaryMasks {
+  uint32_t prime{0};
+  uint32_t drain{0};
+};
  
 // 表示一个具体的同步指令 (Set, Wait, Barrier)
 class SyncOperation {
@@ -180,8 +266,48 @@ public:
     SYNC_BLOCK_WAIT,
     SYNC_BLOCK_ALL,
   };
-  
+
+  /// Which hardware resource backs this sync -- and therefore, per the buf-id
+  /// design revision, WHERE it may be placed.
+  ///
+  /// This is deliberately a DIFFERENT axis from TYPE. `TYPE` is the op *shape*
+  /// (a set, a wait, a barrier) and is decided by the analysis. `MECHANISM` is
+  /// the resource *class* that backs it, and is decided by the allocator:
+  ///
+  ///   EVENT   Per-(src,dst) private pool of 8 flags. Carried at a SyncIR
+  ///           position, so `MoveSyncState` may hoist it out of a branch or
+  ///           loop. This is what every in-tree sync is today.
+  ///   BUFID   Shared rotating pool of K buffer-ID tokens (K=0 on A3, 32 on A5).
+  ///           A token's get/rel counters are BIDIRECTIONAL: one token discharges
+  ///           the forward RAW *and* the reverse WAR. Two consequences, and they
+  ///           are the reason this enum exists rather than a bool:
+  ///             - no backward-matched pair is needed (`UpdateBackwardMatchSync`
+  ///               lives in SyncEventIdAllocation, which the unified allocator
+  ///               never runs -- so there is nothing to delete);
+  ///             - it MUST be emitted OP-ANCHORED, bracketing the access, not at
+  ///               a hoisted SyncIR position.
+  ///           Set by the allocator when it routes a hazard off events.
+  ///   BARRIER Spill. Carries no id.
+  ///   BLOCK   Cross-core block sync (reserved ids 14/15). Not routed by this
+  ///           allocator; present so a block sync can never be mistaken for an
+  ///           event.
+  ///
+  /// Every value EXCEPT BUFID is derivable from TYPE, and the constructor does
+  /// derive it (see `DefaultMechanismFor`), so no construction site has to
+  /// remember to set it and a barrier can never silently claim to be an event.
+  /// BUFID is the one value that is *not* derivable -- buffer-ID sync does not
+  /// go through `SyncOperation` at all today -- and it is precisely the routing
+  /// decision the unified allocator exists to make.
+  enum class MECHANISM { EVENT, BUFID, BARRIER, BLOCK };
+
   bool isCompensation = false;
+  /// For a compensation op (head-set / tail-wait), the `kSyncIndex_` of the in-body
+  /// hazard it primes and drains; -1 otherwise. Needed because a compensation pair is
+  /// created as its OWN sync group, so `GetSyncIndex()` does not identify its owner --
+  /// and G2 must be able to tell "these two records are halves of one hazard" from
+  /// "two different hazards collide on an id". Without it the exemption would have to
+  /// excuse every compensation record, which would drop real conflicts.
+  int compensationOf = -1;
 
   static const int kNullEventId{-1};
  
@@ -190,7 +316,21 @@ public:
   // Root buffers participating in the dependency that created this sync pair.
   // These are kept for allocation/widening heuristics and debug printing; set/
   // wait redundancy pruning is based on the pipe pair semantics.
+  //
+  // `rootBuffer` is the ROOT ALLOCATION, which is much COARSER than a buffer: many
+  // distinct tiles share one root. It is therefore NOT a buffer identity, and must
+  // not be used as one -- see `depMemInfos` below.
   SmallVector<Value> depRootBuffers;
+  // The BaseMemInfo objects behind this dependency, kept so a consumer can
+  // recover the TILE identity `(scope, baseAddr, size)` rather than the coarse
+  // root above. Owned by the translator's `Buffer2MemInfoMap` or, for
+  // instruction-specific ranges, its `OpAccessMemInfos`; these are raw
+  // pointers into those arenas, which every analysis in the pipeline shares.
+  //
+  // This exists because `InsertSyncAnalysis` HAS these pointers when it builds a
+  // sync pair and used to discard them, keeping only the roots -- which left the
+  // unified allocator unable to tell which buffer a hazard was actually on.
+  SmallVector<const BaseMemInfo *> depMemInfos;
   bool uselessSync{false};
   int eventIdNum{1};
   // For multi-buffer dyn-event sync: the slot SSA expression at this access
@@ -198,6 +338,7 @@ public:
   // hardware event-id index. Empty when this sync is single-buffer.
   Value slotSSAExpr;
   uint32_t slotCount{1};
+  std::optional<SlotEventBoundaryMasks> slotBoundaryMasks;
   Value lowestCommonAncestorBuffer{nullptr};
   int reuseCntForWiden{0};
   bool reallocatedLoopHeadTailSync{false};
@@ -206,18 +347,25 @@ public:
   Value block_sync_event_value{nullptr};
  
 public:
-  SyncOperation(TYPE type, pto::PipelineType srcPipe, pto::PipelineType dstPipe,
-                unsigned kSyncIndex, unsigned syncIRIndex,
-                std::optional<int> forEndIndex, bool isComp = false)
-      : isCompensation(isComp), eventIds({}), type_(type), srcPipe_(srcPipe),
-        dstPipe_(dstPipe), kSyncIndex_(kSyncIndex), syncIRIndex_(syncIRIndex),
-        forEndIndex_(forEndIndex) {};
- 
+  SyncOperation(TYPE type, pto::PipelineType srcPipe, pto::PipelineType dstPipe, unsigned kSyncIndex,
+                unsigned syncIRIndex, std::optional<int> forEndIndex, bool isComp = false)
+      : isCompensation(isComp), eventIds({}), type_(type), mechanism_(DefaultMechanismFor(type)), srcPipe_(srcPipe),
+        dstPipe_(dstPipe), kSyncIndex_(kSyncIndex), syncIRIndex_(syncIRIndex), forEndIndex_(forEndIndex){};
+
   ~SyncOperation() = default;
- 
+
   std::unique_ptr<SyncOperation> GetMatchSync(unsigned index) const;
-  
+
   TYPE GetType() const { return type_; }
+
+  /// The resource class backing this sync. Defaults from TYPE; only the
+  /// allocator moves a sync off its default (today: onto BUFID).
+  MECHANISM GetMechanism() const { return mechanism_; }
+  void SetMechanism(MECHANISM m) { mechanism_ = m; }
+
+  /// The mechanism a given TYPE implies. Kept next to the enum so the two can
+  /// never drift; `SetPipeAll` and the constructor are its only callers.
+  static MECHANISM DefaultMechanismFor(TYPE t);
   pto::PipelineType GetSrcPipe() const { return srcPipe_; }
   pto::PipelineType GetDstPipe() const { return dstPipe_; }
   
@@ -240,6 +388,7 @@ public:
   bool isBarrierType() const;
  
   static std::string TypeName(TYPE t);
+  static std::string MechanismName(MECHANISM m);
   std::string GetCoreTypeName(TCoreType t) const;
  
   using SyncOperations =
@@ -252,6 +401,9 @@ public:
  
 private:
   TYPE type_;
+  // Private on purpose: it must stay consistent with type_ (see SetPipeAll,
+  // which downgrades both together). Write it through SetMechanism only.
+  MECHANISM mechanism_;
   pto::PipelineType srcPipe_;
   pto::PipelineType dstPipe_;
   const unsigned kSyncIndex_;
@@ -271,8 +423,9 @@ bool hasSameSyncDepRoots(const SyncOperation *lhs, const SyncOperation *rhs);
 /// Such a sync orders ONLY the accesses that resolve to its own event lane
 /// (`slotSSAExpr % slotCount`); it does not serialize its (src, dst) pipe pair
 /// the way a static flag does. Every place that reasons about one sync
-/// "covering" another must therefore exclude it, or a second access through a
-/// different slot is left unguarded (issue #1118).
+/// "covering" another must therefore exclude it unless it proves coverage for
+/// the exact operation instances, including their slot and iteration distance.
+/// Otherwise a second access through a different slot is left unguarded (#1118).
 /// `slotSSAExpr` is the discriminator, NOT `GetForEndIndex()`. Slot keying is
 /// only ever established for a back-edge dependency (InsertSyncOperation), so
 /// it may be tempting to test for one -- but the synthetic prologue-prime and
@@ -387,6 +540,27 @@ enum class UNIT_FLAG {
   ENABLED_ONLY_LAST_ITER,
   ENABLED_ONLY_FIRST_AND_LAST_ITERS
 };
+
+// Unit-flag metadata carried by an operation's semantic phase.  This is kept
+// separate from the legacy UNIT_FLAG state, which describes event priming for
+// loop boundaries rather than PTO matmul/store phases.
+enum class UFRole {
+  None,
+  MatmulProducer,
+  AccStore,
+};
+
+struct UFInfo {
+  UFRole role{UFRole::None};
+  std::optional<pto::AccPhase> accPhase;
+  std::optional<pto::STPhase> stPhase;
+  // Every phased op is visible to the token model, but only a subset is
+  // currently allowed to be one end of a removable hand-off. Keeping the two
+  // sets separate lets a new phased op participate in the token bookkeeping
+  // (soundness) without silently widening the optimization surface.
+  bool handoffEligible{false};
+  SmallVector<const BaseMemInfo *, 4> accAccesses;
+};
  
 // 核心节点：代表一个计算或搬运指令
 class CompoundInstanceElement : public InstanceElement {
@@ -406,6 +580,7 @@ public:
   UNIT_FLAG unitFlagModeAsWait{UNIT_FLAG::DISABLED};
   CompoundInstanceElement *linkedUnitFlagCompAsSet{nullptr};
   CompoundInstanceElement *linkedUnitFlagCompAsWait{nullptr};
+  UFInfo ufInfo;
   // Macro-like operations may be represented by multiple SyncIR compounds that
   // point at the same source operation. The phase id distinguishes those
   // synthetic compounds without changing the source IR.
@@ -425,16 +600,28 @@ public:
   UNIT_FLAG getUnitFlagMode() const;
   
   // PTO 暂时简化，去掉复杂的 UnitFlag 条件生成逻辑，或者稍后在 CPP 中适配
-  std::optional<mlir::Value> getUnitFlagCond(Location loc, OpBuilder &rewriter);
+  std::optional<mlir::Value> getUnitFlagCond(Location loc,
+                                             OpBuilder &rewriter) const;
 };
  
 using SyncIRs = SmallVector<std::unique_ptr<InstanceElement>>;
 using SyncOperations = SmallVector<SmallVector<std::unique_ptr<SyncOperation>>>;
 using Buffer2MemInfoMap =
     llvm::DenseMap<Value, llvm::SmallVector<std::unique_ptr<BaseMemInfo>>>;
+// Access ranges that belong to one instruction rather than to a buffer value,
+// e.g. the source window actually read by a TEXTRACT. They must not be stored
+// in Buffer2MemInfoMap, which every user of the value shares. Compounds hold
+// raw pointers into this storage, so it must live as long as the SyncIR.
+using OpAccessMemInfos = llvm::SmallVector<std::unique_ptr<BaseMemInfo>>;
  
 // Utilities
 bool checkAllParentLoopsAreForLoops(Operation *op);
+
+/// Whether the function already carries explicit synchronization ops
+/// (pto.set_flag / pto.wait_flag / pto.record_event / pto.wait_event). The
+/// automatic sync passes skip such functions: re-inserting on top of manual
+/// sync can duplicate or mismatch event dependencies and fail on NPU.
+bool hasExplicitSyncOps(func::FuncOp func);
 void checkSyncIRIndex(const SyncIRs &syncIR, int index);
 void checkCondition(bool condition, const std::string &message);
  

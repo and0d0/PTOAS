@@ -64,6 +64,7 @@ Python Wrapper              L0  user-facing wrapper (NumPy, torch-npu, pure Pyth
   │    └─ backend="emitc"         EmitC backend, mode="auto" only
   ├─ Tile Ops                     tile.load, tile.store, tile.add, ...
   ├─ MTE Ops                      mte_load / mte_store / mte_gm_ub / ...
+  ├─ Async GM↔GM                  session_init / sdma_gm_gm
   ├─ @pto.tileop                    matrix products (mad, mte_l1_l0a, mte_l0c_ub, ...)
   ├─ @pto.tileop                    row-wise vector math (vlds, vadd, vexp, vsts, ...)
   └─ @pto.simt                    scalar-like compute (lds, sts, pointwise blends, ...)
@@ -110,7 +111,7 @@ has two roles controlled by `entry`:
   error. They are compiled and linked together with their callers automatically.
 
 In both roles, compilation, caching, and tracing work the same way: the body is
-traced once, lowered through the PTOAS compiler pipeline, and cached by
+traced once, lowered through the PTOAS compiler pipeline, and reused by
 specialization key (function identity + entry annotation signature + const_expr
 parameter values).
 
@@ -156,6 +157,31 @@ def flash_attention_kernel(
 contract is also owned here: the runtime grid (e.g., `batch * heads` blocks) is
 declared at the call site, and block/subblock indices are queried via
 `pto.get_block_idx()` and friends.
+
+`make_tensor_view(..., layout=...)` accepts `"ND"`, `"DN"`, and `"NZ"`
+(case-insensitive). Use it when the logical layout cannot be distinguished from
+shape/stride alone. For example, fp32 canonical NZ has `C0 = 32 / 4 = 8`:
+
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"explicit_nz_view","compile":{}} -->
+```python
+from ptodsl import pto
+
+
+@pto.jit(target="a5")
+def explicit_nz_view(ptr: pto.ptr(pto.f32, "gm")):
+    view = pto.make_tensor_view(
+        ptr,
+        shape=[1, 8, 8, 16, 8],
+        strides=[8192, 1024, 128, 8, 1],
+        layout="NZ",
+    )
+    _ = view
+    return
+```
+
+An explicit layout is preserved by PTOAS. Without one, only a non-degenerate
+canonical NZ five-dimensional root is inferred as NZ; a single-fractal
+`[1,1,1,16,C0]` view remains ND.
 
 #### `entry=False` — kernel modules
 
@@ -284,7 +310,7 @@ This has one critical implication for how you write control flow and scalar logi
 
 - **Python scalar expressions** (`alpha * x`, `1.0 / sqrt(d)`) are evaluated at trace time and their results are baked into the IR as constants — the compiler never sees the original expression.
 
-- **PTO scalar instructions** (`scalar.load(...)`, `scalar.max(...)`, `scalar.exp(...)`) are recorded as scalar IR and enter the compiler pipeline, where they may be constant-folded or lowered to runtime scalar operations depending on whether their inputs are compile-time known.
+- **PTO scalar instructions** (`pto.load(...)`, `pto.max(...)`, `pto.exp(...)`) are recorded as scalar IR and enter the compiler pipeline, where they may be constant-folded or lowered to runtime scalar operations depending on whether their inputs are compile-time known.
 
 A simple rule of thumb: **Python control flow becomes IR by default; use explicit compile-time helpers when you want trace-time behavior. PTO scalar constructs are recorded into IR and the compiler decides.**
 

@@ -58,6 +58,11 @@
 // PTO Attributes
 //===----------------------------------------------------------------------===//
 
+// Bridge tile specs carry a TileBufType; types are defined after attributes.
+namespace mlir::pto {
+class TileBufType;
+} // namespace mlir::pto
+
 #define GET_ATTRDEF_CLASSES
 #include "PTO/IR/PTOAttrs.h.inc"
 
@@ -150,6 +155,56 @@ enum class PTOArch {
   A5,
 };
 
+/// AscendC ``DivAlgo`` token for the algorithm selector (IR mnemonic spelling).
+inline llvm::StringRef getDivAlgoToken(DivPrecision precision) {
+  switch (precision) {
+  case DivPrecision::Intrinsic:
+    return "intrinsic";
+  case DivPrecision::DiffCompensation:
+    return "diff_compensation";
+  case DivPrecision::Precision1UlpFtzTrue:
+    return "precision_1ulp_ftz_true";
+  case DivPrecision::Precision0UlpFtzTrue:
+    return "precision_0ulp_ftz_true";
+  case DivPrecision::Precision0UlpFtzFalse:
+    return "precision_0ulp_ftz_false";
+  case DivPrecision::Precision1UlpFtzFalse:
+    return "precision_1ulp_ftz_false";
+  }
+  llvm_unreachable("unknown DivPrecision");
+}
+
+/// Division algorithms that are always expanded through the Software Library,
+/// whatever the element type: the two 0-ULP variants and the 1-ULP FTZ-false
+/// variant. ``intrinsic`` and ``1ulp_ftz_true`` lower to the single native vector
+/// divide. ``diff_compensation`` is software only for f32 (it maps to the
+/// compensated sequence of AscendC's FTZ build) and native elsewhere, so use
+/// ``usesSoftwareDivExpansion`` when the element type is known.
+inline bool isSoftwareDivAlgo(DivPrecision precision) {
+  switch (precision) {
+  case DivPrecision::Precision0UlpFtzTrue:
+  case DivPrecision::Precision0UlpFtzFalse:
+  case DivPrecision::Precision1UlpFtzFalse:
+    return true;
+  case DivPrecision::Intrinsic:
+  case DivPrecision::DiffCompensation:
+  case DivPrecision::Precision1UlpFtzTrue:
+    return false;
+  }
+  return false;
+}
+
+/// True for the selectors that expand through the A5 f32 Software Library.
+/// ``diff_compensation`` is compensated for f32 and a plain native divide for
+/// every other element type, so the type matters here.
+inline bool usesSoftwareDivExpansion(DivPrecision precision, Type elementType) {
+  if (isSoftwareDivAlgo(precision)) {
+    return true;
+  }
+  return precision == DivPrecision::DiffCompensation && elementType &&
+         elementType.isF32();
+}
+
 /// The semantic form selected by the optional third tile of pto.tmov.  The
 /// public operand remains named `fp` for API compatibility; address space is
 /// the sole discriminator between legacy FP and exponent X-to-ZZ lowering.
@@ -200,10 +255,38 @@ inline constexpr llvm::StringLiteral kLegacyHACCEntryAttrName = "hacc.entry";
 inline constexpr llvm::StringLiteral kPTOKernelAttrName = "pto.kernel";
 inline constexpr llvm::StringLiteral kLegacyPTOAICoreAttrName = "pto.aicore";
 inline constexpr llvm::StringLiteral kPTOSimtEntryAttrName = "pto.simt_entry";
+
+/// Internal mark the automatic synchronization passes (insert/unified/
+/// barrier-all) set on pto.mgather ops whose output completion they emit; it
+/// selects the pto-isa A2/A3 async row-gather overload in the EmitC lowering
+/// and the InsertSync macro model. It is compiler-private: the PTO custom
+/// assembly neither prints nor parses it, and the driver strips it from any
+/// input, so it can only arrive from a pass in the same compilation.
+inline constexpr llvm::StringLiteral kMGatherAsyncRowAttrName =
+    "__pto.emitc.mgather_async_row";
 inline constexpr llvm::StringLiteral kPTOSimtMaxThreadsAttrName =
     "pto.simt_max_threads";
 inline constexpr llvm::StringLiteral kPTOSimtMaxRegistersAttrName =
     "pto.simt_max_regs";
+
+/// Kernel scheduling mode, carried as a signless-i32 integer attribute on a PTO
+/// entry function. It selects the CCE kernel scheduling mode and is emitted as
+/// the `__schedmode__(n)` kernel qualifier, which the bisheng compiler expands
+/// to `__attribute__((cce_schedule_mode(n)))`.
+///
+/// The compiler accepts exactly two values and rejects every other value:
+///   0 - normal mode (the default): the kernel is dispatched onto whichever
+///       physical cores are free, so concurrently launched kernels can overlap.
+///   1 - batch mode: dispatch waits until every core the kernel needs is free,
+///       so concurrently launched kernels are split and never overlap. This is
+///       the mode that avoids the multi-stream deadlock documented for
+///       inter-core sync (`pto.sync.set`/`pto.sync.wait`) kernels.
+inline constexpr llvm::StringLiteral kPTOSchedModeAttrName = "pto.sched_mode";
+
+/// Accepted values for `kPTOSchedModeAttrName`.
+inline constexpr int64_t kPTOSchedModeNormal = 0;
+inline constexpr int64_t kPTOSchedModeBatch = 1;
+
 inline constexpr llvm::StringLiteral kPTOVisibilityAttrName = "pto.visibility";
 inline constexpr llvm::StringLiteral kPTOVisibilityInternalValue = "internal";
 inline constexpr llvm::StringLiteral kPTOVisibilityExternalValue = "external";
@@ -275,21 +358,52 @@ inline StringRef getPTODSLLogicalNameOrSymbolName(func::FuncOp func) {
 bool hasExplicitPTOEntryAttr(func::FuncOp func);
 bool hasExplicitPTOEntryAttr(LLVM::LLVMFuncOp func);
 
+/// Verify the hardware conversion type pair and controls used in a SIMT
+/// execution scope.
+LogicalResult verifySimtConversionControls(Operation *op, Type srcType,
+                                           Type dstType, Rounding rounding,
+                                           Saturation saturation,
+                                           Attribute signednessAttr);
+
 /// Return true if the function should be emitted as an AICORE entry.
 bool isPTOEntryFunction(func::FuncOp func);
 bool isPTOEntryFunction(LLVM::LLVMFuncOp func);
 
-/// Return true if the function should remain externally visible in backend
-/// artifacts. PTO entries are always treated as externally visible. Non-entry
-/// functions default to internal visibility unless they carry
-/// `pto.visibility = "external"`.
+/// Return true if the function carries an explicit request to stay externally
+/// visible in backend artifacts: PTO entries always qualify, and any other
+/// function qualifies while it carries `pto.visibility = "external"`.
+/// A `false` result does not by itself mean the function gets internalized.
+/// Internalization keys off the MLIR symbol visibility, and both backends apply
+/// the same policy -- `applyFuncSpecifiers` for EmitC and
+/// `applyArtifactVisibilityLinkage` for VPTO. The mapping is
+///   - entry                        -> exported
+///   - private                      -> module-local (EmitC `static`, VPTO
+///                                     `internal`)
+///   - `pto.visibility = "external"` -> exported
+///   - public without either marker -> keeps whatever linkage the exporter
+///                                     chose, so a `@pto.jit(entry=False)`
+///                                     kernel-module primary stays referable
+///                                     from sibling children
+/// Precedence is entry, then private, then the external marker, so this helper
+/// does not decide the `private` + `pto.visibility = "external"` pair on its
+/// own -- both backends resolve that to module-local.
+/// The `LLVM::LLVMFuncOp` overload reports `false` for declarations; it cannot
+/// rely on `isDeclaration()` there (see the definition).
 bool hasExternalArtifactVisibility(func::FuncOp func);
+bool hasExternalArtifactVisibility(LLVM::LLVMFuncOp func);
 
 /// Set explicit artifact visibility on one function definition.
 void setExternalArtifactVisibility(func::FuncOp func, bool isExternal);
 
 /// Validate module-level PTO entry configuration before EmitC lowering.
 LogicalResult validatePTOEntryFunctions(ModuleOp module);
+
+/// Validate every `pto.sched_mode` attribute in `module`.
+/// The attribute must be a signless i32 holding exactly 0 (normal mode) or 1
+/// (batch mode) and must sit on a kernel entry function. Both backends call
+/// this: EmitC emits the value as the CCE `__schedmode__(n)` kernel qualifier
+/// and VPTO emits it as the `launch-schedule-mode` HIVM annotation.
+LogicalResult validatePTOSchedModeAttr(ModuleOp module);
 
 /// Reject !pto.struct function arguments/results and operation results other
 /// than pto.declare_struct, so aliases cannot hide stack-storage provenance.
@@ -309,6 +423,10 @@ func::FuncOp lookupPeerFuncAcrossContainer(Operation *op,
 
 /// Find one reserve_buffer by logical name inside a function.
 ReserveBufferOp findReserveBufferByName(func::FuncOp funcOp, StringRef name);
+
+/// Verify cross-function frontend contracts while the owning module is stable.
+/// Ordinary operation verifiers must not traverse peer function bodies.
+LogicalResult verifyFrontendPeerContracts(ModuleOp module);
 
 } // namespace pto
 } // namespace mlir

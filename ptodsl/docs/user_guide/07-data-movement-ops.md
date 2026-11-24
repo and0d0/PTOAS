@@ -1,6 +1,6 @@
 # 7. Data Movement Operations
 
-This chapter covers every operation that moves data between memory spaces in PTODSL — tile-level transfers, DMA micro-instructions, vector loads and stores, and cube data movement. Operations are organized by abstraction level: tile ops for auto mode, DMA orchestration for explicit mode, vector memory ops on the SIMD unit, and cube memory ops on the Cube unit.
+This chapter covers every operation that moves data between memory spaces in PTODSL — tile-level transfers, DMA micro-instructions, vector loads and stores, cube data movement, and GM↔GM engine copies. Operations are organized by abstraction level: tile ops for auto mode, DMA orchestration for explicit mode, vector memory ops on the SIMD unit, cube memory ops on the Cube unit, and session-driven GM↔GM copies.
 
 ## 7.1 Tile-level movement: tile.load and tile.store
 
@@ -587,8 +587,10 @@ from UB using byte offsets.
 #### `pto.vsldb(buf: PtrType, block_stride: Index, repeat_stride: Index, mask: MaskType) -> VRegType`
 
 **Description**: Block-strided load. The source is interpreted as a sequence of
-32-byte blocks addressed by `repeat_stride + blk * block_stride`. Masked-off
-blocks are zero-filled.
+32-byte blocks addressed by `repeat_stride + blk * block_stride`. The source
+address must be 32-byte aligned and every enabled block must have all 32 bytes
+readable, including when only one block is enabled or `block_stride` is zero.
+Masked-off blocks are zero-filled.
 
 **Parameters**:
 
@@ -780,9 +782,9 @@ locations using unsigned element offsets relative to `buf`.
 | 64 lanes of b32 data | 64 lanes of `i32` or `ui32` | `b32` | 64 |
 
 For b8 data, request `i` stores `vec[2 * i]`; odd-numbered source bytes are
-ignored. The destination is `buf + unsigned(offsets[i])` in elements. If
-multiple active requests use the same offset, only one write is guaranteed and
-the winning request is implementation-defined.
+ignored. The destination is `buf + unsigned(offsets[i])` in elements. Duplicate
+active offsets are allowed: if multiple active requests use the same offset,
+only one write is guaranteed and the written value is undefined.
 
 **Returns**: None (side-effect operation).
 
@@ -790,7 +792,20 @@ the winning request is implementation-defined.
 
 ### Stateful store family
 
-For streaming unaligned stores with explicit alignment threading:
+For streaming unaligned stores with explicit alignment threading.
+
+**`vstus` and `vstur` are not interchangeable.** `vstus` is the
+non-squeezed form: its length is the scalar `offset` operand. `vstur` is the
+register-update form: its length is read from SPR `SQZN`, which only
+`pto.vsqz` writes, and only when the `VSQZ #st` hint is 1. `pto.init_align`
+only creates the SSA align-state carrier and does **not** initialize `SQZN`
+(its reset value is Undefined), so a `vstur` whose value is not produced by a
+`vsqz` (directly or through `pto.vbitcast`) is invalid: the store length —
+and therefore whether and what it writes — is undefined. The emitter sets
+`VSQZ #st=1` only for that value chain. Emit the squeeze producer on this
+value, or use `vstus` for a non-squeezed unaligned store. See
+[`pto.vstur` in the ISA reference](../../../docs/isa/micro-isa/03-vector-load-store.md#ptovstur)
+and the [`vsqz` store example](08-compute-operations.md#829-vector-rearrangement).
 
 #### `pto.vstus(align_in: AlignType, offset: Index, vec: VRegType, buf: PtrType) -> AlignType`
 
@@ -815,7 +830,21 @@ For streaming unaligned stores with explicit alignment threading:
 
 #### `pto.vstur(align_in: AlignType, vec: VRegType, buf: PtrType, mode: PostUpdate = PostUpdate.OFF) -> AlignType`
 
-**Description**: Register-update unaligned store. Updates only residual alignment state without base pointer update.
+**Description**: Register-update unaligned store. Updates only residual alignment state without base pointer update. The store length is not an operand: it is read from SPR `SQZN`.
+
+**SQZN requirement**: `vstur` requires its `vec` operand to be produced
+by a `pto.vsqz` directly or through `pto.vbitcast` — the value-chain form
+for which the emitter sets `VSQZ #st=1`. Only `VSQZ` writes `SQZN`;
+`pto.init_align` does not initialize it (its reset value is Undefined), and
+the AR-only `SPRCLR` / `SPRSTI` / `SPRSTS` ops do not touch it. If `SQZN`
+is Undefined, the store length — and therefore whether and what the store
+writes — is undefined, so the verifier rejects the sequence. Use `vstus` when
+the store is not squeezed.
+
+**Pairing limitation**: the verifier checks only the producer/value chain. The
+ISA also requires `#VSTUR == #(VSQZ with #st=1)` and a `VSTUR` between two
+such `VSQZ` (`visa.txt:311`-`:312`, `:5662`-`:5663`); that FIFO
+pairing and ordering remain the programmer's/emitter's responsibility.
 
 **Parameters**:
 
@@ -855,16 +884,38 @@ For streaming unaligned stores with explicit alignment threading:
 
 ---
 
-**Unaligned store stream pattern** — prime, thread, flush:
+**Unaligned store stream pattern (non-squeezed)** — prime, thread, flush:
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
 align = pto.init_align()
 vec0 = pto.vlds(ub_src_f32, pto.const(0))
-align = pto.vstur(align, vec0, ub_dst_f32, pto.PostUpdate.OFF)
+align = pto.vstus(align, pto.const(0), vec0, ub_dst_f32)
 align = pto.vstus(align, pto.const(32), vec0, ub_dst_f32)
 pto.vstas(align, ub_dst_f32, pto.const(64))
 ```
+
+**Squeezed store with `vstur`** — the `vsqz` producer is required because
+`vstur` reads its length from `SQZN`; `init_align` does not define it:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
+```python
+mask = pto.pset_b32(pto.MaskPattern.ALL)
+vec0 = pto.vlds(ub_src_f32, pto.const(0))
+compacted = pto.vsqz(vec0, mask)
+align = pto.init_align()
+align = pto.vstur(align, compacted, ub_dst_f32, pto.PostUpdate.ON)
+pto.vstar(align, ub_dst_f32)
+```
+
+**ISA provenance**: `VSTUR Vd, [Sn], AR, SQZN, USTd, #p` stores
+`length = SQZN` (`visa.txt:3176`); only `VSQZ` writes `SQZN`
+(`:5657`, `:5660`); `SQZN` resets to Undefined (`:833`);
+`SPRCLR` / `SPRSTI` / `SPRSTS` are AR-only (`:3275`, `:3294`,
+`:3309`); `VSQZ #st=1` pushes `SQZN` to `VSTUR` (`:5662`) and the
+`VSTUR` / `VSQZ #st=1` counts must match (`:5663`). With an undefined
+`SQZN` the store length, and therefore whether and what it writes, is
+undefined.
 
 ### Distribution enums reference
 
@@ -1127,7 +1178,7 @@ offsets. A partial group or a mixture of shape-derived and full fields raises
 | `unit_flag` | `pto.AccStoreUnitFlagCtrl` or `None` | `CHECK_ONLY` or `CHECK_AND_CLEAR` |
 | `pre_quant` | `tuple[object, str]` or `None` | Optional pre-quantization payload and mode |
 | `pre_relu` | `tuple[str, object | None, object | None]` or `None` | Optional ReLU mode, payload, and clip payload |
-| `layout` | `object` or `None` | `None`, `"nz2nd"`, or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
+| `layout` | `object` or `None` | `None`, `"nz2nd"`, `"nz2nz"` (native normal-mode writeback, no channel split), or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
 | `loop3` | `tuple[int, int, int]` or `None` | Optional loop-3 group `(count, src_stride, dst_stride)` |
 | `sat` | `pto.SatMode` or `None` | `ON`, `OFF`, or `PRESERVE_NAN` |
 
@@ -1154,7 +1205,7 @@ offsets. A partial group or a mixture of shape-derived and full fields raises
 | `unit_flag` | `pto.AccStoreUnitFlagCtrl` or `None` | `CHECK_ONLY` or `CHECK_AND_CLEAR` |
 | `pre_quant` | `tuple[object, str]` or `None` | Optional pre-quantization payload and mode |
 | `pre_relu` | `tuple[str, object | None, object | None]` or `None` | Optional ReLU mode, payload, and clip payload |
-| `layout` | `object` or `None` | `None`, `"nz2nd"`, or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
+| `layout` | `object` or `None` | `None`, `"nz2nd"`, `"nz2nz"` (native normal-mode writeback, no channel split), or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
 | `loop3` | `tuple[int, int, int]` or `None` | Optional loop-3 group `(count, src_stride, dst_stride)` |
 | `sat` | `pto.SatMode` or `None` | `ON`, `OFF`, or `PRESERVE_NAN` |
 | `atomic` | `tuple[str, str]` or `None` | Optional GM-only atomic `(type, op)`, e.g. `("f32", "add")` |
@@ -1182,7 +1233,7 @@ offsets. A partial group or a mixture of shape-derived and full fields raises
 | `unit_flag` | `pto.AccStoreUnitFlagCtrl` or `None` | `CHECK_ONLY` or `CHECK_AND_CLEAR` |
 | `pre_quant` | `tuple[object, str]` or `None` | Optional pre-quantization payload and mode |
 | `pre_relu` | `tuple[str, object | None, object | None]` or `None` | Optional ReLU mode, payload, and clip payload |
-| `layout` | `object` or `None` | `None`, `"nz2nd"`, or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
+| `layout` | `object` or `None` | `None`, `"nz2nd"`, `"nz2nz"` (native normal-mode writeback, no channel split), or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
 | `loop3` | `tuple[int, int, int]` or `None` | Optional loop-3 group `(count, src_stride, dst_stride)` |
 | `sat` | `pto.SatMode` or `None` | `ON`, `OFF`, or `PRESERVE_NAN` |
 
@@ -1250,6 +1301,49 @@ pto.mte_l0c_gm(
 
 ---
 
+#### `pto.mte_l1_l0a_3d(src: PtrType, dst: PtrType, *, fmap_h: int, fmap_w: int, filter_h: int, filter_w: int, channel_size: int, stride_h: int = 1, stride_w: int = 1, dilation_h: int = 1, dilation_w: int = 1, pad_top: int = 0, pad_bottom: int = 0, pad_left: int = 0, pad_right: int = 0, m_start: int = 0, k_start: int = 0, repeat_time: int = 1, repeat_mode: int = 0, repeat_source_stride: int | None = None, dst_stride: int | None = None, dst_m_position: int = 0, transpose: bool = False) -> None`
+
+**Description**: 3D im2col load from an NC1HWC0 image in L1 into the L0A left
+operand buffer (A5 `LOAD L1 TO L0A 3Dv2`). The hardware slides the
+`filter_h x filter_w` window over the virtually padded feature map with the
+given stride/dilation and flattens `channel_size` channels per window
+position, producing the im2col `M x K` matrix consumed by MMAD. PTODSL emits
+the `mte_l1_l0a_3d` wrapper IR whose parameters are SSA operands; the compiler
+expands it to `set_l3d_fmatrix` / `set_padding` / `set_l3d_rpt` /
+`load_l1_to_l0a_3d` (set* first, load last).
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `PtrType` (L1) | NC1HWC0 image source pointer |
+| `dst` | `PtrType` (L0A) | im2col destination pointer |
+| `fmap_h`, `fmap_w` | `int` in `1..32767` | Source feature-map height/width (elements) |
+| `filter_h`, `filter_w` | `int` in `1..511` | Convolution kernel height/width |
+| `channel_size` | `int` in `1..65535` | Channel count of one feature map |
+| `stride_h`, `stride_w` | `int` in `1..63` | Window stride (default 1) |
+| `dilation_h`, `dilation_w` | `int` in `1..255` | Window sampling dilation (default 1); camodel measures 0 as 1, but constant 0 is rejected at verification |
+| `pad_top` .. `pad_right` | `int` in `0..255` | Virtual padding on each side (default 0) |
+| `m_start`, `k_start` | `int` in `0..32767` / `0..65535` | Result-matrix start offsets; `k_start` must be 0 (split-K is not supported) (default 0) |
+| `repeat_time` | `int` in `1..255` | Hardware repeat count (default 1) |
+| `repeat_mode` | `int` `0`/`1` | Repeat direction: 0 = M, 1 = K (default 0) |
+| `repeat_source_stride`, `dst_stride` | `int | None` | Optional stride pair; `repeat_source_stride` is in 16-row-block units for M-direction repeat (in c0 blocks for K-direction, `k_step / c0_size`), `dst_stride` in fractal-block units; when both are omitted the compiler derives the hardware defaults from the load geometry |
+| `dst_m_position` | `int` | Destination fractal-block start (default 0) |
+| `transpose` | `bool` | Destination transpose (default False) |
+
+**Returns**: None (side-effect operation).
+
+`repeat_source_stride` and `dst_stride` travel as a pair in the wrapper IR.
+When exactly one of them is supplied and all geometry parameters are
+compile-time constants, PTODSL derives the other from the constant geometry
+and raises `TypeError` for dynamic (SSA) geometry with a half pair — pass both
+explicitly in that case. When both are omitted (constant or dynamic geometry),
+the IR expansion derives the pair from the load geometry automatically; the
+`TypeError` guard exists only because the PTODSL default derivation needs
+compile-time constants to compute them.
+
+---
+
 ### Cube data movement quick reference
 
 | Data Flow | Operation | Src Space | Dst Space |
@@ -1264,6 +1358,7 @@ pto.mte_l0c_gm(
 | L1 → L0B | `mte_l1_l0b` | l1 | l0b |
 | L1 → L0A (MX) | `mte_l1_l0a_mx` | l1 | l0a |
 | L1 → L0B (MX) | `mte_l1_l0b_mx` | l1 | l0b |
+| L1 → L0A (im2col 3D) | `mte_l1_l0a_3d` | l1 | l0a |
 | L1 → Bias table | `mte_l1_bt` | l1 | bt |
 | L1 → Factor buffer | `mte_l1_fb` | l1 | fb |
 | L0C → L1 | `mte_l0c_l1` | l0c | l1 |
@@ -1599,4 +1694,150 @@ def vector_consumer(
     pto.tile.load(entry_part, b_tile)
     c2v.free(entry, split=0)
     pto.tile.store(b_tile, b_part)
+```
+
+## 7.7 GM↔GM SDMA: `pto.session_init` and `pto.sdma_gm_gm`
+
+These two operations copy a contiguous GM range through the SDMA engine. They
+are explicit-mode only, must sit in an ordinary AICore `@pto.jit` body, and are
+illegal inside `@pto.simt` or `pto.section.simt`. There is no stride or burst
+model: the transfer is one contiguous byte count.
+
+A transfer needs an engine connection, a queue, and a service class, and those
+travel together as a session. A session cannot be a kernel argument: the host
+writes a GM template and the kernel turns it into a session with
+`pto.session_init`. Template field order and widths are given in the ISA chapter
+[19. Async Communication](../../../../docs/isa/micro-isa/19-async-comm.md).
+
+A session is opaque -- nothing to declare beforehand, no field to read back --
+and its engine is part of its type, so `pto.sdma_gm_gm` accepts only an SDMA
+session. Two consequences replace things an open struct would have allowed:
+
+- **Retuning is per post.** `block_bytes` and `channel_idx` are arguments to
+  `pto.sdma_gm_gm`, which is how a multi-core launch gives each core its own
+  queue without the host naming the core.
+- **Where a transfer lands is your pointer arithmetic.** One session configures
+  every post that uses it, so a per-transfer offset has no place in it. Displace
+  `source` and `destination` with `pto.addptr` instead.
+
+The kick does not wait for the engine except when `soft_put=True` on A5. It
+returns a handle to wait on instead.
+
+#### `pto.dma_session_type(engine="sdma") -> DmaSessionTypeDescriptor`
+
+**Description**: The session type for `engine`, one of `"sdma"`, `"urma"`, or
+`"rdma"` -- that is, `!pto.dma_session<engine>`. This names the type; it does not
+build a session, which only `pto.session_init` does. The ops that post on `urma`
+and `rdma` do not exist yet.
+
+#### `pto.session_init(template_gm, *, engine="sdma") -> Value`
+
+**Description**: Return a session configured by the host-written GM template.
+Each core that runs this gets its own session, even when the template is shared
+and read-only.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `template_gm` | `PtrType` in GM | Base of the host template |
+| `engine` | `str` | Engine the session drives; default `"sdma"` |
+
+**Returns**: A `!pto.dma_session<engine>` value.
+
+**Constraints**: `template_gm` must be a GM pointer. `engine` must be a known
+engine name. Explicit mode only.
+
+#### `pto.sdma_gm_gm(destination, source, nbytes, *, session, block_bytes=None, channel_idx=None, soft_put=False) -> Value`
+
+**Description**: Copy `nbytes` contiguous bytes from `source` to `destination`
+through the session. Either pointer may address peer memory; peer-ness is the
+numeric address, not a pointer attribute. Element types need not match; the
+transfer is counted in bytes.
+
+When `block_bytes` is omitted, the split size comes from the session. When
+`channel_idx` is omitted, the channel group comes from the session. `soft_put`
+is for a remote write on A5: that generation's engine does not perform a remote
+write, so this flag makes the copy complete before the call returns. A2/A3
+ignore it and still post to the engine.
+
+Without `soft_put`, returning from the kernel does not mean the destination is
+visible; the returned handle is what says when it is. The handle names the
+channel the post went to, and the channel is complete when it has drained -- so
+a wait is per channel, not per post: a later post on the same channel is waited
+for as well. That is never early, and posts on a channel retire in order. The
+test to apply to the handle is in `PTO/Support/AsyncSessionABI.h`; no operation
+consumes it for you yet.
+
+```text
+if soft_put and target is A5:
+  copy nbytes bytes from source to destination   # finished when the call returns
+  return a null handle
+else:
+  post the copy to the session's engine
+  return the channel it went to, without waiting
+```
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `destination` | `PtrType` in GM | Destination range |
+| `source` | `PtrType` in GM | Source range |
+| `nbytes` | `i64` | Contiguous byte count |
+| `session` | `!pto.dma_session<sdma>` | Required session, from `pto.session_init` |
+| `block_bytes` | static `int` or `None` | Split size in bytes; omitted uses the session value |
+| `channel_idx` | static `int` or `None` | Channel group for this kick; omitted uses the session value |
+| `soft_put` | `bool` | A5 remote-write completion path; default `False` |
+
+**Returns**: A `!pto.ptr<i64, gm>` handle to wait on, null when the copy is
+already complete.
+
+**Constraints**:
+
+- `destination` and `source` must be GM pointers.
+- `session` must be an SDMA session.
+- `block_bytes`, when present, must be a positive multiple of 64.
+- `channel_idx`, when present, must be in `[0, 39]`.
+- Explicit mode only; ordinary AICore entry, not SIMT.
+
+**Example (local copy):**
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.async_comm","symbol":"data_movement_async_comm_probe","compile":{}} -->
+```python
+sess = pto.session_init(sess_gm)
+record = pto.sdma_gm_gm(dst, src, nbytes, session=sess)
+```
+
+**Example (A5 remote write):**
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.async_comm","symbol":"data_movement_async_comm_probe","compile":{}} -->
+```python
+sess = pto.session_init(sess_gm)
+record = pto.sdma_gm_gm(dst, src, nbytes, session=sess, soft_put=True)
+```
+
+**Example (per-core channel):**
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.async_comm","symbol":"data_movement_async_comm_probe","compile":{}} -->
+```python
+sess = pto.session_init(sess_gm)
+# The channel group is per post, so a core picks its own without the host
+# naming it. It is a static int: the group is part of the posted instruction.
+record = pto.sdma_gm_gm(dst, src, nbytes, session=sess, channel_idx=0)
+```
+
+**Example (per-core slice of one buffer):**
+
+Every core loads the same template and moves its own window, so what differs
+between them is two pointers. The endpoints are `i8`, so an element offset is a
+byte offset.
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.async_comm","symbol":"data_movement_async_comm_probe","compile":{}} -->
+```python
+sess = pto.session_init(sess_gm)
+offset = pto.get_block_idx() * nbytes
+core_src = pto.addptr(src, offset)
+core_dst = pto.addptr(dst, offset)
+record = pto.sdma_gm_gm(core_dst, core_src, nbytes, session=sess)
 ```

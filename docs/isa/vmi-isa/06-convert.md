@@ -25,13 +25,14 @@
      (`|dst| == |src|`, e.g. `bf16 → f16`, `f16 → bf16`).
 
   3. **FpToSi** — `fp → signed int`. Supported pairs follow the contract
-     table `lookupVMIFpToSiContract`: `f32→s32`, `f16→s16`, `f32→s16`,
-     `f16→s8`, `f16→s32` (nosat), `bf16→s32`.
+     table `lookupVMIFpToSiContract`: `f32→si32`, `f16→si16`, `f32→si16`,
+     `f16→si8`, `f16→si32` (nosat), `bf16→si32`.
 
   4. **FpToUi** — `fp → unsigned int`. Supported pairs follow the contract
      table `lookupVMIFpToUIContract`: currently `f16→u8`.
 
-  5. **SiToFp** — `int → fp` (e.g. `i32 → f32`, `i8 → f16`).
+  5. **SiToFp** — `signed int → fp`. The currently supported pairs are
+     `si32 → f32` and `si8 → f16` (see the conversion contract matrix below).
 
   6. **IntWiden** — `int → int`, `|dst| > |src|`.
 
@@ -40,12 +41,14 @@
 - **syntax:**
   ```mlir
   %r = pto.vmi.vcvt %src {rounding = "H", saturate = "SAT"} : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
+  %r = pto.vmi.vcvt %src, %mask {rounding = "H", saturate = "SAT"} : !pto.vmi.vreg<L×T_src>, !pto.vmi.mask<L×Pg> -> !pto.vmi.vreg<L×T_dst>
   ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
   | `src` | `!pto.vmi.vreg<L×T_src>` | Source vector |
+  | `mask` (optional) | `!pto.vmi.mask<L×Pg>` | Conversion predicate over the same `L` source lanes; its granularity is the source element width (or `pred`), and it carries the **same layout as `src`** because one predicate lane describes one source lane. A cleared bit writes zero, so a masked conversion is not a merge with the previous destination value. |
 
 - **results:**
 
@@ -57,23 +60,60 @@
 
   | Attribute | Values | Valid for | Description |
   |---|---|---|---|
-  | `rounding` | `"R"` (nearest-even), `"A"` (away-from-zero), `"H"` (half-up), `"Z"` (toward-zero); for the `bf16x2→f4x2` contract pair the allowed set is `"R"`,`"A"`,`"F"` (floor), `"C"` (ceil), `"Z"` (toward-zero) — `"H"` is **rejected** | fp narrowing | Rounding mode |
-  | `saturate` | `"SAT"`, `"NOSAT"` | required for fp-narrow / int-narrow; for fp→si / fp→ui the requirement follows the vcvt contract's `requiresSat` (e.g. `f16→s8` required, `f16→s32` **forbidden** — no overflow possible; same-width `bf16→f16` required, same-width `f16→bf16` **forbidden**); the `bf16x2→f4x2` narrow has `requiresSat=false` — any `saturate` is **forbidden** | `SAT` clamps to ±max of the destination type; `NOSAT` performs a direct bit truncation of the result representation. |
+  | `rounding` | `"R"` (nearest-even), `"A"` (round to nearest, ties away from zero), `"H"` (half-up), `"Z"` (toward-zero); exceptions: the direct `f32→f16`/`f32→bf16` pairs allow only `"R"`/`"A"`/`"Z"` — `"H"` is **rejected** (the A5 F2F profile has no half-up form for these pairs); for the `bf16x2→f4x2` contract pair the allowed set is `"R"`,`"A"`,`"F"` (floor), `"C"` (ceil), `"Z"` (toward-zero) — `"H"` is **rejected** | fp narrowing | Rounding mode |
+  | `saturate` | `"SAT"`, `"NOSAT"` | required for fp-narrow / int-narrow; for fp→si / fp→ui the requirement follows the vcvt contract's `requiresSat` (e.g. `f16→si8` required, `f16→si32` **forbidden** — no overflow possible; same-width `bf16→f16` required, same-width `f16→bf16` **forbidden**); the `bf16x2→f4x2` narrow has `requiresSat=false` — any `saturate` is **forbidden**; `si32→si8` int-narrow accepts only `"NOSAT"` | For signed destinations, `SAT` clamps to `[min, max]`; for unsigned or signless destinations, it clamps to `[0, max]`. `NOSAT` performs a direct bit truncation of the result representation. |
 
-- **datatypes:** Source and destination from `{f32, f16, bf16, fp8_e4m3, fp8_e5m2, i32, i16, i8, ui32, ui16, ui8}`; packed carrier types `{!pto.bf16x2, !pto.f4E1M2x2, !pto.f4E2M1x2}` for the bf16x2↔f4x2 fp-to-fp pair (see contract `lookupVMIFpToFpContract`). `bf16x2` is **conversion-only** — it may not appear as a compute element type (`vfadd`/`vfmul`/`vcmp`/...).
+- **datatypes:** Floating-point source and destination types are
+  `{f32, f16, bf16, fp8_e4m3, fp8_e5m2, hif8}`. Integer types are
+  `{si32, si16, si8, i32, i16, i8, ui32, ui16, ui8}`. The explicitly signed
+  `si*` types are required when an integer is converted to floating point
+  (`SiToFp`). Signless `i*` and unsigned `ui*` types cannot be used as
+  `SiToFp` sources. Packed carrier types
+  `{!pto.bf16x2, !pto.f4E1M2x2, !pto.f4E2M1x2}` are valid only for the
+  bf16x2↔f4x2 fp-to-fp pair (see contract `lookupVMIFpToFpContract`).
+  `bf16x2` is **conversion-only** — it may not appear as a compute element
+  type (`vfadd`/`vfmul`/`vcmp`/...).
+
+### Conversion contract matrix
+
+| Direction | Source → destination | `rounding` | `saturate` |
+|---|---|---|---|
+| FpWiden | `f16→f32`, `bf16→f32`, `fp8_e4m3→f16`, `fp8_e4m3→bf16`, `fp8_e4m3→f32`, `fp8_e5m2→f16`, `fp8_e5m2→bf16`, `fp8_e5m2→f32`, `hif8→f16`, `hif8→bf16`, `hif8→f32` — the `fp8`/`hif8` → `f16`/`bf16` pairs are staged through an exact f32 widen by the lowering (A5 F2F has no direct 8→16 form) | forbidden | forbidden |
+| FpWiden (packed) | `f4E1M2x2→bf16x2`, `f4E2M1x2→bf16x2` | forbidden | forbidden |
+| FpNarrow | `f32→f16`, `f32→bf16` | optional: `R`/`A`/`Z` (`H` rejected — the A5 F2F profile has no half-up form for these pairs; lowering defaults to `R`) | required: `SAT`/`NOSAT` |
+| FpNarrow | `f32→fp8_e4m3`, `f32→fp8_e5m2`, `f16→fp8_e4m3`, `f16→fp8_e5m2`, `bf16→fp8_e4m3`, `bf16→fp8_e5m2` | optional: `R`/`A`/`H`/`Z` (lowering defaults to `R`); `f16`/`bf16` sources are staged through an exact f32 widen — A5 F2F has no direct 16→8 form | required: `SAT`/`NOSAT` |
+| FpNarrow (same width) | `bf16→f16` | optional: `R`/`A`/`H`/`Z` | required: `SAT`/`NOSAT` |
+| FpNarrow (same width) | `f16→bf16` | optional: `R`/`A`/`H`/`Z` | forbidden |
+| FpNarrow (packed) | `bf16x2→f4E1M2x2`, `bf16x2→f4E2M1x2` | optional: `R`/`A`/`F`/`C`/`Z` (`H` rejected) | forbidden |
+| FpToSi | `f32→si32`, `f32→si16`, `f16→si16`, `f16→si8`, `bf16→si32` | optional: `R`/`A`/`F`/`C`/`Z` | required: `SAT`/`NOSAT` |
+| FpToSi | `f16→si32` | optional: `R`/`A`/`F`/`C`/`Z` | forbidden |
+| FpToUi | `f16→ui8`  | optional: `R`/`A`/`F`/`C`/`Z` | required: `SAT`/`NOSAT` |
+| SiToFp | `si32→f32`, `si8→f16`  | forbidden | forbidden |
+| IntWiden | any `si8/si16/si32`, `ui8/ui16/ui32`, pair with a wider destination (e.g. `ui8→ui16`, `si16→si32`,); same-width is rejected | forbidden | forbidden |
+| IntNarrow | any `si8/si16/si32`, `ui8/ui16/ui32`, pair with a narrower destination (e.g. `ui32→ui8`, `si32→si16`) | forbidden | required: `SAT`/`NOSAT`; `si32→si8` accepts only `NOSAT` |
+
+
 - **lowering to `pto.mi`:**
 
   | Conversion | Physical lowering | `#mi` | `dep` |
   |---|---|---|---|
+  | SiToFp (`si32→f32`, current) | same-width `vcvt`, no part | `K` | `1` |
+  | SiToFp (`si8→f16`, current) | widen `vcvt` EVEN/ODD; a 1:1 physical arity (small logical shapes, `#mi` = `K`) stays one `EVEN` per part | `K`–`2K` | `1`–`2` |
   | 16↔32 (radix-2) | `2K × vcvt EVEN/ODD` + predicate `ppack`/`punpack` companion | `2K` | `2` |
+  | FpWiden (`8-bit→f16/bf16`, radix-2) | no single A5 `vcvt`; `vmi-lower-unified-to-legacy` expands it early into `extf 8-bit→f32` + `truncf f32→f16/bf16` | `2K` | `2` |
   | 8↔32 (radix-4) | widen: `UNPK_B8` + `vintlv` + `vcvt P0` + `punpack`; narrow: `PK4_B32` store (or `vselr` gather) + `ppack` | `2–3` | `2–3` |
   | f32→fp8 quant | `1 cast` + `PK4_B32` | `K` | `1` |
+  | f16/bf16→fp8 quant | staged: exact `vcvt` widen to f32 + f32→fp8 `vcvt{P0}` narrow (A5 F2F has no direct 16→8 form) | `~3K` | `2` |
   | f32→int8 quant | 3-stage cast + `PK4_B32` | `~3K` | `3` |
   | fp↔fp same-width (`bf16→f16`, `f16→bf16`) | `K × vcvt` (1:1, no part) | `K` | `1` |
   | fp→si / fp→ui | per contract pair: same-width 1:1, widen EVEN/ODD, narrow EVEN/ODD+Vor | `K`–`~3K` | `2`–`3` |
   | int↔int (same width) | `K × vtrc` or `K × vcvt` | `K` | `1` |
   | `bf16x2→f4x2` narrow (32→8) | source viewed as raw `bf16` lanes (2 bf16/bf16x2); `vcvt{P0}` 1:1, `rnd` set, **no sat**; reuse prior pairing `vbitcast` when present | `K` | `1` |
   | `f4x2→bf16x2` widen (8→32) | `vcvt{P0}` produces `bf16` lanes; result-side `vbitcast` reinterprets them as `bf16x2`; no rnd, no sat | `K` | `1` |
+
+  The width-family rows above do not imply that every source/destination
+  signedness combination is exposed for `SiToFp`; use the conversion contract matrix as
+  the normative list for signed-integer-to-floating-point conversions.
 
 - **example:**
   ```mlir
@@ -83,9 +123,15 @@
       -> !pto.vmi.vreg<128×f32>
   // → pto.as: 2 × pto.vcvt EVEN/ODD + ppack (parity companion)
 
-  // fp32 → fp16 narrow with half-up rounding
-  %n = pto.vmi.vcvt %y {rounding = "H", saturate = "SAT"}
+  // fp32 → fp16 narrow with away-from-zero rounding (H has no A5 form for
+  // the f32 → f16 / f32 → bf16 pairs)
+  %n = pto.vmi.vcvt %y {rounding = "A", saturate = "SAT"}
       : !pto.vmi.vreg<64×f32> -> !pto.vmi.vreg<64×f16>
+
+  // bf16 → fp8 quantized narrow (staged through an exact f32 widen; the
+  // rounding/saturate ride the f32 → fp8 leg)
+  %b8 = pto.vmi.vcvt %b {rounding = "H", saturate = "SAT"}
+      : !pto.vmi.vreg<64×bf16> -> !pto.vmi.vreg<64×fp8_e4m3>
 
   // ui8 -> i16 unsigned extension
   %z = pto.vmi.vcvt %a
@@ -99,9 +145,9 @@
   %t = pto.vmi.vcvt %v {saturate = "NOSAT"}
       : !pto.vmi.vreg<64×i32> -> !pto.vmi.vreg<64×i8>
 
-  // f32 → i32 fp-to-si (saturate required)
+  // f32 → si32 fp-to-si (saturate required)
   %r = pto.vmi.vcvt %x {saturate = "SAT"}
-      : !pto.vmi.vreg<64×f32> -> !pto.vmi.vreg<64×i32>
+      : !pto.vmi.vreg<64×f32> -> !pto.vmi.vreg<64×si32>
 
   // bf16 → f16 same-width fp-to-fp (VPTO contract pair, routed via FpNarrow;
   // saturate required)
@@ -111,6 +157,14 @@
   // f16 → u8 fp-to-ui (unsigned; contract pair, saturate required)
   %u = pto.vmi.vcvt %x {saturate = "SAT"}
       : !pto.vmi.vreg<128×f16> -> !pto.vmi.vreg<128×ui8>
+
+  // si32 → f32 signed-integer to floating-point
+  %sf = pto.vmi.vcvt %s
+      : !pto.vmi.vreg<64×si32> -> !pto.vmi.vreg<64×f32>
+
+  // si8 → f16 signed-integer to floating-point
+  %hf = pto.vmi.vcvt %b8
+      : !pto.vmi.vreg<128×si8> -> !pto.vmi.vreg<128×f16>
 
   // bf16x2 → f4x2 quantized narrow (rounding required; saturate forbidden;
   // bf16x2 arrives via a physical-noop vinterpret_cast pairing of 2 bf16 lanes)
@@ -128,7 +182,6 @@
 - **notes:**
   - `vcvt` **does not change lane count** — `src.L == dst.L` always. The
     physical register count `K` changes because `bitwidth(T)` changes.
-  - Integer signedness is determined by the **element type**.
   - The `part`/`parity`/`width` axes are lowering-only; the user never writes
     `EVEN`/`ODD`/`P0..P3`.
   - Radix-4 (8↔32) is **not** a stacked predicate chain and **not** a UB

@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,81 +6,28 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Shared private helpers for the PTODSL op modules: mode gates,
 normalizers, shared emitters, and the coercion/type-inference hub."""
 
-from functools import wraps
-import warnings
-from ._diagnostics import (
-    PTODSLDeprecationWarning,
-    explicit_mode_required_with_context_error,
-    make_tensor_view_invalid_layout_error,
-    make_tensor_view_missing_metadata_error,
-    tile_row_alignment_error,
-)
-from ._host_tensors import resolve_tensor_data_entry
-from ._scalar_coercion import coerce_scalar_to_type, materialize_scalar_literal
-from ._scalar_adaptation import (
-    classify_runtime_scalar_type,
-    coerce_runtime_i1_value,
-    coerce_runtime_index_value,
-    coerce_runtime_integer_value,
-)
-from ._runtime_scalar_ops import emit_runtime_binary_op
-from ._surface_values import (
-    AllocatedBufferValue,
-    MaskResultValue,
-    PartitionTensorViewValue,
-    TensorViewValue,
-    TileSliceValue,
-    TileValue,
-    _coerce_index_value,
-    _static_index_dims,
-    _unwrap_sequence,
-    compose_partition_spec,
-    emit_as_ptr,
-    infer_tile_element_type,
-    is_runtime_scalar_ir_type,
-    parse_tile_type_metadata,
-    resolve_address_access,
-    unwrap_surface_value,
-    wrap_surface_value,
-)
-from ._types import (
-    _is_struct_type,
-    _isinstance_pto_type,
-    _materialize_integer_literal,
-    _normalize_address_space,
-    _resolve,
-    _strip_integer_signedness,
-    mask_type,
-    part_tensor_view_type,
-    part_tensor_view_type_from_dims,
-    ptr,
-    tensor_view_type,
-    tensor_view_type_from_dims,
-    vreg_type,
-)
-from ptoas.mlir.dialects import arith, pto as _pto
-from ptoas.mlir.ir import (
-    Attribute,
-    BF16Type,
-    F16Type,
-    F32Type,
-    Float8E4M3FNType,
-    Float8E5M2Type,
-    FloatAttr,
-    IndexType,
-    IntegerAttr,
-    IntegerType,
-    MemRefType,
-    Operation,
-    Type,
-    TypeAttr,
-    UnitAttr,
-    VectorType,
-)
+from ._ops_imports import *  # noqa: F401,F403
 
+
+
+
+
+def _validate_reduction_element_type(elem_type, *, context: str):
+    """Keep logical and physical row reductions on the A5 type contract."""
+    widths = (16, 32)
+    if IntegerType.isinstance(elem_type):
+        if IntegerType(elem_type).width in widths:
+            return
+    elif F16Type.isinstance(elem_type) or F32Type.isinstance(elem_type):
+        return
+    raise TypeError(
+        f"{context} requires a 16-bit or 32-bit integer, f16, or f32 source vector; "
+        f"got {elem_type}; explicitly convert unsupported inputs before reduction"
+    )
 
 
 _PIPE_ALIASES = {
@@ -191,6 +139,27 @@ def _require_target_arch(surface: str, allowed: set[str]):
         raise ValueError(f"{surface} is only supported for {expected}; got target={target!r}")
 
 
+def _current_backend():
+    try:
+        from ._tracing.active import current_session
+        session = current_session()
+    except Exception:
+        return None
+    if session is None:
+        return None
+    current_module_spec = getattr(session, "current_function_module_spec", session.module_spec)
+    return getattr(current_module_spec, "backend", None)
+
+
+def _require_backend(surface: str, allowed: set[str]):
+    backend = _current_backend()
+    if backend is None:
+        return
+    if backend not in allowed:
+        expected = ", ".join(f"backend='{name}'" for name in sorted(allowed))
+        raise ValueError(f"{surface} is only supported for {expected}; got backend={backend!r}")
+
+
 def _require_simt_subkernel(surface: str):
     try:
         from ._tracing.active import current_session
@@ -223,8 +192,18 @@ def _explicit_mode_only(surface: str):
 
 def castptr(int_addr, result_ptr_type):
     """``pto.castptr`` – cast an integer address to a typed PTO pointer."""
+    result_type = _resolve(result_ptr_type)
+    raw_addr = unwrap_surface_value(int_addr)
+    # Generic PTO IR uses signless i64 for pointer carriers. Keep the
+    # authoring surface independent of legacy VMI signedness spelling.
+    if IntegerType.isinstance(raw_addr.type) and not IntegerType.isinstance(result_type):
+        raw_addr = coerce_runtime_integer_value(
+            raw_addr, IntegerType.get_signless(64), context="pto.castptr address"
+        )
+    if IntegerType.isinstance(result_type):
+        result_type = IntegerType.get_signless(64)
     return wrap_surface_value(
-        _pto.CastPtrOp(_resolve(result_ptr_type), unwrap_surface_value(int_addr)).result
+        _pto.CastPtrOp(result_type, raw_addr).result
     )
 
 
@@ -233,7 +212,7 @@ def addptr(base_ptr, index_offset):
     return wrap_surface_value(
         _pto.AddPtrOp(
             unwrap_surface_value(base_ptr),
-            _coerce_index(index_offset, context="addptr(ptr, offset)"),
+            _coerce_element_offset(index_offset, context="addptr(ptr, offset)"),
         ).result
     )
 
@@ -264,20 +243,79 @@ def _normalize_vcvt_round_mode(mode, *, context: str):
         raise ValueError(f"{context} does not support rnd {mode!r}; expected one of {expected}")
     return normalized
 
+# AscendC DivAlgo spellings -> generated PTO_DivPrecisionEnum case names. The
+# IR token (0ulp_ftz_true, ...) is what callers write, while dir(enum_cls) only
+# exposes the C++ case names.
+# C++ case name -> IR mnemonic, used only for error messages.
+_DIV_ALGO_CASE_SPELLINGS = {
+    "Intrinsic": "intrinsic",
+    "DiffCompensation": "diff_compensation",
+    "Precision1UlpFtzTrue": "precision_1ulp_ftz_true",
+    "Precision0UlpFtzTrue": "precision_0ulp_ftz_true",
+    "Precision0UlpFtzFalse": "precision_0ulp_ftz_false",
+    "Precision1UlpFtzFalse": "precision_1ulp_ftz_false",
+}
+
+_DIV_ALGO_CASE_NAMES = {
+    # canonical DivAlgo spelling
+    "intrinsic": "Intrinsic",
+    "diffcompensation": "DiffCompensation",
+    "precision1ulpftztrue": "Precision1UlpFtzTrue",
+    "precision0ulpftztrue": "Precision0UlpFtzTrue",
+    "precision0ulpftzfalse": "Precision0UlpFtzFalse",
+    "precision1ulpftzfalse": "Precision1UlpFtzFalse",
+    # accepted shorthands
+    "1ulpftztrue": "Precision1UlpFtzTrue",
+    "0ulpftztrue": "Precision0UlpFtzTrue",
+    "0ulpftzfalse": "Precision0UlpFtzFalse",
+    "1ulpftzfalse": "Precision1UlpFtzFalse",
+    "ulp1ftztrue": "Precision1UlpFtzTrue",
+    "ulp0ftztrue": "Precision0UlpFtzTrue",
+    "ulp0ftzfalse": "Precision0UlpFtzFalse",
+    "ulp1ftzfalse": "Precision1UlpFtzFalse",
+}
+
+
+def _allowed_enum_spellings(enum_cls):
+    """Return the user-facing spellings for an enum, not the C++ case names."""
+    spellings = []
+    for name in dir(enum_cls):
+        if name.startswith("_") or name == "name":
+            continue
+        if not name[:1].isupper():
+            continue
+        spelling = _DIV_ALGO_CASE_SPELLINGS.get(name)
+        spellings.append(spelling if spelling else name)
+    return ", ".join(spellings)
+
+
 def _normalize_enum_attr(value, *, enum_cls, attr_cls, context: str):
     if value is None or isinstance(value, Attribute):
         return value
     token = value if isinstance(value, str) else getattr(value, "name", None)
     if token is not None:
         normalized = "".join(ch for ch in str(token) if ch.isalnum()).lower()
+        alias = _DIV_ALGO_CASE_NAMES.get(normalized)
+        if alias is not None and hasattr(enum_cls, alias):
+            return attr_cls.get(getattr(enum_cls, alias))
         candidates = [
             name for name in dir(enum_cls)
             if not name.startswith("_")
             and "".join(ch for ch in name if ch.isalnum()).lower() == normalized
         ]
+        # ``high_precision`` predates the DivAlgo selector; point the caller at
+        # the family-specific replacement instead of just listing case names.
+        if normalized == "highprecision":
+            raise ValueError(
+                f"{context} no longer accepts 'high_precision'; pick an explicit "
+                f"algorithm: 'precision_0ulp_ftz_true' for the compensated "
+                f"residual search, 'precision_0ulp_ftz_false' for the normalised "
+                f"0-ULP path, or 'precision_1ulp_ftz_false' for the 1-ULP path "
+                f"(see docs/user_guide/08-compute-operations.md)")
         if not candidates:
-            allowed = ", ".join(name for name in dir(enum_cls) if not name.startswith("_"))
-            raise ValueError(f"{context} does not support {value!r}; expected one of {allowed}")
+            raise ValueError(
+                f"{context} does not support {value!r}; expected one of "
+                f"{_allowed_enum_spellings(enum_cls)}")
         value = getattr(enum_cls, candidates[0])
     return attr_cls.get(value)
 
@@ -477,19 +515,58 @@ def _pointer_element_type(ptr_value, *, context: str):
             raise TypeError(f"{context} expects a PTO pointer or memref-backed address, got {raw_type}") from exc
 
 
-def _coerce_index(value, *, context: str):
+def _coerce_scalar_operand(value, *, context: str, coerce, expectation: str):
+    """Unwrap one authored operand and normalize it, reporting the surface type."""
     raw_value = unwrap_surface_value(value)
     try:
-        return coerce_runtime_index_value(raw_value, context=context)
+        return coerce(raw_value, context=context)
     except TypeError as exc:
         if hasattr(raw_value, "type"):
-            raise TypeError(f"{context} expects an index-like scalar, got {raw_value.type}") from exc
+            raise TypeError(f"{context} expects {expectation}, got {raw_value.type}") from exc
         raise
+
+
+def _coerce_index(value, *, context: str):
+    return _coerce_scalar_operand(
+        value,
+        context=context,
+        coerce=coerce_runtime_index_value,
+        expectation="an index-like scalar",
+    )
+
+
+def _coerce_element_offset(value, *, context: str):
+    """Normalize an element offset operand; an integer keeps its own width.
+
+    Unlike an index-shaped operand (a loop bound, a tile coordinate), an element
+    offset of pto.addptr and of the pointer-based memory ops may be a signless
+    integer, so no index conversion is inserted here.
+    """
+    return _coerce_scalar_operand(
+        value,
+        context=context,
+        coerce=coerce_runtime_element_offset_value,
+        expectation="an index or integer element offset",
+    )
+
+
+def _coerce_vunpack_part(part, *, context: str):
+    if isinstance(part, int) and not isinstance(part, bool):
+        static_part = part
+    else:
+        try:
+            static_part = _try_get_constant_index(part)
+        except TypeError:
+            static_part = None
+    if static_part is not None and static_part not in {0, 1}:
+        raise ValueError(f"{context} expects part 0 (lower) or 1 (higher), got {static_part}")
+    return _coerce_index(part, context=context)
 
 
 def init_align():
     """``pto.init_align`` – materialize the initial alignment state."""
     return wrap_surface_value(_pto.InitAlignOp(_pto.AlignType.get()).result)
+
 
 def _emit_unary_vec_op(op_ctor, inp, mask):
     _reject_low_precision_vreg_operands(inp, context=f"pto.{_surface_name_for_op_ctor(op_ctor)}(...)")
@@ -607,15 +684,15 @@ def _constant_like(value, mlir_type):
     value = unwrap_surface_value(value)
     if hasattr(value, "type"):
         return value
-    if isinstance(value, float):
-        return arith.ConstantOp(mlir_type, FloatAttr.get(mlir_type, value)).result
-    if IntegerType.isinstance(mlir_type):
-        return _materialize_integer_literal(mlir_type, value)
-    return arith.ConstantOp(mlir_type, value).result
+    return materialize_scalar_literal(
+        value, mlir_type, context="PTO operation scalar operand"
+    )
 
 
 def _index_zero():
-    return arith.ConstantOp(IndexType.get(), 0).result
+    return materialize_scalar_literal(
+        0, IndexType.get(), context="PTO operation index operand"
+    )
 
 
 def _tile_slice_linear_offset(tile_slice: TileSliceValue):
@@ -635,9 +712,9 @@ def _tile_slice_linear_offset(tile_slice: TileSliceValue):
         return row * stride + col
 
     row_value = _coerce_index(row, context="tile slice pointer lowering")
-    row_stride = arith.MulIOp(row_value, arith.ConstantOp(IndexType.get(), stride).result).result
+    row_stride = emit_runtime_binary_op("mul", row_value, stride)
     col_value = _coerce_index(col, context="tile slice pointer lowering")
-    return arith.AddIOp(row_stride, col_value).result
+    return emit_runtime_binary_op("add", row_stride, col_value)
 
 
 def _tile_slice_ptr(tile_slice: TileSliceValue):
@@ -688,8 +765,8 @@ def _elements_per_vreg(elem_type):
 def _infer_vreg_metadata(vector_value):
     raw_type = unwrap_surface_value(vector_value).type
     try:
-        vreg_type = _pto.VRegType(raw_type)
-        return vreg_type.lanes, vreg_type.element_type
+        vreg = _pto.VRegType(raw_type)
+        return vreg.lanes, vreg.element_type
     except Exception:
         text = str(raw_type)
         if not text.startswith("!pto.vreg<") or "x" not in text:
@@ -732,6 +809,24 @@ def _reject_low_precision_vreg(value, *, context: str) -> None:
 def _reject_low_precision_vreg_operands(*values, context: str) -> None:
     for value in values:
         _reject_low_precision_vreg(value, context=context)
+
+
+def _require_integer32_vreg_operands(*values, context: str) -> None:
+    """Require carry-family vector operands to use 32-bit integer elements."""
+    for value in values:
+        raw_value = unwrap_surface_value(value)
+        try:
+            _, elem_type = _infer_vreg_metadata(raw_value)
+        except TypeError:
+            continue
+        if not IntegerType.isinstance(elem_type) or IntegerType(elem_type).width != 32:
+            raise TypeError(f"{context} requires 32-bit integer vector elements, got {elem_type}")
+
+
+def _require_b32_mask(mask, *, context: str) -> None:
+    granularity_, mask_type_ = _infer_mask_metadata(mask, context=context)
+    if granularity_ != 32:
+        raise TypeError(f"{context} requires a b32 mask, got {mask_type_}")
 
 
 def _element_bytewidth(elem_type):
@@ -826,7 +921,11 @@ def _coerce_i1(value, *, context: str):
 
 
 def _i64_zero():
-    return arith.ConstantOp(IntegerType.get_signless(64), 0).result
+    return materialize_scalar_literal(
+        0,
+        IntegerType.get_signless(64),
+        context="PTO operation i64 operand",
+    )
 
 
 def _coerce_scalar_like_vector_element(vector_value, scalar_value, *, context: str):
@@ -945,7 +1044,6 @@ _ST_L2_CACHE_CONTROL_VALUES = {
     "wtsred": 15,
 }
 _ROUNDING_TOKENS = {"r", "a", "f", "c", "z", "o", "h"}
-_SATURATION_TOKENS = {"sat", "nosat"}
 
 
 def _optional_signedness_attr(signedness, *, context: str):
@@ -982,16 +1080,6 @@ def _normalize_mte_store_l2_cache(l2_cache, *, context: str):
 
 def _rounding_attr(value, *, context: str):
     return _simt_enum_attr("rounding", value, supported=_ROUNDING_TOKENS, context=context)
-
-
-def _saturation_attr(value, *, context: str):
-    normalized = _normalize_token(value, context=context)
-    aliases = {"on": "sat", "off": "nosat", "sat": "sat", "nosat": "nosat"}
-    token = aliases.get(normalized)
-    if token is None:
-        expected = ", ".join(sorted((*_SATURATION_TOKENS, "on", "off")))
-        raise ValueError(f"{context} does not support {value!r}; expected one of {expected}")
-    return _simt_enum_attr("saturation", token, supported=_SATURATION_TOKENS, context=context)
 
 
 def _simt_enum_attr(kind, value, *, supported: set[str], context: str):
@@ -1035,18 +1123,3 @@ def _validate_redux_signedness(value_type, signedness, *, require_for_integer: b
 def _validate_integer_signedness_only(value_type, signedness, *, context: str):
     if signedness is not None and not IntegerType.isinstance(value_type):
         raise TypeError(f"{context} does not accept signedness for non-integer values")
-
-
-def _validate_convert_signedness(src_type, dst_type, signedness, *, context: str):
-    src_int = IntegerType.isinstance(src_type)
-    dst_int = IntegerType.isinstance(dst_type)
-    if src_int and dst_int:
-        raise TypeError(f"{context} does not support integer-to-integer conversion")
-    if src_int or dst_int:
-        if signedness is None:
-            raise TypeError(
-                f"{context} requires signedness='signed' or 'unsigned' "
-                "when converting to or from integer types")
-        return
-    if signedness is not None:
-        raise TypeError(f"{context} does not accept signedness for floating-point or packed conversion")

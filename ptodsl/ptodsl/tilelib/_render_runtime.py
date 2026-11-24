@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,6 +6,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """
 TileLib render runtime.
 
@@ -46,6 +48,7 @@ from ptoas.mlir.ir import Attribute, InsertionPoint, Location, Module, StringAtt
 class _TemplateTileConfig:
     b_layout: str
     s_layout: str
+    s_fractal_size: int
 
 
 class _TemplateTile(TileValue):
@@ -74,6 +77,7 @@ class _TemplateTile(TileValue):
         self._template_config = _TemplateTileConfig(
             b_layout=spec.b_layout,
             s_layout=spec.s_layout,
+            s_fractal_size=spec.s_fractal_size,
         )
         self.pad_value = getattr(spec, "pad_value", "Null")
 
@@ -84,6 +88,14 @@ class _TemplateTile(TileValue):
     @property
     def config(self):
         return self._template_config
+
+    @property
+    def valid_shape_static(self):
+        """Valid shape from the ``TileSpec`` as a plain tuple.
+
+        Trace-time only, so template bodies can branch on it without emitting IR.
+        """
+        return self._template_static_valid_shape
 
 
 # ── tracing runtime ────────────────────────────────────────────────────────────────

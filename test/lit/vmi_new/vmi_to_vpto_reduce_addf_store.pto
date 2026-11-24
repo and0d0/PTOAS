@@ -28,12 +28,12 @@ module {
     %narrow = pto.vmi.vcvt %sum {saturate = "SAT"}
         : !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xbf16>
     pto.vmi.vstore %narrow, %dst_bf16[%aligned_offset], %mask64
-        : !pto.vmi.vreg<64xbf16>, !pto.ptr<bf16, ub>, !pto.vmi.mask<64xpred>
+        : !pto.vmi.vreg<64xbf16>, !pto.ptr<bf16, ub>, index, !pto.vmi.mask<64xpred>
     %reduce = pto.vmi.vcadd %sum, %mask64 {reassoc}
         : !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64xpred>
         -> !pto.vmi.vreg<1xf32>
     pto.vmi.vstore %reduce, %dst[%aligned_offset], %mask1
-        : !pto.vmi.vreg<1xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<1xpred>
+        : !pto.vmi.vreg<1xf32>, !pto.ptr<f32, ub>, index, !pto.vmi.mask<1xpred>
     return
   }
 }
@@ -42,7 +42,7 @@ module {
 // ASSIGN: %[[C64:.*]] = arith.constant 64 : index
 // ASSIGN: %[[MASK32:.*]] = pto.vmi.create_mask %[[C64]]
 // ASSIGN-SAME: -> !pto.vmi.mask<64xb32, #pto.vmi.layout<contiguous>>
-// ASSIGN: %[[SUM:.*]] = pto.vmi.addf
+// ASSIGN: %[[SUM:.*]] = pto.vmi.vadd
 // ASSIGN: %[[NARROW:.*]] = pto.vmi.truncf %[[SUM]]
 // ASSIGN-SAME: -> !pto.vmi.vreg<64xbf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
 // ASSIGN: %[[MASK16:.*]] = pto.vmi.create_mask %[[C64]]
@@ -64,10 +64,10 @@ module {
 // LOWER-SAME: %[[OFF:[^)]+]]: index
 // LOWER: %[[C16:.*]] = arith.constant 16 : index
 // LOWER: %[[ALIGNED_OFF:.*]] = arith.muli %[[OFF]], %[[C16]] : index
-// LOWER: %[[REDUCE_MASK:.*]] = pto.pset_b32 "PAT_ALL"
 // LOWER: %[[ALL:.*]] = pto.pset_b32 "PAT_ALL"
 // LOWER: %[[SUM:.*]] = pto.vadd %[[SRC]], %[[RHS]], %[[ALL]]
-// LOWER: pto.vsts {{.*}}, %[[DST_BF16]][%[[ALIGNED_OFF]]], {{.*}} {dist = "PK_B32"}
-// LOWER: %[[REDUCED:.*]] = pto.vcadd %[[SUM]], %[[REDUCE_MASK]]
+// LOWER: pto.vcvt {{.*}} {part = "EVEN", rnd = "R", sat = "SAT"}
+// LOWER: pto.vsts {{.*}}, %[[DST_BF16]][%[[ALIGNED_OFF]]], {{.*}} {dist = "PK_B32"} : !pto.vreg<128xbf16>, !pto.ptr<bf16, ub>, index, !pto.mask<b32>
+// LOWER: %[[REDUCED:.*]] = pto.vcadd %[[SUM]], %[[ALL]]
 // LOWER: %[[STORE_MASK:.*]] = pto.pset_b32 "PAT_VL1"
 // LOWER: pto.vsts %[[REDUCED]], %[[DST]][%[[ALIGNED_OFF]]], {{.*}} {dist = "1PT_B32"}

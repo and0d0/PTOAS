@@ -27,7 +27,7 @@ Auxiliary tiles:
 import numpy as np
 
 M = 16
-K = 64
+K = 1024
 GROUP_SIZE = 32
 EMAX = 8  # e4m3 max exponent
 GROUP_COLS = K // GROUP_SIZE
@@ -66,8 +66,7 @@ def fp32_to_fp8e4m3fn_bytes(arr):
     overflow = is_normal & (fp8_exp > 15)
     result = np.where(overflow, (sign << np.int32(7)) | np.int32(0x7E), result)
 
-    # Underflow (fp8_exp < 0 for normals, or subnormal): 0 (ignore subnormal fp8 for simplicity,
-    # since source range [-10,10]*scaling rarely produces fp8 subnormals).
+    # FP8 subnormals are handled separately below.
     inrange = is_normal & (fp8_exp >= 0) & (fp8_exp <= 15)
 
     # For in-range normals: mantissa fp32 (23 bits, with implicit 1) -> fp8 (3 bits).
@@ -95,7 +94,12 @@ def fp32_to_fp8e4m3fn_bytes(arr):
     is_inf = (exp_f32 == 0xFF) & (mant_f32 == 0)
     result = np.where(is_inf, (sign << np.int32(7)) | np.int32(0x7E), result)
 
-    # Zero (fp32 zero): 0.
+    # E4M3 subnormals have a fixed 2^-9 spacing; round ties to even,
+    # including the boundary that rounds up to the smallest normal (0x08).
+    subnormal = np.abs(arr) < np.float32(2.0 ** -6)
+    subnormal_values = np.where(subnormal, np.abs(arr), np.float32(0.0))
+    subnormal_bits = np.rint(subnormal_values * np.float32(512.0)).astype(np.int32)
+    result = np.where(subnormal, (sign << np.int32(7)) | subnormal_bits, result)
     return result.astype(np.uint8).view(np.int8)
 
 
@@ -115,17 +119,13 @@ def fp32_to_fp8_element(data_abs_max, emax=EMAX):
     return e8m0, scaling
 
 
-def nd_to_zz(exp):
-    rows, cols = exp.shape
-    padded_rows = ((rows + 15) // 16) * 16
-    padded = np.zeros((padded_rows, cols), dtype=np.uint8)
-    padded[:rows, :] = exp
-    return padded.reshape(padded_rows // 16, 16, cols // 2, 2).transpose(0, 2, 1, 3).reshape(-1)
-
 
 def main():
     np.random.seed(23)
     src = np.random.uniform(-10, 10, [M, K]).astype(np.float32)
+    # Distinct group exponents make an incorrect ZZ permutation observable.
+    shifts = (np.arange(M * GROUP_COLS) % 9 - 4).reshape(M, GROUP_COLS)
+    src *= np.repeat(np.exp2(shifts).astype(np.float32), GROUP_SIZE, axis=1)
     src.tofile("input.bin")
 
     # Per-group absmax along last dim (group_size=32).
@@ -150,8 +150,6 @@ def main():
 
     scaling_tile = scaling_per_group.reshape(M, GROUP_COLS).astype(np.float32)
     scaling_tile.tofile("scaling.bin")
-
-    nd_to_zz(exp_tile).tofile("exp_zz.bin")
 
     # dst: fp8 e4m3 = clamp(src * scaling, -448, 448), packed as int8 bytes.
     # Pure-numpy fp32 -> fp8 e4m3fn (round-to-nearest-even), no ml_dtypes needed.

@@ -17,15 +17,16 @@ module {
     %c1 = arith.constant 1 : index
     %stride20 = arith.constant 20 : index
     %x = pto.vmi.vload %base[%off], %stride20 {group = 8}
-        : !pto.ptr<f32, ub> -> !pto.vmi.vreg<128xf32>
+        : !pto.ptr<f32, ub>, index -> !pto.vmi.vreg<128xf32>
     %sum = pto.vmi.vcadd %x, %mask
         {group = 8, reassoc}
         : !pto.vmi.vreg<128xf32>, !pto.vmi.mask<128xpred>
         -> !pto.vmi.vreg<8xf32>
     pto.vmi.vstore %sum, %dst[%off], %c1 {group = 8}
-        : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>
+        : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>, index
     return
   }
 }
 
-// CHECK: VMI-LAYOUT-CONTRACT: pto.vmi.group_load group_size 16 requires constant positive row_stride divisible by 8 f32 elements for the block8 stride plan; stable gather fallback is not implemented
+    // CHECK: VMI-LAYOUT-CONTRACT: pto.vmi.group_load with a row stride requires one group to be 32, 64, or 128 bytes and the row stride to be a whole number of 32-byte blocks
+    // CHECK-SAME: got group = 64 bytes, row_stride = 80 bytes

@@ -6,8 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
-// RUN: ptoas --cann-output-version=9.0.0-beta.1 --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @canonical_integer_memory(
@@ -16,12 +15,12 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     pto.vecscope {
       %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
       %value, %next_src = pto.vlds %src[%c0]
-          : !pto.ptr<si32, ub> -> !pto.vreg<64xsi32>, !pto.ptr<si32, ub>
+          : !pto.ptr<si32, ub>, index -> !pto.vreg<64xsi32>, !pto.ptr<si32, ub>
       %next_dst = pto.vsts %value, %dst[%c0], %mask {dist = "NORM_B32"}
-          : !pto.vreg<64xsi32>, !pto.ptr<si32, ub>, !pto.mask<b32>
+          : !pto.vreg<64xsi32>, !pto.ptr<si32, ub>, index, !pto.mask<b32>
           -> !pto.ptr<si32, ub>
       pto.vsts %value, %next_dst[%c0], %mask {dist = "NORM_B32"}
-          : !pto.vreg<64xsi32>, !pto.ptr<si32, ub>, !pto.mask<b32>
+          : !pto.vreg<64xsi32>, !pto.ptr<si32, ub>, index, !pto.mask<b32>
     }
     return
   }
@@ -52,7 +51,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
           : !pto.ptr<ui64, ub>, i16, i16, !pto.mask<b32>
           -> !pto.vreg<32xui64>
       pto.vsts %value, %dst[%offset], %mask {dist = "PK_B64"}
-          : !pto.vreg<32xui64>, !pto.ptr<ui64, ub>, !pto.mask<b32>
+          : !pto.vreg<32xui64>, !pto.ptr<ui64, ub>, index, !pto.mask<b32>
     }
     return
   }

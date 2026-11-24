@@ -147,6 +147,12 @@ pto.mad %lhs, %rhs, %dst, %m, %n, %k
 - Packed 4-bit integer data requires `%k` to select an even number of K
   elements.
 
+The `dsl-st` kernels pair this load with `pto.tmatmul`; their
+`dst_group=(1, 1, N, 0)` means `(group_count=1, loop2_stride=1,
+loop3_stride=N, loop4_stride=0)` (single group, L0C write-back grouped by
+the N axis) — the same `(group_count, loop2_stride, loop3_stride,
+loop4_stride)` tuple semantics as `pto.mte_gm_l1_frac` in the user guide.
+
 **Example:**
 
 ```mlir
@@ -355,6 +361,12 @@ pto.mte_gm_l1 %src, %dst, %len_burst
 - `nburst(...)` is required.
 - Each `loop(...)` group must provide all three operands.
 - For a contiguous 16-element f16 vector, use `%len_burst = 32`.
+- `%len_burst` is a byte count; the L1 side of the transfer is written in whole
+  32B blocks, so the bytes from `%len_burst` up to the next 32B boundary belong to
+  the burst as well and carry source data. This op has no `pad(...)` group, so
+  use a 32B-aligned `%len_burst` when the tail must be deterministic.
+  *Diagnostics*: a constant `%len_burst` that is not a multiple of 32 is reported
+  with a warning.
 
 **Example:**
 
@@ -807,6 +819,136 @@ pto.mte_l1_l0b %l1_b, %l0b, %c0_i64, %c4_i64, %c16_i64,
 
 ---
 
+### `pto.mte_l1_l0a_3d`
+
+- **syntax:**
+```mlir
+pto.mte_l1_l0a_3d %src, %dst,
+    %fmap_h, %fmap_w, %filter_h, %filter_w, %channel_size,
+    %stride_h, %stride_w, %dilation_h, %dilation_w,
+    %pad_top, %pad_bottom, %pad_left, %pad_right,
+    %m_start, %k_start, %repeat_time, %repeat_mode, %dst_m_position
+    [, %repeat_source_stride, %dst_stride]
+  : !pto.ptr<T, l1>, !pto.ptr<T, l0a>
+```
+- **semantics:** Load an NC1HWC0 image from L1 `l1` and emit an im2col
+  `M x K` left tile into `l0a` for MMAD. The hardware derives
+  `M = H_o x W_o` and `K = channel_size x filter_h x filter_w` from the
+  convolution geometry (fmap/filter/stride/dilation/pad): it slides the
+  `filter_h x filter_w` window over the virtually padded feature map and
+  reads `channel_size` channels per window position, so each output row is
+  one window position flattened in `(kh, kw, c)` order (channel fastest:
+  `c` strides by 1, then `kw`, then `kh`). Out-of-bounds samples are filled
+  with the padding value. The
+  semantic wrapper expands to `set_l3d_fmatrix` / `set_padding` / `set_l3d_rpt` /
+  `load_l1_to_l0a_3d` (set* first, load last), targeting the A5
+  `LOAD L1 TO L0A 3Dv2` intrinsic family.
+
+**Parameter Table:**
+
+| Parameter | Width | Description |
+|-----------|-------|-------------|
+| `%src` | ptr | NC1HWC0 image source in `l1` |
+| `%dst` | ptr | im2col destination in `l0a` |
+| `%fmap_h`, `%fmap_w` | i64 | Source feature-map height / width (elements) |
+| `%filter_h`, `%filter_w` | i64 | Convolution kernel height / width |
+| `%channel_size` | i64 | Channel count of one feature map (third dimension) |
+| `%stride_h`, `%stride_w` | i64 | Window stride; default 1 |
+| `%dilation_h`, `%dilation_w` | i64 | Window sampling dilation; the interface requires an explicit value in `1..255` (measured on camodel: 0 behaves as 1, but 0 is rejected at verification); default 1 |
+| `%pad_top` .. `%pad_right` | i64 | Virtual padding on each side; default 0 |
+| `%m_start`, `%k_start` | i64 | Result-matrix start offsets; default 0 |
+| `%repeat_time` | i64 | Hardware repeat count; default 1 |
+| `%repeat_mode` | i64 | Repeat direction: 0 = M, 1 = K; default 0 |
+| `%dst_m_position` | i64 | Destination fractal-block start; default 0 |
+| `%repeat_source_stride`, `%dst_stride` | i64 | Optional stride pair; when omitted the expansion derives the hardware defaults from the load geometry |
+| `transpose` | attr | Optional boolean destination transpose |
+
+**Constraints:**
+
+- `%src` must be in `l1`, `%dst` must be in `l0a`.
+- Element type must be f16/bf16/f32 or 8-bit integer; the intrinsic variant
+  follows the element type (`f16` → `.f16`, `bf16` → `.bf16`, etc.).
+- Compile-time-constant operands are range-checked at verification:
+  `fmap_h/fmap_w` in `1..32767`, `filter_h/filter_w` in `1..511`,
+  `channel_size` in `1..65535`, `stride` in `1..63`, `dilation` in `1..255`,
+  `pad` in `0..255`, `m_start` in `0..32767`, `k_start` in `0..65535`,
+  `repeat_time` in `1..255`, `repeat_mode` in `0..1`,
+  `dst_m_position` in `0..65535`, `dst_stride` in `1..65535`; dynamic operands
+  defer to the hardware. The expansion normalizes dynamic inputs in three
+  distinct ways, documented so callers know which misuse is caught where:
+  - `dilation = 0` is normalized to `1` (camodel-measured behavior, not ISA spec);
+  - zero dynamic `stride` / `repeat_time` is clamped to `1` so the LLVM
+    `udiv` never sees a zero divisor (poison), matching the rejected
+    constant-zero cases — callers must still guarantee these values are
+    >= 1 for meaningful results;
+  - a dynamic padded-vs-effective geometry that is undersized (`padded <
+    effective`) clamps the difference to `0` (signed), so the derived M
+    cannot wrap to a huge value; callers must keep `padded >= effective`
+    for meaningful results.
+- Capacity rules (all against constant geometry): the source feature map must
+  fit the L1 image budget (`fmap_h * fmap_w * channel_size * element_bytes
+  <= 512 KB`), the filter footprint must be below `2^16` elements, and the
+  derived M extent must be below `2^15` rows; the derived `m_step`/`k_step`
+  must fit their 16-bit control fields (`1..65535`).
+- `k_start` must be 0: split-K is not supported by the current 3D load
+  lowering.
+- `repeat_time > 1` requires `repeat_mode = 0`, `M % repeat_time == 0`, and
+  a repeat chunk (`M / repeat_time`) that is a multiple of 16. The repeat
+  window `m_start + repeat_source_stride * 16 * (repeat_time - 1) + chunk`
+  must stay within the derived M extent; with the default-derived
+  `repeat_source_stride` (no explicit pair) this implies `m_start = 0`, while
+  an explicit stride pair permits split-M windows.
+- For a full (non-split) load the expansion transfers the whole derived M/K, so
+  `m_start`/`k_start` must be 0 (verified for constant operands).
+- `%repeat_source_stride`/`%dst_stride` travel as a pair at IR level; when
+  both are omitted the expansion derives `dst_stride = ceil(M/16)` and
+  `repeat_source_stride` in 16-row-block units (`ceil(m_step/16)` for
+  M-direction repeat, `k_step/c0_size` for K-direction).
+
+**Control word layout (emitted as the two `i64` args of the LOAD intrinsic):**
+
+The 3D load packs its controls into two 64-bit words; the field order differs
+from the 2D `LOAD L1 TO L0A` tile descriptor (which uses
+`m_start@0, k_start@16, m_step@32, k_step@40`), because the 3Dv2 instruction
+carries its tile geometry in separate `set_l3d_fmatrix`/`set_l3d_rpt` registers
+and only start/step remain in the load word:
+
+- `pck0` (load): `k_step@0 (16)`, `m_step@16 (16)`, `k_start@32 (16)`,
+  `m_start@48 (16)`.
+- `pck1` (load): `stride_w@0 (6)`, `stride_h@6 (6)`, `filter_w@12 (8)`,
+  `filter_h@20 (8)`, `dilation_w@28 (8)`, `dilation_h@36 (8)`,
+  `filter_w>>8@44 (1)`, `filter_h>>8@45 (1)`, `transpose@46 (1)`,
+  `fmatrix_mode@47 (1, always 0)`, `channel_size@48 (16)`.
+- `set_l3d_fmatrix` config: `fmap_w@0 (16)`, `fmap_h@16 (16)`, `pad_left@32 (8)`,
+  `pad_right@40 (8)`, `pad_top@48 (8)`, `pad_bottom@56 (8)`.
+- `set_l3d_rpt` config: `repeat_source_stride@0 (16)`, `repeat_time@16 (8)`,
+  `repeat_mode@24 (8)`, `dst_stride@32 (16)`, `dst_m_position@48 (16)`.
+
+The layout was reverse-engineered from camodel experiments; the exact hardware
+assignment of these fields is confirmed only to the extent that the emitted
+intrinsics execute on the simulator. `set_padding` carries a single zero
+padding value (no per-side pad-value parameter in the current interface).
+
+Numeric end-to-end validation in this repository covers f16 only: f32 and bf16
+compile and emit (lit coverage) but their simulator numeric paths are not
+validated here (the dsl-st cases were removed because the camodel simulator
+mis-handles their address/arithmetic paths); both remain to be validated on
+real hardware / CI with an NPU.
+
+**Example:**
+
+```mlir
+%c0 = arith.constant 0 : i64
+%c1 = arith.constant 1 : i64
+%c3 = arith.constant 3 : i64
+%c8 = arith.constant 8 : i64
+%c16 = arith.constant 16 : i64
+pto.mte_l1_l0a_3d %l1_a, %l0a, %c8, %c8, %c3, %c3, %c16, %c1, %c1, %c1, %c1, %c0, %c0, %c0, %c0, %c0, %c0, %c1, %c0, %c0
+  : !pto.ptr<f16, l1>, !pto.ptr<f16, l0a>
+```
+
+---
+
 ### MX Scale Load Model
 
 MX scale loads prepare the scale payloads consumed by `pto.mad_mx*`. Each scale
@@ -1078,15 +1220,34 @@ Layout modes:
 
 | Mode | Destination layout | Extra operand |
 |------|--------------------|---------------|
-| omitted | Normal target-profile writeback layout | none |
+| omitted | Same as `nz2nd` (the lowering sets `NZ2ND`) | none |
 | `nz2nd` | Logical ND order | none |
 | `nz2dn(%loop0_src_stride)` | Logical D/N-swapped order | `%loop0_src_stride` in C0-size units |
-| `nz2nz(%split)` | NZ-style destination | `%split`, destination split point |
+| `nz2nz` **without** `%split` | **Native normal-mode writeback: blocked (NZ) placement preserved, `NZ2ND` = `NZ2DN` = `SPLIT_EN` = 0** | none |
+| `nz2nz(%split)` | NZ-style destination with the f32 channel split | `%split`, destination split point |
+
+> **Normal mode is spelled `nz2nz` with the channel split off.** The native
+> `fixpipe_normal_*` templates (for example
+> `fixpipe_normal_float_to_bfloat16_t_4d_to_4d_cbuf`) are the hardware
+> normal-mode writeback, which disables BOTH `NZ2ND` and `NZ2DN`. In this
+> interface that configuration is `nz2nz` with no `%split` operand (or a
+> zero constant one); the `nz2nz` keyword is therefore not "another NZ
+> transform", it is the "leave the blocked placement alone" form. Omitting the
+> layout clause is different: it selects `nz2nd`.
+
+> **`%dst_stride` changes unit with the layout mode.** For `nz2nd` and
+> `nz2dn` it is in destination elements; for the normal-mode `nz2nz` form it
+> is in `C0_SIZE` units (32 bytes: 16 `bf16`/`f16` or 8 `f32` elements), per
+> the FIXPIPE normal-mode `Loop1_dst_stride` definition. The operand is
+> forwarded verbatim, so flipping a store between `nz2nd` and `nz2nz` without
+> rescaling `%dst_stride` silently reinterprets it. The mode is static, so
+> the unit is determinate at compile time; there is no ambiguous case to warn
+> about, and the mapping is documented here instead of guessed in a verifier.
 
 `%src_stride` is measured in C0-size units and advances the accumulator source
-between adjacent source groups selected by the layout mode. `%dst_stride` is
-measured in destination elements and advances the destination row/group
-selected by the layout mode. In `loop3`, `%src_stride3` is in C0-size units and
+between adjacent source groups selected by the layout mode. `%dst_stride`
+advances the destination row/group selected by the layout mode, in the unit
+that mode defines (see the note above). In `loop3`, `%src_stride3` is in C0-size units and
 `%dst_stride3` is in destination elements.
 
 Reference semantics:
@@ -1114,17 +1275,31 @@ for r in 0 .. repeat_count-1:
       write_destination(dst_r, y, m, n, dst_stride, layout_mode)
 ```
 
-When no layout clause is present, the store uses the target-profile normal
-writeback layout for the destination address space. This mode performs no
-explicit ND/DN/NZ layout transform; `%dst_stride` is still the destination
-start-to-start stride in destination elements for the normal writeback rows or
-groups.
+When no layout clause is present, the store lowers to `nz2nd`: the emitted
+configuration sets `NZ2ND` (X_t[43]) and clears `NZ2DN` (X_t[62]), so
+`write_destination` produces ND order and `%dst_stride` is the destination
+start-to-start stride in destination elements for the ND rows. That is not the
+native normal-mode writeback; use `nz2nz` for it (see below).
 
 For `nz2nd`, `write_destination` stores logical `y[m, n]` in ND order. For
 `nz2dn`, it stores the same logical result with the D/N dimensions swapped; the
 extra `%loop0_src_stride` selects how the swapped source walk advances through
 the accumulator tile. For `nz2nz`, it preserves NZ-style destination packing
 and uses `%split` as the destination split point.
+
+`nz2nz` is also the representation of the native normal-mode writeback: it
+clears both layout-transform bits (`NZ2ND` = X_t[43], `NZ2DN` = X_t[62]) and,
+when `%split` is absent or a zero constant, it leaves `SPLIT_EN` (X_t[42])
+cleared as well. That is the hardware normal-mode `L0C -> L1` transfer: no
+ND/DN/NZ layout conversion, blocked (NZ) destination placement preserved, and
+the destination element type is whatever `pre_quant`/`pre_relu` produce, e.g.
+`f32` accumulators converted to `bf16` by `pre_quant(mode = f32_bf16)` so a
+later Cube op can consume the `bf16` L1 tile. Omitting the layout clause is
+*not* that mode: it selects `nz2nd` (`NZ2ND` = 1). In normal mode the hardware
+requires `%n` to be a multiple of 16 and keeps `C0_pad_en` (X_t[59]) cleared,
+which is the C0 packaging AscendC uses for its own normal-mode `L0C -> L1`
+fixpipe. `%dst_stride` follows the normal-mode unit described above
+(`C0_SIZE` = 32 bytes, not elements).
 
 ### `pto.mte_l0c_l1`
 
@@ -1175,8 +1350,22 @@ pto.mte_l0c_l1 %src, %dst, %m, %n, %src_stride, %dst_stride
 - `nz2dn` requires `%loop0_src_stride`; `nz2nd` and `nz2nz` do not accept it.
 - `unit_flag` must be omitted when `nz2dn(%loop0_src_stride)` uses a value
   other than 1.
-- `nz2nz` requires `f32` destination element type and does not accept `loop3`.
+- `nz2nz` requires an `f32` destination element type only when `%split`
+  may enable the channel split (`SPLIT_EN`): a non-constant split, or a
+  constant whose low bit is set. Without `%split` (or with a constant-zero one,
+  in either the `arith.constant` or the `pto.constant` form the DSL emits) it
+  is the native normal-mode writeback and any destination element type
+  compatible with `pre_quant`/`pre_relu` is accepted. It does not accept
+  `loop3`.
 - `sat`, `sat(preserve_nan)`, and `nosat` are mutually exclusive.
+- **Known gap (not verified today):** when `pre_quant` is absent the store is
+  `no_convert` (`quant_pre` = 0), and the hardware couples that mode to
+  matching 32-bit source/destination types (`f32` -> `f32`, `i32` -> `i32`).
+  This interface does not check that coupling, so a dtype-changing store that
+  omits `pre_quant` is accepted here even though the emitted intrinsic name
+  carries the conversion. It is pre-existing and reachable through `nz2nd` as
+  well; a store that changes dtype must select a `pre_quant` (or `pre_relu`
+  clip) mode, and the verifier enforcing that is a separate change.
 
 **Example:**
 

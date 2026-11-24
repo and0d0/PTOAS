@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,7 +6,8 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""Data-movement ops: MTE transfers, mad, accumulator-store attributes."""
+
+"""Data-movement ops: MTE transfers, async GM copies, mad, accumulator-store attributes."""
 
 from functools import wraps
 import warnings
@@ -23,6 +25,7 @@ from ._scalar_adaptation import (
     coerce_runtime_i1_value,
     coerce_runtime_index_value,
     coerce_runtime_integer_value,
+    is_mlir_value,
 )
 from ._runtime_scalar_ops import emit_runtime_binary_op
 from ._surface_values import (
@@ -51,6 +54,8 @@ from ._types import (
     _normalize_address_space,
     _resolve,
     _strip_integer_signedness,
+    dma_session_type,
+    int64,
     mask_type,
     part_tensor_view_type,
     part_tensor_view_type_from_dims,
@@ -79,6 +84,9 @@ from ptoas.mlir.ir import (
     VectorType,
 )
 
+from ._ops_core import (
+    _require_struct_value,
+)
 from ._ops_common import (
     _coerce_i1,
     _coerce_i32,
@@ -92,6 +100,7 @@ from ._ops_common import (
     _normalize_mte_store_l2_cache,
     _normalize_sat_mode,
     _normalize_token,
+    _pointer_element_type,
     _validate_raw_fill_l1_fill_word_bits,
     _validate_raw_fill_l1_static_scalar,
 )
@@ -255,9 +264,14 @@ def _acc_store_layout(layout):
                 None)
         raise ValueError("acc store layout tuple only supports nz2dn or nz2nz")
     normalized = _normalize_token(layout, context="acc store layout")
-    if normalized != "nz2nd":
-        raise ValueError("acc store layout string only supports nz2nd; use (mode, operand) for nz2dn/nz2nz")
-    return Attribute.parse("#pto<acc_store_mode nz2nd>"), None, None
+    # Bare nz2nz is the native normal-mode writeback: no `split` operand, so
+    # SPLIT_EN stays 0 and both layout-transform bits are cleared.
+    if normalized not in {"nz2nd", "nz2nz"}:
+        raise ValueError(
+            "acc store layout string only supports nz2nd or nz2nz; "
+            "use (mode, operand) for nz2dn or for an explicit nz2nz split"
+        )
+    return Attribute.parse(f"#pto<acc_store_mode {normalized}>"), None, None
 
 
 def _acc_store_loop3(loop3):
@@ -445,14 +459,99 @@ def _tf32_mode_attr(tf32_mode):
     )
 
 
+def _is_surface_value(value):
+    # Surface values are _SurfaceValue instances (runtime scalar expressions);
+    # plain Python ints/bools/None keep the static attribute path.
+    from ._surface_values import _SurfaceValue
+
+    return isinstance(value, _SurfaceValue)
+
+
+def _mad_runtime_operands(
+    unit_flag=None, acc_init=None, disable_gemv=None, bias_init=None
+):
+    """Map runtime (surface) flag values onto the optional mad operands.
+
+    Returns (operands, error). Static values (None / int / bool) go back as
+    None and keep their attribute/op-kind paths; surface values become the
+    trailing optional operands consumed by packMadXt.
+    """
+    def _runtime(value):
+        # The runtime operands are signless-only; a frontend scalar.select
+        # over a signed constant produces si32, so strip the signedness here
+        # (the resulting unrealized cast is reconciled before expansion).
+        # strip operates on the raw MLIR value, so unwrap first and re-wrap
+        # the (possibly cast) result to keep the surface-value contract.
+        if not _is_surface_value(value):
+            return None
+        stripped = _strip_integer_signedness(unwrap_surface_value(value))
+        return wrap_surface_value(stripped)
+
+    operands = {}
+    if _is_surface_value(unit_flag):
+        operands["unit_flag_value"] = _runtime(unit_flag)
+    if _is_surface_value(acc_init):
+        operands["acc_init_value"] = _runtime(acc_init)
+    if _is_surface_value(disable_gemv):
+        operands["disable_gemv_value"] = _runtime(disable_gemv)
+    if _is_surface_value(bias_init):
+        operands["bias_init_value"] = _runtime(bias_init)
+    return operands
+
+
+def _split_mad_options(kwargs):
+    """Split a mad call's kwargs into runtime operands and static attributes.
+
+    Runtime surface values (``unit_flag``/``disable_gemv``/``init``/
+    ``bias_init``) become the optional trailing operands; static values keep
+    the attribute / op-kind paths. Returns one dict ready to splat into the
+    op constructor.
+    """
+    unit_flag = kwargs.pop("unit_flag", None)
+    acc_init = kwargs.pop("init", None)
+    disable_gemv = kwargs.pop("disable_gemv", False)
+    bias_init = kwargs.pop("bias_init", None)
+    for name, value in (("init", acc_init), ("bias_init", bias_init)):
+        if value is not None and not _is_surface_value(value):
+            # Static accumulate/c-source selection is the op kind's job
+            # (mad vs mad_acc, mad_bias); only runtime surface values may
+            # override it per instruction.
+            raise TypeError(
+                f"mad {name} expects a runtime surface value; pick the op "
+                "kind (mad/mad_acc, mad_bias) for static behaviour"
+            )
+    runtime = _mad_runtime_operands(
+        unit_flag=unit_flag,
+        acc_init=acc_init,
+        disable_gemv=disable_gemv,
+        bias_init=bias_init,
+    )
+    options = {
+        **{key: unwrap_surface_value(value)
+           for key, value in runtime.items()},
+        **_mad_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=kwargs.pop("sat", None),
+            tf32_mode=kwargs.pop("tf32_mode", None),
+            n_dir=kwargs.pop("n_dir", False),
+        ),
+    }
+    if kwargs:
+        raise TypeError(f"unexpected mad kwargs: {sorted(kwargs)}")
+    return options
+
+
 def _mad_options(unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n_dir=False):
-    if not isinstance(disable_gemv, bool):
-        raise TypeError("mad disable_gemv expects bool")
+    if not isinstance(disable_gemv, bool) and not _is_surface_value(disable_gemv):
+        raise TypeError("mad disable_gemv expects bool or a runtime surface value")
     if not isinstance(n_dir, bool):
         raise TypeError("mad n_dir expects bool")
     return {
-        "unit_flag_mode": _mad_unit_flag_attr(unit_flag),
-        "disable_gemv": disable_gemv,
+        "unit_flag_mode": _mad_unit_flag_attr(None if _is_surface_value(unit_flag) else unit_flag),
+        # A runtime disable_gemv operand replaces the static flag; keep the
+        # attribute absent so the two cannot both be set.
+        "disable_gemv": False if _is_surface_value(disable_gemv) else disable_gemv,
         "sat_mode": _mad_sat_attr(sat),
         "tf32_mode": _tf32_mode_attr(tf32_mode),
         "n_dir": n_dir,
@@ -460,6 +559,13 @@ def _mad_options(unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n
 
 
 def _mad_mx_options(unit_flag=None, disable_gemv=False, sat=None, n_dir=False):
+    for name, value in (("unit_flag", unit_flag),
+                        ("disable_gemv", disable_gemv)):
+        if _is_surface_value(value):
+            raise TypeError(
+                f"mad_mx family does not yet accept runtime {name}; use the "
+                "static keyword"
+            )
     return {
         key: value
         for key, value in _mad_options(
@@ -527,6 +633,127 @@ def _require_pto_ptr_operand(value, *, context: str):
     except Exception as exc:
         raise TypeError(f"{context} expects PTO ptr operands, got {raw_value.type}") from exc
     return raw_value
+
+
+def _require_gm_ptr(ptr_value, *, context: str):
+    raw_ptr = unwrap_surface_value(ptr_value)
+    try:
+        ptr_type = _pto.PtrType(raw_ptr.type)
+    except Exception as exc:
+        raise TypeError(f"{context} requires a typed PTO pointer") from exc
+    gm_space = _pto.AddressSpaceAttr.get(_pto.AddressSpace.GM)
+    if ptr_type.memory_space != gm_space:
+        raise TypeError(f"{context} requires a GM pointer, got {raw_ptr.type}")
+    return raw_ptr
+
+
+def _require_sdma_session(session, *, op_name: str):
+    """Check ``session`` is one ``pto.session_init`` built for the SDMA engine."""
+    raw_session = unwrap_surface_value(session)
+    try:
+        session_type = _pto.DmaSessionType(raw_session.type)
+    except Exception as exc:
+        raise TypeError(
+            f"{op_name}: session must come from pto.session_init(...), "
+            f"got {raw_session.type}"
+        ) from exc
+    if session_type.engine != _pto.DmaEngine.Sdma:
+        raise TypeError(
+            f"{op_name}: session drives {raw_session.type}, but this op posts "
+            f"on SDMA"
+        )
+    return raw_session
+
+
+def _optional_static_i64_attr(
+    value,
+    *,
+    context: str,
+    minimum: int | None = None,
+    maximum: int | None = None,
+    alignment: int | None = None,
+):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{context} expects a static int or None, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{context} expects a value >= {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{context} expects a value <= {maximum}, got {value}")
+    if alignment is not None and value % alignment != 0:
+        raise ValueError(
+            f"{context} expects a multiple of {alignment} bytes, got {value}"
+        )
+    return IntegerAttr.get(IntegerType.get_signless(64), value)
+
+
+@_explicit_mode_only("pto.session_init(...)")
+def session_init(template_gm, *, engine="sdma"):
+    """Return a DMA session configured from the host-written GM template.
+
+    The session is opaque: what it holds is the expansion's business, so there
+    is nothing to declare beforehand and nothing to read back afterwards.
+    """
+    raw_template = _require_gm_ptr(template_gm, context="pto.session_init(...) template")
+    return wrap_surface_value(
+        _pto.SessionInitOp(
+            _resolve(dma_session_type(engine)), raw_template
+        ).result
+    )
+
+
+@_explicit_mode_only("pto.sdma_gm_gm(...)")
+def sdma_gm_gm(
+    destination,
+    source,
+    nbytes,
+    *,
+    session,
+    block_bytes=None,
+    channel_idx=None,
+    soft_put=False,
+):
+    """Kick a contiguous GM→GM copy through the session.
+
+    Returns the channel record to wait on. The kick does not block, so the copy
+    is not finished when this returns; the record is how a caller finds out that
+    it is. A soft-put copy is already done and gives back a null record.
+    """
+    if not isinstance(soft_put, bool):
+        raise TypeError("pto.sdma_gm_gm(...): soft_put expects a bool")
+    raw_dst = _require_gm_ptr(destination, context="pto.sdma_gm_gm(...) destination")
+    raw_src = _require_gm_ptr(source, context="pto.sdma_gm_gm(...) source")
+    raw_session = _require_sdma_session(session, op_name="pto.sdma_gm_gm(...)")
+    attrs = {}
+    block_bytes_attr = _optional_static_i64_attr(
+        block_bytes,
+        context="pto.sdma_gm_gm(...) block_bytes",
+        minimum=1,
+        alignment=64,
+    )
+    channel_idx_attr = _optional_static_i64_attr(
+        channel_idx,
+        context="pto.sdma_gm_gm(...) channel_idx",
+        minimum=0,
+        maximum=39,
+    )
+    if block_bytes_attr is not None:
+        attrs["block_bytes"] = block_bytes_attr
+    if channel_idx_attr is not None:
+        attrs["channel_idx"] = channel_idx_attr
+    if soft_put:
+        attrs["soft_put"] = UnitAttr.get()
+    return wrap_surface_value(
+        _pto.SdmaGmGmOp(
+            _resolve(ptr(int64, "gm")),
+            raw_dst,
+            raw_src,
+            _coerce_i64(nbytes, context="pto.sdma_gm_gm(...) nbytes"),
+            raw_session,
+            **attrs,
+        ).result
+    )
 
 
 @_explicit_mode_only("pto.mte_load(...)")
@@ -704,6 +931,88 @@ def set_store_atomic_cfg(config):
     """Configure scalar ST atomic mode via ST_ATOMIC_CFG (SU path)."""
     _pto.SetStoreAtomicCfgOp(
         _coerce_i64(config, context="set_store_atomic_cfg config")
+    )
+
+
+@_explicit_mode_only("pto.get_ctrl(...)")
+def get_ctrl():
+    """Read the 64-bit running CTRL register (SU path).
+
+    Returns the value as a standard runtime scalar, so authored code can
+    compose it with the normal scalar operators (e.g. ``ctrl & mask``).
+    """
+    return wrap_surface_value(_pto.GetCtrlOp().result)
+
+
+@_explicit_mode_only("pto.set_ctrl(...)")
+def set_ctrl(ctrl):
+    """Overwrite the 64-bit running CTRL register (SU path)."""
+    _pto.SetCtrlOp(
+        _coerce_i64(ctrl, context="set_ctrl ctrl")
+    )
+
+
+def _is_supported_mov_pad_type(type_obj) -> bool:
+    """True for the element types pto.set_mov_pad_val accepts natively."""
+    if IntegerType.isinstance(type_obj):
+        integer_type = IntegerType(type_obj)
+        return integer_type.is_signless and integer_type.width in (8, 16, 32)
+    return (
+        F16Type.isinstance(type_obj)
+        or BF16Type.isinstance(type_obj)
+        or F32Type.isinstance(type_obj)
+    )
+
+
+def _coerce_mov_pad_value(value, *, context: str):
+    """Keep supported typed scalars as-is; Python literals default to i32/f32."""
+    raw_value = unwrap_surface_value(value)
+    if is_mlir_value(raw_value):
+        if _is_supported_mov_pad_type(raw_value.type):
+            return raw_value
+        raise TypeError(
+            f"{context} expects an i8/i16/i32 or f16/bf16/f32 runtime scalar, "
+            f"got {raw_value.type}"
+        )
+    if isinstance(value, bool):
+        raise TypeError(f"{context} does not accept bool values")
+    if isinstance(value, float):
+        return materialize_scalar_literal(value, F32Type.get(), context=context)
+    if isinstance(value, int):
+        return materialize_scalar_literal(
+            value, IntegerType.get_signless(32), context=context
+        )
+    raise TypeError(f"{context} expects a typed scalar or a Python number, got {value!r}")
+
+
+@_explicit_mode_only("pto.set_mov_pad_val(...)")
+def set_mov_pad_val(pad_value):
+    """Configure the MTE movement padding value (SU path).
+
+    Supported runtime scalars (i8/i16/i32, f16/bf16/f32) keep their original
+    element type and bit pattern; plain Python literals default to i32 for
+    ints and f32 for floats.
+    """
+    _pto.SetMovPadValOp(
+        _coerce_mov_pad_value(pad_value, context="set_mov_pad_val pad_value")
+    )
+
+
+@_explicit_mode_only("pto.set_loop_size_ubtoout(...)")
+def set_loop_size_ubtoout(count0, count1):
+    """Configure the default UB-to-OUT DMA loop sizes (SU path)."""
+    _pto.SetLoopSizeUbToOutOp(
+        _coerce_i64(count0, context="set_loop_size_ubtoout count0"),
+        _coerce_i64(count1, context="set_loop_size_ubtoout count1"),
+    )
+
+
+@_explicit_mode_only("pto.set_loop_size_outtoub(...)")
+def set_loop_size_outtoub(count0, count1):
+    """Configure the default OUT-to-UB DMA loop sizes (SU path)."""
+    _pto.SetLoopSizeOutToUbOp(
+        _coerce_i64(count0, context="set_loop_size_outtoub count0"),
+        _coerce_i64(count1, context="set_loop_size_outtoub count1"),
     )
 
 
@@ -1224,6 +1533,181 @@ def mte_l1_l0b_mx(
     )
 
 
+def _derive_l3d_stride_defaults(
+    *,
+    source,
+    fmap_h,
+    fmap_w,
+    filter_h,
+    filter_w,
+    channel_size,
+    stride_h,
+    stride_w,
+    dilation_h,
+    dilation_w,
+    pad_top,
+    pad_bottom,
+    pad_left,
+    pad_right,
+    repeat_time,
+    repeat_mode,
+    repeat_source_stride,
+    dst_stride,
+):
+    """Complete the ``(repeat_source_stride, dst_stride)`` pair.
+
+    The two strides travel together at IR level (their hardware defaults are
+    derived from the load geometry during expansion), so when the caller
+    supplies only one of them this helper derives the other from the
+    compile-time-constant geometry.  Dynamic (non-constant) inputs require
+    both to be passed explicitly.
+    """
+    for name, value in (
+        ("fmap_h", fmap_h),
+        ("fmap_w", fmap_w),
+        ("filter_h", filter_h),
+        ("filter_w", filter_w),
+        ("channel_size", channel_size),
+        ("stride_h", stride_h),
+        ("stride_w", stride_w),
+        ("dilation_h", dilation_h),
+        ("dilation_w", dilation_w),
+        ("pad_top", pad_top),
+        ("pad_bottom", pad_bottom),
+        ("pad_left", pad_left),
+        ("pad_right", pad_right),
+        ("repeat_time", repeat_time),
+        ("repeat_mode", repeat_mode),
+    ):
+        if not isinstance(value, int):
+            raise TypeError(
+                f"pto.mte_l1_l0a_3d: {name} is not a compile-time constant; "
+                "pass both repeat_source_stride and dst_stride explicitly when "
+                "using dynamic values"
+            )
+    effective_h = (filter_h - 1) * dilation_h + 1
+    effective_w = (filter_w - 1) * dilation_w + 1
+    output_h = (fmap_h + pad_top + pad_bottom - effective_h) // stride_h + 1
+    output_w = (fmap_w + pad_left + pad_right - effective_w) // stride_w + 1
+    total_m = output_h * output_w
+    if dst_stride is None:
+        dst_stride = (total_m + 15) // 16
+    if repeat_source_stride is None:
+        m_step = (total_m + repeat_time - 1) // repeat_time
+        if repeat_mode == 0:
+            repeat_source_stride = (m_step + 15) // 16
+        else:
+            elem_type = _pointer_element_type(source, context="mte_l1_l0a_3d")
+            element_bytes = _element_bytewidth(elem_type)
+            c0_size = 32 // element_bytes
+            k_step = (
+                (channel_size * filter_h * filter_w + c0_size - 1)
+                // c0_size
+                * c0_size
+            )
+            repeat_source_stride = k_step // c0_size
+    return repeat_source_stride, dst_stride
+
+
+@_explicit_mode_only("pto.mte_l1_l0a_3d(...)")
+def mte_l1_l0a_3d(
+    source,
+    destination,
+    *,
+    fmap_h,
+    fmap_w,
+    filter_h,
+    filter_w,
+    channel_size,
+    stride_h=1,
+    stride_w=1,
+    dilation_h=1,
+    dilation_w=1,
+    pad_top=0,
+    pad_bottom=0,
+    pad_left=0,
+    pad_right=0,
+    m_start=0,
+    k_start=0,
+    repeat_time=1,
+    repeat_mode=0,
+    repeat_source_stride=None,
+    dst_stride=None,
+    dst_m_position=0,
+    transpose=False,
+):
+    """``pto.mte_l1_l0a_3d`` – L1 (NC1HWC0) to L0A 3D im2col load.
+
+    Semantic wrapper for A5 ``LOAD L1 TO L0A 3Dv2``. Expands into
+    ``pto.set_l3d_fmatrix`` / ``pto.set_padding`` / ``pto.set_l3d_rpt`` /
+    ``pto.load_l1_to_l0a_3d`` (one OP per intrinsic, set* first, load last).
+
+    Parameter semantics: fmap/filter/stride/dilation/pad/channel drive the im2col
+    geometry; repeat splits the load into per-iteration M chunks.  When supplied,
+    ``repeat_source_stride`` is in 16-row-block units (not rows) and
+    ``dst_stride`` in fractal-block units, matching the hardware semantics.
+    ``fmap_h/fmap_w/filter_h/filter_w/channel_size`` are required; all other
+    parameters have defaults. Geometry, constraint, and control-word layout
+    semantics are documented in ``docs/isa/micro-isa/16-cube-matmul.md``
+    (``pto.mte_l1_l0a_3d`` section).
+    """
+    transpose = _normalize_cube_transpose(transpose, context="mte_l1_l0a_3d")
+
+    def _i64(name, value):
+        return _coerce_i64(value, context=f"mte_l1_l0a_3d {name}")
+
+    operands = [
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _i64("fmap_h", fmap_h),
+        _i64("fmap_w", fmap_w),
+        _i64("filter_h", filter_h),
+        _i64("filter_w", filter_w),
+        _i64("channel_size", channel_size),
+        _i64("stride_h", stride_h),
+        _i64("stride_w", stride_w),
+        _i64("dilation_h", dilation_h),
+        _i64("dilation_w", dilation_w),
+        _i64("pad_top", pad_top),
+        _i64("pad_bottom", pad_bottom),
+        _i64("pad_left", pad_left),
+        _i64("pad_right", pad_right),
+        _i64("m_start", m_start),
+        _i64("k_start", k_start),
+        _i64("repeat_time", repeat_time),
+        _i64("repeat_mode", repeat_mode),
+        _i64("dst_m_position", dst_m_position),
+    ]
+    # ``repeat_source_stride``/``dst_stride`` travel together at IR level;
+    # when only one is supplied, derive the other from the constant geometry.
+    if repeat_source_stride is not None or dst_stride is not None:
+        if repeat_source_stride is None or dst_stride is None:
+            repeat_source_stride, dst_stride = _derive_l3d_stride_defaults(
+                source=source,
+                fmap_h=fmap_h,
+                fmap_w=fmap_w,
+                filter_h=filter_h,
+                filter_w=filter_w,
+                channel_size=channel_size,
+                stride_h=stride_h,
+                stride_w=stride_w,
+                dilation_h=dilation_h,
+                dilation_w=dilation_w,
+                pad_top=pad_top,
+                pad_bottom=pad_bottom,
+                pad_left=pad_left,
+                pad_right=pad_right,
+                repeat_time=repeat_time,
+                repeat_mode=repeat_mode,
+                repeat_source_stride=repeat_source_stride,
+                dst_stride=dst_stride,
+            )
+        operands.append(_i64("repeat_source_stride", repeat_source_stride))
+        operands.append(_i64("dst_stride", dst_stride))
+
+    _pto.MteL1L0a3dOp(*operands, transpose=transpose)
+
+
 @_explicit_mode_only("pto.mte_l0c_l1(...)")
 def mte_l0c_l1(
     source,
@@ -1346,8 +1830,17 @@ def mte_l0c_ub(
     )
 
 
-def mad(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n_dir=False):
-    """``pto.mad`` – cube matmul accumulate."""
+def mad(lhs, rhs, dst, m, n, k, **kwargs):
+    """``pto.mad`` – cube matmul accumulate.
+
+    ``unit_flag``/``disable_gemv`` accept either the static keywords or a
+    runtime surface value (e.g. ``scalar.select(...)``); runtime values pack
+    into the xt operand bits and avoid frontend control flow. ``init`` is the
+    runtime acc-init selector (1=zero-Cmatrix rewrite, 0=accumulate);
+    ``bias_init`` the runtime BTbuf selector. Whether this build accepts the
+    runtime flag keywords is declared by ``ptodsl.MAD_RUNTIME_FLAGS``.
+    """
+    _mad_options = _split_mad_options(kwargs)
     _pto.MadOp(
         unwrap_surface_value(lhs),
         unwrap_surface_value(rhs),
@@ -1355,18 +1848,13 @@ def mad(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None,
         _coerce_i64(m, context="mad m"),
         _coerce_i64(n, context="mad n"),
         _coerce_i64(k, context="mad k"),
-        **_mad_options(
-            unit_flag=unit_flag,
-            disable_gemv=disable_gemv,
-            sat=sat,
-            tf32_mode=tf32_mode,
-            n_dir=n_dir,
-        ),
+        **_mad_options,
     )
 
 
-def mad_acc(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n_dir=False):
+def mad_acc(lhs, rhs, dst, m, n, k, **kwargs):
     """``pto.mad_acc`` – cube matmul accumulate into an existing accumulator."""
+    _mad_options = _split_mad_options(kwargs)
     _pto.MadAccOp(
         unwrap_surface_value(lhs),
         unwrap_surface_value(rhs),
@@ -1374,19 +1862,13 @@ def mad_acc(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=N
         _coerce_i64(m, context="mad_acc m"),
         _coerce_i64(n, context="mad_acc n"),
         _coerce_i64(k, context="mad_acc k"),
-        **_mad_options(
-            unit_flag=unit_flag,
-            disable_gemv=disable_gemv,
-            sat=sat,
-            tf32_mode=tf32_mode,
-            n_dir=n_dir,
-        ),
+        **_mad_options,
     )
 
 
-def mad_bias(lhs, rhs, dst, bias, m, n, k, *, unit_flag=None, disable_gemv=False,
-             sat=None, tf32_mode=None, n_dir=False):
+def mad_bias(lhs, rhs, dst, bias, m, n, k, **kwargs):
     """``pto.mad_bias`` – cube matmul initialized from a bias buffer."""
+    _mad_options = _split_mad_options(kwargs)
     _pto.MadBiasOp(
         unwrap_surface_value(lhs),
         unwrap_surface_value(rhs),
@@ -1395,13 +1877,7 @@ def mad_bias(lhs, rhs, dst, bias, m, n, k, *, unit_flag=None, disable_gemv=False
         _coerce_i64(m, context="mad_bias m"),
         _coerce_i64(n, context="mad_bias n"),
         _coerce_i64(k, context="mad_bias k"),
-        **_mad_options(
-            unit_flag=unit_flag,
-            disable_gemv=disable_gemv,
-            sat=sat,
-            tf32_mode=tf32_mode,
-            n_dir=n_dir,
-        ),
+        **_mad_options,
     )
 
 

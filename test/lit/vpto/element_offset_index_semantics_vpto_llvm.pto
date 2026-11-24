@@ -8,11 +8,8 @@
 
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --enable-vpto-soft-postupdate \
 // RUN:   --emit-vpto %s -o - | FileCheck %s --check-prefix=POSTPASS
-// RUN: ptoas --cann-output-version=9.0.0 --pto-backend=vpto --pto-arch=a5 \
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 \
 // RUN:   --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s --check-prefix=LLVM
-// RUN: ptoas --cann-output-version=9.0.0-beta.1 --pto-backend=vpto \
-// RUN:   --pto-arch=a5 --emit-vpto-llvm-ir %s -o - 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=LLVM
 
 // POSTPASS-LABEL: func.func @soft_postupdate_dynamic_initial_offset
 // POSTPASS: %[[INITIAL:[a-zA-Z0-9_]+]] = arith.index_castui %arg1 : i16 to index
@@ -50,9 +47,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
       scf.for %iv = %c0 to %c4 step %c1 {
         %offset = arith.addi %initial, %iv overflow<nsw> : index
         %value = pto.vlds %source[%offset]
-            : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+            : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
         pto.vsts %value, %sink[%c0], %mask
-            : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+            : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
       }
     }
     return
@@ -67,13 +64,13 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     pto.vecscope {
       %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
       %positive = pto.vlds %source[%c2147483648]
-          : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+          : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
       pto.vsts %positive, %destination[%cm2147483649], %mask
-          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
       %dynamic_value = pto.vlds %source[%dynamic]
-          : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+          : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
       pto.vsts %dynamic_value, %destination[%c0], %mask
-          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
     }
     return
   }
@@ -87,14 +84,14 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     pto.vecscope {
       %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
       %value, %next_source = pto.vlds %source[%c2147483648]
-          : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>, !pto.ptr<f32, ub>
+          : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>, !pto.ptr<f32, ub>
       %followup = pto.vlds %next_source[%c0]
-          : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+          : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
       %next_destination = pto.vsts %value, %destination[%cm2147483649], %mask
-          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
           -> !pto.ptr<f32, ub>
       pto.vsts %value, %next_destination[%c2147483648], %mask
-          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+          : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<b32>
     }
     return
   }

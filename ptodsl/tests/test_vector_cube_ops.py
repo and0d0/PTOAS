@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -6,18 +7,20 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-import unittest
 import inspect
+import unittest
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, call, patch
 
+from ptoas.mlir.dialects import pto as pto_dialect
+from ptoas.mlir.ir import F32Type, IntegerType, Type
+
+from ptodsl import pto
 import ptodsl._ops as _ops
 import ptodsl._pipe_namespace as _pipe_namespace
 from ptodsl._context import make_context
 from ptodsl._diagnostics import PTODSLDeprecationWarning
-from ptodsl import pto
-from ptoas.mlir.ir import F32Type, IntegerType, Type
-
 import ptodsl._ops_common as _ops_common
 import ptodsl._ops_core as _ops_core
 import ptodsl._ops_vmem as _ops_vmem
@@ -26,7 +29,6 @@ import ptodsl._ops_vmath as _ops_vmath
 import ptodsl._ops_tile as _ops_tile
 import ptodsl._ops_mte as _ops_mte
 import ptodsl._ops_simt as _ops_simt
-from contextlib import ExitStack, contextmanager
 
 _OPS_FAMILY = (
     _ops, _ops_common, _ops_core, _ops_vmem, _ops_mask,
@@ -267,7 +269,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         names = [
             "vsub", "vmin", "vand", "vor", "vxor", "vshl", "vshr",
             "vln", "vsqrt", "vabs", "vneg", "vrec", "vrsqrt", "vrelu", "vnot",
-            "vsqz",
+            "vsqz", "vusqz", "vunpack", "dhistv2",
             "vcmin", "vcgmin", "vcpadd",
             "vadds", "vmuls", "vmaxs", "vmins", "vlrelu", "vshls", "vshrs", "vands", "vors", "vxors",
             "vaxpy", "vmula", "vci", "vaddrelu", "vsubrelu", "vsel",
@@ -424,6 +426,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         preferred_names = [
             "set_cross_block", "wait_cross_block",
             "set_intra_block", "wait_intra_block",
+            "syncall",
         ]
         legacy_names = [
             "set_cross_flag", "wait_cross_flag",
@@ -441,6 +444,127 @@ class VectorCubeSurfaceTest(unittest.TestCase):
     def test_cross_block_sync_rejects_ffts_mode(self):
         with self.assertRaises(TypeError):
             _ops.set_cross_block(pto.Pipe.FIX, 0, ffts_mode=2)
+
+    def test_cross_block_scalar_wait_requires_a5_and_forwards(self):
+        with patch_ops("_require_target_arch") as require_target_arch, \
+             patch_ops("_pipe_attr", return_value="pipe-s"), \
+             patch("ptodsl._ops_simt._pto.wait_cross_block") as wait_op:
+            _ops.wait_cross_block(pto.Pipe.S, 14)
+
+        require_target_arch.assert_called_once_with(
+            "wait_cross_block(Pipe.S, event_id)", {"a5"}
+        )
+        wait_op.assert_called_once_with("pipe-s", 14)
+
+    def test_syncall_rejects_invalid_surface_contracts(self):
+        cases = [
+            ({"mode": "invalid", "core_type": "aiv_only"}, "expected hard or soft"),
+            (
+                {"mode": "hard", "core_type": "invalid"},
+                "expected aiv_only, aic_only, or mix",
+            ),
+            (
+                {"mode": "hard", "core_type": "aiv_only", "gm_workspace": object()},
+                "does not accept gm_workspace or used_cores",
+            ),
+            ({"mode": "soft", "core_type": "aiv_only"}, "requires gm_workspace"),
+        ]
+
+        for kwargs, expected in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError) as exc:
+                    _ops.syncall(**kwargs)
+                self.assertIn(expected, str(exc.exception))
+
+        with self.assertRaises(TypeError):
+            _ops.syncall()
+
+    def test_syncall_hard_paths_forward_attributes(self):
+        attr = SimpleNamespace(parse=lambda text: text)
+
+        with patch.object(_ops_simt, "Attribute", attr), \
+             patch("ptodsl._ops_simt._pto.syncall") as syncall_op:
+            _ops.syncall(mode="hard", core_type="aiv_only")
+            _ops.syncall(mode="hard", core_type="aic_only")
+            _ops.syncall(mode="hard", core_type="mix")
+
+        self.assertEqual(
+            syncall_op.call_args_list,
+            [
+                call("#pto.sync_all_mode<hard>", "#pto.sync_core_type<aiv_only>"),
+                call("#pto.sync_all_mode<hard>", "#pto.sync_core_type<aic_only>"),
+                call("#pto.sync_all_mode<hard>", "#pto.sync_core_type<mix>"),
+            ],
+        )
+
+    def test_syncall_soft_static_used_cores_forwards_operands(self):
+        attr = SimpleNamespace(parse=lambda text: text)
+        workspace = object()
+        raw_workspace = object()
+
+        with patch.object(_ops_simt, "Attribute", attr), \
+             patch_ops("unwrap_surface_value", return_value=raw_workspace), \
+             patch_ops(
+                 "_coerce_i32_operand",
+                 side_effect=lambda value, *, context: f"i32:{value}",
+             ), \
+             patch("ptodsl._ops_simt._pto.syncall") as syncall_op:
+            _ops.syncall(
+                mode="soft",
+                core_type="aiv_only",
+                gm_workspace=workspace,
+                used_cores=4,
+            )
+
+        syncall_op.assert_called_once_with(
+            "#pto.sync_all_mode<soft>",
+            "#pto.sync_core_type<aiv_only>",
+            gm_workspace=raw_workspace,
+            used_cores="i32:4",
+        )
+
+    def test_syncall_soft_dynamic_and_omitted_used_cores_forward(self):
+        attr = SimpleNamespace(parse=lambda text: text)
+        workspace = object()
+        raw_workspace = object()
+        dynamic_used_cores = object()
+        coerced_dynamic_used_cores = object()
+
+        with patch.object(_ops_simt, "Attribute", attr), \
+             patch_ops("unwrap_surface_value", return_value=raw_workspace), \
+             patch_ops(
+                 "_coerce_i32_operand",
+                 return_value=coerced_dynamic_used_cores,
+             ), \
+             patch("ptodsl._ops_simt._pto.syncall") as syncall_op:
+            _ops.syncall(
+                mode="soft",
+                core_type="aic_only",
+                gm_workspace=workspace,
+                used_cores=dynamic_used_cores,
+            )
+            _ops.syncall(
+                mode="soft",
+                core_type="mix",
+                gm_workspace=workspace,
+            )
+
+        self.assertEqual(
+            syncall_op.call_args_list,
+            [
+                call(
+                    "#pto.sync_all_mode<soft>",
+                    "#pto.sync_core_type<aic_only>",
+                    gm_workspace=raw_workspace,
+                    used_cores=coerced_dynamic_used_cores,
+                ),
+                call(
+                    "#pto.sync_all_mode<soft>",
+                    "#pto.sync_core_type<mix>",
+                    gm_workspace=raw_workspace,
+                ),
+            ],
+        )
 
     def test_direct_vector_wrappers_dispatch_to_generated_ops(self):
         lhs = SimpleNamespace(type="vec_ty")
@@ -464,7 +588,6 @@ class VectorCubeSurfaceTest(unittest.TestCase):
             ("vneg", "VnegOp", (lhs, mask)),
             ("vrelu", "VreluOp", (lhs, mask)),
             ("vnot", "VnotOp", (lhs, mask)),
-            ("vcmin", "VcminOp", (lhs, mask)),
             ("vcpadd", "VcpaddOp", (lhs, mask)),
         ]
 
@@ -569,6 +692,92 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         self.assertIs(output, result)
         op_ctor.assert_called_once_with("vec_ty", inp, mask)
 
+    def test_vusqz_dispatches_to_generated_op_with_source_type(self):
+        inp = SimpleNamespace(type="vec_ty")
+        mask = SimpleNamespace(type="mask_ty")
+        result = object()
+
+        with patch_ops(
+            "unwrap_surface_value", side_effect=_identity
+        ), patch_ops(
+            "wrap_surface_value", side_effect=_identity
+        ), patch.object(
+            pto_dialect,
+            "VusqzOp",
+            return_value=SimpleNamespace(result=result),
+        ) as op_ctor:
+            output = pto.vusqz(inp, mask)
+
+        self.assertIs(output, result)
+        op_ctor.assert_called_once_with("vec_ty", inp, mask)
+
+    def test_dhistv2_dispatches_like_chistv2(self):
+        acc = SimpleNamespace(type="acc_ty")
+        source = SimpleNamespace(type="source_ty")
+        mask = SimpleNamespace(type="mask_ty")
+        bin_val = SimpleNamespace(type="i32")
+        result = object()
+
+        with patch_ops(
+            "unwrap_surface_value", side_effect=_identity
+        ), patch_ops(
+            "wrap_surface_value", side_effect=_identity
+        ), patch.object(
+            pto_dialect,
+            "Dhistv2Op",
+            return_value=SimpleNamespace(result=result),
+        ) as op_ctor:
+            output = pto.dhistv2(acc, source, mask, bin_val)
+
+        self.assertIs(output, result)
+        op_ctor.assert_called_once_with("acc_ty", acc, source, mask, bin_val)
+
+    def assert_vunpack_dispatch(self, dtype, lanes, expected_type, op_name):
+        with make_context():
+            src = SimpleNamespace(type=pto.vreg_type(lanes, dtype).resolve())
+            part = object()
+            coerced_part = object()
+            result = object()
+            with patch_ops(
+                "unwrap_surface_value", side_effect=_identity
+            ), patch_ops(
+                "wrap_surface_value", side_effect=_identity
+            ), patch_ops(
+                "_coerce_vunpack_part", return_value=coerced_part
+            ), patch.object(
+                pto_dialect,
+                op_name,
+                return_value=SimpleNamespace(result=result),
+            ) as op_ctor:
+                output = pto.vunpack(src, part)
+
+            self.assertIs(output, result)
+            self.assertEqual(str(op_ctor.call_args.args[0]), expected_type)
+            self.assertIs(op_ctor.call_args.args[1], src)
+            self.assertIs(op_ctor.call_args.args[2], coerced_part)
+
+    def test_vunpack_infers_width_and_selects_extension_from_signedness(self):
+        cases = [
+            (pto.si8, 256, "!pto.vreg<128xsi16>", "VsunpackOp"),
+            (pto.ui8, 256, "!pto.vreg<128xui16>", "VzunpackOp"),
+            (pto.i16, 128, "!pto.vreg<64xui32>", "VzunpackOp"),
+        ]
+        for dtype, lanes, expected_type, op_name in cases:
+            with self.subTest(dtype=dtype):
+                self.assert_vunpack_dispatch(dtype, lanes, expected_type, op_name)
+
+    def test_vunpack_rejects_unsupported_source_width(self):
+        with make_context():
+            src = SimpleNamespace(type=pto.vreg_type(64, pto.ui32).resolve())
+            with self.assertRaisesRegex(TypeError, "currently supports only"):
+                pto.vunpack(src, 0)
+
+    def test_vunpack_rejects_invalid_static_part(self):
+        with make_context():
+            src = SimpleNamespace(type=pto.vreg_type(256, pto.ui8).resolve())
+            with self.assertRaisesRegex(ValueError, "part 0 .* or 1"):
+                pto.vunpack(src, 2)
+
     def test_vcgmin_and_vsel_dispatch_correctly(self):
         vec = SimpleNamespace(type="vec_ty")
         other = SimpleNamespace(type="vec_ty")
@@ -648,7 +857,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         with patch_ops("unwrap_surface_value", side_effect=_identity), \
              patch_ops("wrap_surface_value", side_effect=_identity), \
              patch_ops("_infer_vreg_type_from_address_source", return_value="vec_ty"), \
-             patch_ops("_coerce_index", return_value="idx"), \
+             patch_ops("_coerce_element_offset", return_value="idx"), \
              patch_ops("_normalize_post_update_mode", return_value="NO_POST_UPDATE"), \
              patch_ops("_normalize_dist_token", side_effect=lambda dist, *, allowed, context: dist) as normalize_dist, \
              patch.object(_ops._pto, "VldsOp", return_value=SimpleNamespace(result=vec)) as vlds_op:
@@ -712,6 +921,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
             ("tgemv", "TGemvOp", (lhs, rhs, dst), (None, lhs, rhs, dst)),
             ("tgemv_acc", "TGemvAccOp", (acc_in, lhs, rhs, dst), (None, acc_in, lhs, rhs, dst)),
             ("tgemv_bias", "TGemvBiasOp", (lhs, rhs, bias, dst), (None, lhs, rhs, bias, dst)),
+            ("tmatmul_bias", "TMatmulBiasOp", (lhs, rhs, bias, dst), (None, lhs, rhs, bias, dst)),
             ("tmatmul_mx", "TMatmulMxOp", (lhs, lhs_scale, rhs, rhs_scale, dst), (None, lhs, lhs_scale, rhs, rhs_scale, dst)),
             ("tmatmul_mx_acc", "TMatmulMxAccOp", (acc_in, lhs, lhs_scale, rhs, rhs_scale, dst), (None, acc_in, lhs, lhs_scale, rhs, rhs_scale, dst)),
             ("tmatmul_mx_bias", "TMatmulMxBiasOp", (lhs, lhs_scale, rhs, rhs_scale, bias, dst), (None, lhs, lhs_scale, rhs, rhs_scale, bias, dst)),
@@ -1120,25 +1330,25 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         self.assertEqual(mode, "#pto<quant_pre_mode no_convert>")
 
     def test_tile_selection_surface_exposes_optional_tmp(self):
-        for func, expected in [
+        for operation, expected in [
             (_ops.tsel, ["mask", "src0", "src1", "dst", "tmp"]),
             (_ops.tsels, ["mask", "src", "scalar", "dst", "tmp"]),
             (pto.tile.sel, ["mask", "src0", "src1", "dst", "tmp"]),
             (pto.tile.sels, ["mask", "src", "scalar", "dst", "tmp"]),
         ]:
-            with self.subTest(func=func):
-                signature = inspect.signature(func)
+            with self.subTest(operation=operation):
+                signature = inspect.signature(operation)
                 self.assertEqual(list(signature.parameters.keys()), expected)
                 self.assertEqual(signature.parameters["tmp"].kind, inspect.Parameter.KEYWORD_ONLY)
                 self.assertIsNone(signature.parameters["tmp"].default)
 
     def test_tile_remainder_surface_exposes_optional_tmp(self):
-        for func, expected in [
+        for operation, expected in [
             (pto.tile.rem, ["src0", "src1", "dst", "tmp", "precision"]),
             (pto.tile.rems, ["src", "scalar", "dst", "tmp"]),
         ]:
-            with self.subTest(func=func):
-                signature = inspect.signature(func)
+            with self.subTest(operation=operation):
+                signature = inspect.signature(operation)
                 self.assertEqual(list(signature.parameters), expected)
                 self.assertEqual(signature.parameters["tmp"].kind, inspect.Parameter.KEYWORD_ONLY)
                 self.assertIsNone(signature.parameters["tmp"].default)
@@ -1176,30 +1386,30 @@ class VectorCubeSurfaceTest(unittest.TestCase):
             pto.tile.rowexpanddiv: "div_precision",
             pto.tile.colexpanddiv: "div_precision",
         }
-        for func, legacy_keyword in legacy_keywords.items():
-            with self.subTest(func=func):
-                self.assertIn("precision", inspect.signature(func).parameters)
-                self.assertIn(legacy_keyword, inspect.signature(func).parameters)
+        for operation, legacy_keyword in legacy_keywords.items():
+            with self.subTest(operation=operation):
+                self.assertIn("precision", inspect.signature(operation).parameters)
+                self.assertIn(legacy_keyword, inspect.signature(operation).parameters)
                 self.assertIs(
-                    inspect.signature(func).parameters[legacy_keyword].default,
+                    inspect.signature(operation).parameters[legacy_keyword].default,
                     _ops._UNSET,
                 )
 
     def test_legacy_precision_keyword_warns_and_forwards(self):
         src0, src1, dst = object(), object(), object()
         with patch_ops("unwrap_surface_value", side_effect=_identity), \
-             patch_ops("_normalize_enum_attr", return_value="high_precision") as normalize, \
+             patch_ops("_normalize_enum_attr", return_value="precision_0ulp_ftz_false") as normalize, \
              patch.object(_ops._pto, "tdiv") as tdiv_op:
             with self.assertWarns(PTODSLDeprecationWarning):
-                pto.tile.div(src0, src1, dst, div_precision="high_precision")
+                pto.tile.div(src0, src1, dst, div_precision="precision_0ulp_ftz_false")
 
         normalize.assert_called_once_with(
-            "high_precision",
+            "precision_0ulp_ftz_false",
             enum_cls=_ops._pto.DivPrecision,
             attr_cls=_ops._pto.DivPrecisionAttr,
             context="tdiv precision",
         )
-        tdiv_op.assert_called_once_with(src0, src1, dst, precision_type="high_precision")
+        tdiv_op.assert_called_once_with(src0, src1, dst, precision_type="precision_0ulp_ftz_false")
 
     def test_legacy_precision_keyword_cannot_be_combined_with_precision(self):
         with self.assertRaisesRegex(TypeError, "either precision or div_precision"):
@@ -1260,8 +1470,8 @@ class VectorCubeSurfaceTest(unittest.TestCase):
 
         src0, src1, dst = object(), object(), object()
         with patch_ops("tfmod") as tfmod_op:
-            pto.tile.fmod(src0, src1, dst, precision="high_precision")
-        tfmod_op.assert_called_once_with(src0, src1, dst, precision="high_precision")
+            pto.tile.fmod(src0, src1, dst, precision="precision_0ulp_ftz_false")
+        tfmod_op.assert_called_once_with(src0, src1, dst, precision="precision_0ulp_ftz_false")
 
         src, scalar, dst = object(), 3.0, object()
         with patch_ops("tfmods") as tfmods_op:
@@ -1275,8 +1485,8 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         tmp = object()
         scalar = 3.0
         with patch_ops("trem") as trem_op:
-            pto.tile.rem(src0, src1, dst, tmp=tmp, precision="high_precision")
-        trem_op.assert_called_once_with(src0, src1, dst, tmp=tmp, precision="high_precision")
+            pto.tile.rem(src0, src1, dst, tmp=tmp, precision="precision_0ulp_ftz_false")
+        trem_op.assert_called_once_with(src0, src1, dst, tmp=tmp, precision="precision_0ulp_ftz_false")
 
         with patch_ops("trems") as trems_op:
             pto.tile.rems(src0, scalar, dst)
@@ -1336,28 +1546,20 @@ class VectorCubeSurfaceTest(unittest.TestCase):
                 _ops.tsels(mask, src, scalar, dst, tmp=tmp)
             tsels_op.assert_called_once_with(mask, src, coerced_scalar, dst, tmp=tmp)
 
-    def test_tile_row_reductions_expose_optional_tmp_and_synthesize_one(self):
+    def test_tile_non_arg_row_reductions_expose_optional_tmp(self):
         src = SimpleNamespace(type="src_ty")
         dst = object()
         tmp = object()
         synthesized_tmp = object()
 
-        row_cases = [
+        for name, low_level_name in (
             ("rowsum", "trowsum"),
             ("rowmax", "trowmax"),
             ("rowmin", "trowmin"),
             ("rowprod", "trowprod"),
-            ("rowargmax", "trowargmax"),
-            ("rowargmin", "trowargmin"),
-        ]
-
-        for name, low_level_name in row_cases:
+        ):
             with self.subTest(func=name):
-                signature = inspect.signature(getattr(pto.tile, name))
-                self.assertEqual(list(signature.parameters.keys()), ["src", "dst", "tmp"])
-                self.assertEqual(signature.parameters["tmp"].kind, inspect.Parameter.KEYWORD_ONLY)
-                self.assertIsNone(signature.parameters["tmp"].default)
-
+                self._assert_row_reduction_signature(name, ["src", "dst", "tmp"])
                 with patch_ops("unwrap_surface_value", side_effect=_identity), \
                      patch_ops("alloc_tile", return_value=synthesized_tmp) as alloc_tile, \
                      patch_ops(low_level_name) as low_level_op:
@@ -1422,6 +1624,19 @@ class VectorCubeSurfaceTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unsupported tile mask pattern"):
             pto.tile.gather(src, dst, mask_pattern="PAT_ALL", axis="row")
+
+    def test_tile_unit_flag_phase_forwarding(self):
+        src, dst, phase = object(), object(), object()
+        with patch_ops("unwrap_surface_value", side_effect=_identity), \
+             patch.object(pto_dialect, "TMovOp") as mov_op, \
+             patch.object(pto_dialect, "TMatmulMxBiasOp") as matmul_op, \
+             patch.object(pto_dialect, "TGemvMxBiasOp") as gemv_op:
+            pto.tile.mov(src, dst, st_phase=phase)
+            _ops_tile.tmatmul_mx_bias(src, src, src, src, src, dst, acc_phase=phase)
+            pto.tile.gemv_mx_bias(src, src, src, src, src, dst, acc_phase=phase)
+        self.assertIs(mov_op.call_args.kwargs["stPhase"], phase)
+        self.assertIs(matmul_op.call_args.kwargs["accPhase"], phase)
+        self.assertIs(gemv_op.call_args.kwargs["accPhase"], phase)
 
     def test_tile_mov_accepts_acc_to_vec_mode(self):
         src = object()
@@ -1495,10 +1710,10 @@ class VectorCubeSurfaceTest(unittest.TestCase):
              patch.object(_ops._pto, "sync_set") as sync_set_op, \
              patch.object(_ops._pto, "sync_wait") as sync_wait_op:
             for case in cases:
-                func, args, kwargs, context, *expected_range = case
-                with self.subTest(func=func.__name__, event_id=kwargs.get("event_id", args[-1])):
+                operation, args, kwargs, context, *expected_range = case
+                with self.subTest(operation=operation.__name__, event_id=kwargs.get("event_id", args[-1])):
                     with self.assertRaises(ValueError) as exc:
-                        func(*args, **kwargs)
+                        operation(*args, **kwargs)
                     message = str(exc.exception)
                     self.assertIn(context, message)
                     self.assertIn(expected_range[0] if expected_range else "[0, 7]", message)
@@ -1523,7 +1738,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
                 _ops.wait_cross_block,
                 (pto.Pipe.M, 0),
                 "wait_cross_block(pipe, event_id)",
-                "<PIPE_FIX>, <PIPE_MTE1>, <PIPE_MTE2>, <PIPE_MTE3>, <PIPE_V>",
+                "<PIPE_FIX>, <PIPE_MTE1>, <PIPE_MTE2>, <PIPE_MTE3>, <PIPE_S>, <PIPE_V>",
                 "<PIPE_M>",
             ),
             (
@@ -1544,10 +1759,10 @@ class VectorCubeSurfaceTest(unittest.TestCase):
 
         with patch.object(_ops._pto, "sync_set") as sync_set_op, \
              patch.object(_ops._pto, "sync_wait") as sync_wait_op:
-            for func, args, context, expected, actual in cases:
-                with self.subTest(func=func.__name__, pipe=args[0]):
+            for operation, args, context, expected, actual in cases:
+                with self.subTest(operation=operation.__name__, pipe=args[0]):
                     with self.assertRaises(ValueError) as exc:
-                        func(*args)
+                        operation(*args)
                     message = str(exc.exception)
                     self.assertIn(context, message)
                     self.assertIn(expected, message)
@@ -1558,17 +1773,20 @@ class VectorCubeSurfaceTest(unittest.TestCase):
 
     def test_intra_sync_mixed_writeback_event_ranges(self):
         dynamic_event = object()
-        dynamic_event_operand = object()
-        with patch_ops("_pipe_attr", side_effect=lambda pipe: f"pipe:{pipe}") as pipe_attr, \
-             patch_ops("unwrap_surface_value", return_value=dynamic_event_operand) as unwrap_surface_value, \
-             patch.object(_ops._pto, "set_intra_block") as set_intra_block_op, \
-             patch.object(_ops._pto, "wait_intra_block") as wait_intra_block_op:
-            _ops.set_intra_block(pto.Pipe.FIX, 31)
-            _ops.set_intra_block(pto.Pipe.MTE3, 31)
-            _ops.wait_intra_block(pto.Pipe.FIX, 16)
-            _ops.wait_intra_block(pto.Pipe.V, 31)
-            _ops.wait_intra_block(pto.Pipe.MTE3, 31)
-            _ops.wait_intra_block(pto.Pipe.MTE3, dynamic_event)
+        with make_context():
+            dynamic_event_operand = SimpleNamespace(
+                type=IntegerType.get_signless(32)
+            )
+            with patch_ops("_pipe_attr", side_effect=lambda pipe: f"pipe:{pipe}") as pipe_attr, \
+                 patch_ops("unwrap_surface_value", return_value=dynamic_event_operand) as unwrap_surface_value, \
+                 patch("ptodsl._ops._pto.set_intra_block") as set_intra_block_op, \
+                 patch("ptodsl._ops._pto.wait_intra_block") as wait_intra_block_op:
+                _ops.set_intra_block(pto.Pipe.FIX, 31)
+                _ops.set_intra_block(pto.Pipe.MTE3, 31)
+                _ops.wait_intra_block(pto.Pipe.FIX, 16)
+                _ops.wait_intra_block(pto.Pipe.V, 31)
+                _ops.wait_intra_block(pto.Pipe.MTE3, 31)
+                _ops.wait_intra_block(pto.Pipe.MTE3, dynamic_event)
 
         self.assertEqual(pipe_attr.call_count, 6)
         self.assertEqual(set_intra_block_op.call_count, 2)
@@ -1951,6 +2169,75 @@ class VectorCubeSurfaceTest(unittest.TestCase):
         self.assertEqual(str(reserve_op.call_args.args[2]), "#pto.address_space<vec>")
         self.assertEqual(reserve_op.call_args.args[3], True)
         self.assertEqual(import_op.call_args.args, ("fifo", "vector_kernel"))
+
+    def test_mte_l1_l0a_3d_dynamic_geometry_requires_explicit_stride_pair(self):
+        # The (repeat_source_stride, dst_stride) pair travels together at IR
+        # level; when only one is supplied the other is derived from the
+        # geometry, which must then be compile-time constants. A dynamic (SSA)
+        # geometry with a half pair must fail fast instead of silently
+        # deriving nonsense defaults.
+        source = object()
+        destination = object()
+        dynamic = object()  # stands for a dynamic SSA value
+
+        def coerce(value, *, context):
+            return value
+
+        with patch_ops("_require_explicit_mode"), \
+             patch_ops("unwrap_surface_value", side_effect=_identity), \
+             patch_ops("_coerce_i64", side_effect=coerce), \
+             patch.object(pto_dialect, "MteL1L0a3dOp") as load_3d:
+            with self.assertRaisesRegex(
+                TypeError, "pass both repeat_source_stride and dst_stride"
+            ):
+                pto.mte_l1_l0a_3d(
+                    source,
+                    destination,
+                    fmap_h=dynamic,
+                    fmap_w=dynamic,
+                    filter_h=dynamic,
+                    filter_w=dynamic,
+                    channel_size=dynamic,
+                    repeat_source_stride=16,
+                    dst_stride=None,
+                )
+            load_3d.assert_not_called()
+
+    def test_mte_l1_l0a_3d_derives_missing_stride_from_constant_geometry(self):
+        # Full geometry constants with only dst_stride given: the expansion
+        # still gets a complete pair, so the wrapper IR keeps both operands.
+        source = object()
+        destination = object()
+
+        def coerce(value, *, context):
+            return f"{context}:{value}"
+
+        with patch_ops("_require_explicit_mode"), \
+             patch_ops("unwrap_surface_value", side_effect=_identity), \
+             patch_ops("_coerce_i64", side_effect=coerce), \
+             patch.object(pto_dialect, "MteL1L0a3dOp") as load_3d:
+            pto.mte_l1_l0a_3d(
+                source,
+                destination,
+                fmap_h=8,
+                fmap_w=8,
+                filter_h=3,
+                filter_w=3,
+                channel_size=16,
+                dst_stride=4,
+            )
+        operands = load_3d.call_args.args
+        # M = 6x6 = 36 -> repeat_source_stride = ceil(36/16) = 3 16-row blocks.
+        self.assertEqual(operands[20], "mte_l1_l0a_3d repeat_source_stride:3")
+        self.assertEqual(operands[21], "mte_l1_l0a_3d dst_stride:4")
+
+    def _assert_row_reduction_signature(self, name, parameters):
+        signature = inspect.signature(getattr(pto.tile, name))
+        self.assertEqual(list(signature.parameters), parameters)
+        self.assertEqual(
+            signature.parameters["tmp"].kind, inspect.Parameter.KEYWORD_ONLY
+        )
+        self.assertIsNone(signature.parameters["tmp"].default)
 
 
 if __name__ == "__main__":

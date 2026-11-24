@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,13 +6,16 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """PTODSL TileLib templates for pto.tcmps."""
+
+from dataclasses import dataclass
 
 from ptodsl import pto
 from ptodsl._ast_rewrite import rewrite_jit_function
 import ptodsl.tilelib as tilelib
 
-from ._elementwise import traversal_metadata
+from ._elementwise import _ub_or_vec_row_major, traversal_metadata
 
 
 _DTYPES = [
@@ -21,20 +25,50 @@ _DTYPES = [
     ("i16", "i16", "ui8"),
     ("i8", "i8", "ui8"),
     ("ui8", "ui8", "ui8"),
+    ("ui16", "ui16", "ui8"),
+    ("ui32", "ui32", "ui8"),
+    ("bf16", "bf16", "ui8"),
 ]
 
 
-def _ub_or_vec_row_major(
-    operand_memory_spaces,
-    operand_b_layouts,
-    operand_s_layouts,
-    **_,
-):
-    return (
-        all(space in {"ub", "vec"} for space in operand_memory_spaces)
-        and all(layout == "row_major" for layout in operand_b_layouts)
-        and all(layout == "none_box" for layout in operand_s_layouts)
-    )
+def _pack_f32_pair_second(first_cmp_b8, second, scalar, second_mask, cmp_mode):
+    """Compare the second f32 lane and interleave it with the first result."""
+    second_cmp = pto.vcmps(second, scalar, second_mask, cmp_mode)
+    second_cmp_b8 = pto.pbitcast(second_cmp, pto.mask_b8)
+    packed_low, _ = pto.pdintlv_b8(first_cmp_b8, second_cmp_b8)
+    return packed_low
+
+
+@dataclass(frozen=True)
+class _TcmpsLinearOperands:
+    """Trace-time operands for the linear scalar-compare emitter."""
+
+    src_ptr: object
+    dst_ptr: object
+    scalar: object
+    dtype: object
+    total_elements: object
+    cmp_mode: object
+
+
+@rewrite_jit_function
+def _emit_tcmps_linear(operands):
+    """Emit scalar comparisons for one-dimensional non-wide vectors."""
+    src_ptr = operands.src_ptr
+    dst_ptr = operands.dst_ptr
+    scalar = operands.scalar
+    dtype = operands.dtype
+    total_elements = operands.total_elements
+    cmp_mode = operands.cmp_mode
+    lanes = pto.elements_per_vreg(dtype)
+    remained = total_elements
+    packed = str(dtype) in {"f16", "i16", "ui16", "bf16"}
+    for offset in range(0, total_elements, lanes):
+        mask, remained = pto.make_mask(dtype, remained)
+        value = pto.vlds(src_ptr, offset)
+        result = pto.vcmps(value, scalar, mask, cmp_mode)
+        dist = pto.PredicateDist.PK if packed else pto.PredicateDist.NORM
+        pto.psts(result, dst_ptr, offset // 8, dist=dist)
 
 
 @rewrite_jit_function
@@ -47,7 +81,7 @@ def _emit_tcmps_1d(src, scalar, dst):
     src_ptr = src.as_ptr()
     dst_ptr = dst.as_ptr()
 
-    if str(dtype) in {"f32", "i32"}:
+    if str(dtype) in {"f32", "i32", "ui32"}:
         remained = total_elements
         for offset in range(0, total_elements, lanes * 2):
             first_mask, remained = pto.make_mask(dtype, remained)
@@ -57,17 +91,12 @@ def _emit_tcmps_1d(src, scalar, dst):
 
             second_mask, remained = pto.make_mask(dtype, remained)
             second = pto.vlds(src_ptr, offset + lanes)
-            second_cmp = pto.vcmps(
+            packed_low = _pack_f32_pair_second(
+                first_cmp_b8,
                 second,
                 scalar,
                 second_mask,
                 cmp_mode,
-            )
-            second_cmp_b8 = pto.pbitcast(second_cmp, pto.mask_b8)
-
-            packed_low, _ = pto.pdintlv_b8(
-                first_cmp_b8,
-                second_cmp_b8,
             )
             pto.psts(
                 packed_low,
@@ -75,121 +104,100 @@ def _emit_tcmps_1d(src, scalar, dst):
                 offset // 8,
                 dist=pto.PredicateDist.PK,
             )
-    elif str(dtype) in {"f16", "i16"}:
-        remained = total_elements
-        for offset in range(0, total_elements, lanes):
-            mask, remained = pto.make_mask(dtype, remained)
-            value = pto.vlds(src_ptr, offset)
-            cmp = pto.vcmps(value, scalar, mask, cmp_mode)
+    else:
+        operands = _TcmpsLinearOperands(
+            src_ptr,
+            dst_ptr,
+            scalar,
+            dtype,
+            total_elements,
+            cmp_mode,
+        )
+        _emit_tcmps_linear(operands)
+
+
+@rewrite_jit_function
+def _emit_tcmps_2d_f32(src, scalar, dst, cmp_mode):
+    dtype = src.dtype
+    valid_rows, valid_cols = src.valid_shape
+    lanes = pto.elements_per_vreg(dtype)
+    dst_ptr = dst.as_ptr()
+    repeat_times = (valid_cols + lanes - 1) // lanes + 1
+    iterations = repeat_times // 2
+    # The destination tile may be padded, so advance by its physical row
+    # stride instead of the bytes this loop happens to produce.
+    dst_row_bytes = dst.shape[1] * pto.bytewidth(dst.dtype)
+    for row in range(0, valid_rows, 1):
+        remained = valid_cols
+        for col in range(0, iterations, 1):
+            first_offset = col * lanes * 2
+            second_offset = (col * 2 + 1) * lanes
+
+            first_mask, remained = pto.make_mask(dtype, remained)
+            first = pto.vlds(src[row, first_offset:])
+            first_cmp = pto.vcmps(
+                first,
+                scalar,
+                first_mask,
+                cmp_mode,
+            )
+            first_cmp_b8 = pto.pbitcast(first_cmp, pto.mask_b8)
+
+            second_mask, remained = pto.make_mask(dtype, remained)
+            second = pto.vlds(src[row, second_offset:])
+            packed_low = _pack_f32_pair_second(
+                first_cmp_b8,
+                second,
+                scalar,
+                second_mask,
+                cmp_mode,
+            )
+            store_offset = row * dst_row_bytes + col * 16
             pto.psts(
-                cmp,
+                packed_low,
                 dst_ptr,
-                offset // 8,
+                store_offset,
                 dist=pto.PredicateDist.PK,
             )
-    else:
-        remained = total_elements
-        for offset in range(0, total_elements, lanes):
+
+
+@rewrite_jit_function
+def _emit_tcmps_2d_narrow(src, scalar, dst, cmp_mode, packed):
+    """Emit row-wise scalar compares for packed f16/i16 or byte i8 predicates."""
+    dtype = src.dtype
+    valid_rows, valid_cols = src.valid_shape
+    lanes = pto.elements_per_vreg(dtype)
+    dst_ptr = dst.as_ptr()
+    bytes_per_iter = 16 if packed else 32
+    # Use the physical destination row stride: valid_cols can be narrower than
+    # the padded destination tile.
+    dst_row_bytes = dst.shape[1] * pto.bytewidth(dst.dtype)
+    dist = pto.PredicateDist.PK if packed else pto.PredicateDist.NORM
+    for row in range(0, valid_rows, 1):
+        remained = valid_cols
+        for col in range(0, valid_cols, lanes):
             mask, remained = pto.make_mask(dtype, remained)
-            value = pto.vlds(src_ptr, offset)
+            value = pto.vlds(src[row, col:])
             cmp = pto.vcmps(value, scalar, mask, cmp_mode)
+            store_offset = row * dst_row_bytes + (col // lanes) * bytes_per_iter
             pto.psts(
                 cmp,
                 dst_ptr,
-                offset // 8,
-                dist=pto.PredicateDist.NORM,
+                store_offset,
+                dist=dist,
             )
 
 
 @rewrite_jit_function
 def _emit_tcmps_2d(src, scalar, dst):
     dtype = src.dtype
-    valid_rows, valid_cols = src.valid_shape
-    lanes = pto.elements_per_vreg(dtype)
     cmp_mode = pto.get_op_attr("cmp_mode", "eq")
-    dst_ptr = dst.as_ptr()
-
-    # The destination is a linear packed-predicate byte stream. Its physical
-    # column count provides capacity; it is not the stride between logical
-    # predicate rows. Each row starts after the packed bytes emitted for the
-    # preceding row, preserving the existing TCMPS layout contract.
-    if str(dtype) in {"f32", "i32"}:
-        repeat_times = (valid_cols + lanes - 1) // lanes + 1
-        iterations = repeat_times // 2
-        packed_row_bytes = iterations * 16
-        for row in range(0, valid_rows, 1):
-            remained = valid_cols
-            for col in range(0, iterations, 1):
-                first_offset = col * lanes * 2
-                second_offset = (col * 2 + 1) * lanes
-
-                first_mask, remained = pto.make_mask(dtype, remained)
-                first = pto.vlds(src[row, first_offset:])
-                first_cmp = pto.vcmps(
-                    first,
-                    scalar,
-                    first_mask,
-                    cmp_mode,
-                )
-                first_cmp_b8 = pto.pbitcast(first_cmp, pto.mask_b8)
-
-                second_mask, remained = pto.make_mask(dtype, remained)
-                second = pto.vlds(src[row, second_offset:])
-                second_cmp = pto.vcmps(
-                    second,
-                    scalar,
-                    second_mask,
-                    cmp_mode,
-                )
-                second_cmp_b8 = pto.pbitcast(second_cmp, pto.mask_b8)
-
-                packed_low, _ = pto.pdintlv_b8(
-                    first_cmp_b8,
-                    second_cmp_b8,
-                )
-                store_offset = row * packed_row_bytes + col * 16
-                pto.psts(
-                    packed_low,
-                    dst_ptr,
-                    store_offset,
-                    dist=pto.PredicateDist.PK,
-                )
-    elif str(dtype) in {"f16", "i16"}:
-        bytes_per_iter = 16
-        iters_per_row = (valid_cols + lanes - 1) // lanes
-        for row in range(0, valid_rows, 1):
-            remained = valid_cols
-            for col in range(0, valid_cols, lanes):
-                mask, remained = pto.make_mask(dtype, remained)
-                value = pto.vlds(src[row, col:])
-                cmp = pto.vcmps(value, scalar, mask, cmp_mode)
-                store_offset = (
-                    row * iters_per_row + col // lanes
-                ) * bytes_per_iter
-                pto.psts(
-                    cmp,
-                    dst_ptr,
-                    store_offset,
-                    dist=pto.PredicateDist.PK,
-                )
+    if str(dtype) in {"f32", "i32", "ui32"}:
+        _emit_tcmps_2d_f32(src, scalar, dst, cmp_mode)
     else:
-        bytes_per_iter = 32
-        iters_per_row = (valid_cols + lanes - 1) // lanes
-        for row in range(0, valid_rows, 1):
-            remained = valid_cols
-            for col in range(0, valid_cols, lanes):
-                mask, remained = pto.make_mask(dtype, remained)
-                value = pto.vlds(src[row, col:])
-                cmp = pto.vcmps(value, scalar, mask, cmp_mode)
-                store_offset = (
-                    row * iters_per_row + col // lanes
-                ) * bytes_per_iter
-                pto.psts(
-                    cmp,
-                    dst_ptr,
-                    store_offset,
-                    dist=pto.PredicateDist.NORM,
-                )
+        _emit_tcmps_2d_narrow(
+            src, scalar, dst, cmp_mode, str(dtype) in {"f16", "i16", "ui16", "bf16"}
+        )
 
 
 def _register_tcmps(*, name, traversal):

@@ -18,7 +18,7 @@ module {
     %c32 = arith.constant 32 : index
     %aligned_off = arith.muli %off, %c32 : index
     %x8 = pto.vmi.vload %src[%aligned_off]
-        : !pto.ptr<f8E4M3FN, ub> -> !pto.vmi.vreg<256xf8E4M3FN>
+        : !pto.ptr<f8E4M3FN, ub>, index -> !pto.vmi.vreg<256xf8E4M3FN>
     %x32 = pto.vmi.vcvt %x8
         : !pto.vmi.vreg<256xf8E4M3FN> -> !pto.vmi.vreg<256xf32>
     %scale_vec = pto.vmi.vbrc %scale
@@ -29,7 +29,7 @@ module {
     %y8 = pto.vmi.vcvt %y32 {saturate = "SAT"}
         : !pto.vmi.vreg<256xf32> -> !pto.vmi.vreg<256xf8E4M3FN>
     pto.vmi.vstore %y8, %dst[%aligned_off]
-        : !pto.vmi.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>
+        : !pto.vmi.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, index
     return
   }
 }
@@ -42,7 +42,7 @@ module {
 // ASSIGN: %[[SCALE:.*]] = pto.vmi.broadcast
 // ASSIGN-SAME: -> !pto.vmi.vreg<256xf32, #pto.vmi.layout<contiguous>>
 // ASSIGN-NOT: pto.vmi.ensure_layout %[[X32]]
-// ASSIGN: %[[Y32:.*]] = pto.vmi.mulf %[[X32]], %[[SCALE]]
+// ASSIGN: %[[Y32:.*]] = pto.vmi.vmul %[[X32]], %[[SCALE]]
 // ASSIGN-SAME: -> !pto.vmi.vreg<256xf32, #pto.vmi.layout<contiguous>>
 // ASSIGN: %[[Y8:.*]] = pto.vmi.truncf %[[Y32]]
 // ASSIGN-SAME: -> !pto.vmi.vreg<256xf8E4M3FN, #pto.vmi.layout<contiguous, lane_stride = 4>>

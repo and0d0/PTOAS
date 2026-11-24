@@ -11,7 +11,7 @@ These instructions build the address, view, and tile-buffer metadata that later 
 
 - **syntax:**
 ```mlir
-%result = pto.addptr %base, %offset : !pto.ptr<T> -> !pto.ptr<T>
+%result = pto.addptr %base, %offset : !pto.ptr<T>, index -> !pto.ptr<T>
 ```
 - **semantics:** `result = ptr + offset`, with `offset` counted in **elements** (not bytes).
 
@@ -20,17 +20,22 @@ These instructions build the address, view, and tile-buffer metadata that later 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `%base` | `!pto.ptr<T>` | Base pointer. |
-| `%offset` | `index` | Element offset. |
+| `%offset` | `index`, `i32` or `i64` | Element offset. |
 
 **Constraints:**
 
 - Result type must match the input pointer type.
 - The op is pure (no side effects).
+- The offset type is part of the operand type list, immediately after the base
+  pointer type, and is required; an integer offset keeps its own width and is not
+  widened to `index`.  Narrower widths (`i1`/`i8`/`i16`), signed and unsigned
+  integer types (`si32`, `ui32`) and widths above 64 bits are rejected.
 
 **Example:**
 
 ```mlir
-%ptr_off = pto.addptr %base, %offset : !pto.ptr<f32> -> !pto.ptr<f32>
+%ptr_off = pto.addptr %base, %offset : !pto.ptr<f32>, index -> !pto.ptr<f32>
+%ptr_off32 = pto.addptr %base, %off32 : !pto.ptr<f32>, i32 -> !pto.ptr<f32>
 ```
 
 ---
@@ -84,13 +89,19 @@ These instructions build the address, view, and tile-buffer metadata that later 
 | `%ptr` | `AnyType` | Source pointer (must be `!pto.ptr<T>` with element type matching the result). |
 | `shape` | `Variadic<Index>` | Dynamic shape dimensions. |
 | `strides` | `Variadic<Index>` | Dynamic strides. |
-| `layout` | `LayoutAttr` (optional) | `nd` / `dn` / `nz` hint. |
+| `layout` | `LayoutAttr` (optional) | `nd`, `dn`, `nz`, or an MX layout from §2.8. |
 
 **Constraints:**
 
 - `ptr` element type must match the result element type.
 - `shape` and `strides` operand counts must match the tensor_view rank.
 - If `layout` is provided with static shapes/strides, it must be consistent with the inferred layout.
+- MX layouts are available only on A5 and require a rank-2 view of `!pto.f8E8M0` scale elements. Shapes and strides are measured in scale elements, not quantized data elements.
+- MX ND layouts require contiguous row-major strides `[cols, 1]`; MX DN layouts require contiguous column-major strides `[1, rows]`. MX ZZ/NN views use `[cols, 1]` for their logical shape.
+- MX A layouts require an even column count; MX B layouts require an even row count, matching the PTO-ISA scale-pair constraint. Dynamic dimensions must satisfy this constraint at runtime.
+- Logical rows in `mx_a_zz` and logical columns in `mx_b_nn` may have a partial final block of 16. The backing GM data must already be packed and padded to complete blocks; view construction performs no allocation or padding. For example, a `4x63` B-NN view requires storage for `4x64` scales, while its logical extent and a Tile's valid columns may remain 63. This block padding does not apply to `mx_a_nd` rows.
+- Runtime dimensions, element counts (`rows * cols`), and packed strides (including stride times two) must fit the signed index range and the backing global-memory allocation.
+- A partition inherits the source layout; an explicitly different result layout is invalid. Dimension queries on MX views use logical dimension indices 0 and 1.
 
 **Example:**
 
@@ -295,6 +306,7 @@ pto.set_validshape %src, %valid_row, %valid_col : !pto.tile_buf<vec, RxCxT, vali
 **Constraints:**
 
 - `%src` must be rank-2 and use `v_row = ?` and `v_col = ?` on both dimensions.
+- `%src` must be a locally bound tile: an `alloc_tile`/`declare_tile`/frontend `tpop` result, or a `bitcast`/`treshape` view of one. Function arguments and other non-local sources are rejected.
 - Tile programs use `pto.tile_buf`; memref forms are a lowering artifact and are not part of this surface.
 - Constant `valid_row`/`valid_col` must be non-negative and `<=` the tile's static shape bounds.
 

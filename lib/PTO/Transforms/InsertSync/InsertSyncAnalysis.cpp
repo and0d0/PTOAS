@@ -11,11 +11,31 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
+#include "PTO/Transforms/InsertSync/InsertSyncAnalysis.h"
+#include "PTO/Transforms/InsertSync/InsertSyncDebug.h"
+#include "ColumnBroadcastSyncUtils.h"
+#include "PTO/IR/PTO.h"
+#include "PTO/IR/PTOMultiBuffer.h"
+#include "PTO/IR/PTOSyncUtils.h"
+#include "PTO/IR/PTOTypeUtils.h"
+#include "PTO/Support/CodeConstants.h"
+#include "PTO/Transforms/InsertSync/SyncCommon.h"
+#include "PTO/Transforms/SlotAffineAnalysis.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
+
 #include "PTO/IR/PTO.h"
 #include "PTO/IR/PTOMultiBuffer.h"
 #include "PTO/IR/PTOTypeUtils.h"
@@ -23,13 +43,6 @@
 #include "PTO/Transforms/InsertSync/InsertSyncAnalysis.h"
 #include "PTO/Transforms/InsertSync/SyncCommon.h"
 #include "PTO/Transforms/SlotAffineAnalysis.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Matchers.h"
-#include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/Casting.h"
-#include "llvm/Support/ErrorHandling.h"
 
 
 #define DEBUG_TYPE "pto-insert-sync-analysis"
@@ -74,12 +87,12 @@ static bool hasReadWriteScratchDependency(
   } else if (auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op)) {
     dpsInits = dpsOp.getDpsInits();
   }
-  return llvm::any_of(writes, [&](Value value) {
+  return llvm::any_of(writes, [&reads, &dpsInits, &dependencies](Value value) {
     if (!reads.contains(value) || llvm::is_contained(dpsInits, value)) {
       return false;
     }
-    return llvm::any_of(dependencies, [&](const auto &dependency) {
-      auto matches = [&](const BaseMemInfo *info) {
+    return llvm::any_of(dependencies, [&value](const auto &dependency) {
+      auto matches = [&value](const BaseMemInfo *info) {
         return info &&
                (info->baseBuffer == value || info->rootBuffer == value);
       };
@@ -198,9 +211,16 @@ static bool isSameExactAccess(const BaseMemInfo *lhs, const BaseMemInfo *rhs) {
 
 static bool containsExactAccess(const SmallVector<const BaseMemInfo *> &infos,
                                 const BaseMemInfo *access) {
-  return llvm::any_of(infos, [&](const BaseMemInfo *info) {
+  return llvm::any_of(infos, [&access](const BaseMemInfo *info) {
     return isSameExactAccess(info, access);
   });
+}
+
+static bool isErasedA5VectorBarrier(func::FuncOp func,
+                                    const SyncOperation *sync) {
+  return isTargetArchA5(func) &&
+         sync->GetType() == SyncOperation::TYPE::PIPE_BARRIER &&
+         sync->GetSrcPipe() == PipelineType::PIPE_V;
 }
 
 } // namespace
@@ -229,6 +249,13 @@ static bool isTLoadToTLoadWAWExempt(const CompoundInstanceElement *nowCompound,
 
 void InsertSyncAnalysis::Run(bool insertBarAllAtLast) {
   syncIndex_ = syncOperations_.size();
+
+  // The unit-flag model is structural and does not change while the insertion
+  // runs; build it once so every dependency query shares the same region tree.
+  ufTokenModel_ = std::make_unique<UFTokenModel>(syncIR_);
+  ufTokenModel_->build();
+  InitializeUFOrderedCompounds();
+  ufTokenModel_->emitDeadlockDiagnostics();
 
   for (auto &nowElement : syncIR_) {
     if (auto *nowCompound =
@@ -297,6 +324,7 @@ void InsertSyncAnalysis::InsertBackForSync(
       nowCompound->kPipeValue, nowCompound->opName);
   backCompound->compoundCoreType = nowCompound->compoundCoreType;
   backCompound->elementOp = nowCompound->elementOp;
+  backCompound->ufInfo = nowCompound->ufInfo;
 
   auto *backCompoundPtr = backCompound.get();
   backSyncIr.emplace_back(std::move(backCompound));
@@ -318,23 +346,31 @@ void InsertSyncAnalysis::InsertBackForSync(
 bool InsertSyncAnalysis::IsNoNeedToInsertSync(
     const CompoundInstanceElement *nowCompound,
     const CompoundInstanceElement *frontCompound, bool isBackwardDep) const {
-  const PipelineType frontPipe = frontCompound->kPipeValue;
-  const PipelineType nowPipe = nowCompound->kPipeValue;
+    const PipelineType frontPipe = frontCompound->kPipeValue;
+    const PipelineType nowPipe = nowCompound->kPipeValue;
+    if (frontPipe == nowPipe && frontPipe == PipelineType::PIPE_S) {
+        return true;
+    }
 
-  if (frontPipe == nowPipe && frontPipe == PipelineType::PIPE_S) {
-    return true;
-  }
+    // A5 orders M-pipe dependencies. A3 small-output matmul pairs still
+    // require memory analysis, including loop-carried dependencies.
+    if (frontPipe == PipelineType::PIPE_M && nowPipe == frontPipe &&
+        (isTargetArchA5(func_) ||
+         (isTargetArchA3(func_) &&
+          !requiresA3MatmulDependencyBarrier(frontCompound->elementOp, nowCompound->elementOp)))) {
+        return true;
+    }
 
-  if (nowCompound->elementOp == frontCompound->elementOp && !isBackwardDep) {
-    return true;
-  }
+    if (nowCompound->elementOp == frontCompound->elementOp && !isBackwardDep) {
+        return true;
+    }
 
-  // Do not short-circuit same-pipe pairs here. If a real memory dependency is
-  // present, MemAnalyze will insert a PIPE_BARRIER to serialize that pipe,
-  // matching the "bar_v/bar_m" style intra-pipe synchronization expected by
-  // higher-level frontends.
+    // Other same-pipe pairs still need analysis. If a real memory dependency is
+    // present, MemAnalyze will insert a PIPE_BARRIER to serialize that pipe,
+    // matching the intra-pipe synchronization expected by
+    // higher-level frontends.
 
-  return false;
+    return false;
 }
 
 void InsertSyncAnalysis::InsertSeqSync(
@@ -445,7 +481,7 @@ unsigned InsertSyncAnalysis::InsertBranchSync(
 
 void InsertSyncAnalysis::MergeAlreadySync(
     SyncRecordList &syncRecordList, const SyncRecordList &syncRecordIfList,
-    const SyncRecordList &syncRecordElseList) {
+    const SyncRecordList &syncRecordElseList) const {
   for (size_t bufferIdx = 0; bufferIdx < syncRecordList.size(); bufferIdx++) {
     for (size_t pipeIdx = 0; pipeIdx < kPipeStateSize; pipeIdx++) {
       if (syncRecordIfList[bufferIdx].alreadySync[pipeIdx] &&
@@ -470,6 +506,362 @@ void InsertSyncAnalysis::InsertSync(
   MemAnalyze(nowCompound, frontCompound, syncRecordList, forEndIndex);
 }
 
+//===----------------------------------------------------------------------===//
+// Affine-disjoint carried accesses
+//===----------------------------------------------------------------------===//
+// An access has no loop-carried dependence on itself when it moves far enough per
+// iteration that the memory two iterations touch never meets. This proves that for
+// a `pto.partition_view` whose offset is affine in the induction variable of the loop
+// whose back edge carries the dependence, which is the shape a store walking a tensor
+// takes. Every condition is cumulative and the default is to keep the sync: each helper
+// refuses the moment an input is not a compile-time constant.
+
+/// The `scf.for` whose back edge `forEndIndex` denotes, or null.
+/// THE INNERMOST ENCLOSING LOOP IS THE WRONG ANSWER, and silently so. A carried
+/// dependence is analysed once per back edge, and for an access inside a nest the
+/// outer back edge and the inner one are different questions: inner iterations can
+/// be disjoint while the outer loop restarts and revisits the same addresses. Proving
+/// disjointness against the innermost enclosing loop therefore answers the inner
+/// question and applies the result to whichever edge is under analysis.
+/// `forEndIndex` indexes `syncIR_`, and its element is the loop's LOOP_END marker.
+/// `UpdateForOpInfo` records the op on both markers, so the loop is recovered exactly
+/// rather than inferred. Note the index refers to `syncIR_` even while a back edge is
+/// being analysed over the copied body slice, so it must not be resolved against the
+/// SyncIRs the current traversal happens to walk.
+/// Null on every path that does not resolve to an `scf.for`: an out-of-range index, an
+/// element that is not a loop, a loop marker with no op, and an `scf.while`, which
+/// reaches the same element type through `UpdateWhileOpInfo`. Callers must treat null
+/// as "not proven".
+static scf::ForOp carryingForOf(const SyncIRs &syncIR, const std::optional<unsigned> &forEndIndex) {
+  if (!forEndIndex.has_value() || forEndIndex.value() >= syncIR.size()) {
+    return {};
+  }
+  const auto *loopEl = dyn_cast_or_null<LoopInstanceElement>(syncIR[forEndIndex.value()].get());
+  if (!loopEl || !loopEl->elementOp) {
+    return {};
+  }
+  return dyn_cast<scf::ForOp>(loopEl->elementOp);
+}
+
+/// True when the back edge denoted by `forEndIndex` can take part in the UF
+/// proof. `scf.for` and `scf.while` both qualify; the token model checks the
+/// while body's before/after summaries and exit-state consistency.
+static bool isUFSupportedCarryingLoop(
+    const SyncIRs &syncIR, const std::optional<unsigned> &forEndIndex) {
+  const bool invalidIndex =
+      !forEndIndex.has_value() || forEndIndex.value() >= syncIR.size();
+  if (invalidIndex) {
+    return false;
+  }
+  const auto *loopEl =
+      dyn_cast_or_null<LoopInstanceElement>(syncIR[forEndIndex.value()].get());
+  if (!loopEl || !loopEl->elementOp) {
+    return false;
+  }
+  return isa<scf::ForOp, scf::WhileOp>(loopEl->elementOp);
+}
+
+/// `v` as a compile-time constant index, or nullopt.
+static std::optional<int64_t> constantIndexOf(Value v) {
+  APInt value;
+  if (!v || !matchPattern(v, m_ConstantInt(&value))) {
+    return std::nullopt;
+  }
+  return value.getSExtValue();
+}
+
+/// How far `v` moves per iteration of `forOp`: the coefficient of its induction
+/// variable, or nullopt when that is not a compile-time constant.
+/// `v` qualifies when it is a sum of terms that are each either loop-invariant or a
+/// constant multiple of the induction variable. A load, `iv * iv`, a select, or a
+/// non-constant scale on the induction variable all yield nullopt.
+/// Loop-invariance, not constant-ness, is the base case that matters: offsets are
+/// built from the block index and from enclosing loops' induction variables, none of
+/// which folds to a constant, but a value defined outside this loop's body cannot
+/// change between its iterations.
+static std::optional<int64_t> movementPerIteration(Value v, scf::ForOp forOp, unsigned depth = 0);
+
+static std::optional<int64_t> scaledMovement(arith::MulIOp mul, scf::ForOp forOp, unsigned depth)
+{
+    // Only a constant scale is usable: `iv * n` with n loop-invariant but unknown
+    // moves by an unknown amount, which must refuse.
+    if (auto c = constantIndexOf(mul.getRhs())) {
+        auto l = movementPerIteration(mul.getLhs(), forOp, depth + 1);
+        if (!l) {
+            return std::nullopt;
+        }
+        int64_t result;
+        if (__builtin_mul_overflow(*l, *c, &result)) {
+            return std::nullopt;
+        }
+        return result;
+    }
+    if (auto c = constantIndexOf(mul.getLhs())) {
+        auto r = movementPerIteration(mul.getRhs(), forOp, depth + 1);
+        if (!r) {
+            return std::nullopt;
+        }
+        int64_t result;
+        if (__builtin_mul_overflow(*r, *c, &result)) {
+            return std::nullopt;
+        }
+        return result;
+    }
+    return std::nullopt;
+}
+
+static std::optional<int64_t> movementPerIteration(Value v, scf::ForOp forOp, unsigned depth)
+{
+    if (!v || !forOp || depth > mlir::pto::kValue8) {
+        return std::nullopt;
+    }
+    if (v == forOp.getInductionVar()) {
+        return 1;
+    }
+    if (forOp.isDefinedOutsideOfLoop(v) || constantIndexOf(v)) {
+        return 0;
+    }
+    if (auto add = v.getDefiningOp<arith::AddIOp>()) {
+        auto l = movementPerIteration(add.getLhs(), forOp, depth + 1);
+        auto r = movementPerIteration(add.getRhs(), forOp, depth + 1);
+        if (!l || !r) {
+            return std::nullopt;
+        }
+        int64_t result;
+        if (__builtin_add_overflow(*l, *r, &result)) {
+            return std::nullopt;
+        }
+        return result;
+    }
+    if (auto sub = v.getDefiningOp<arith::SubIOp>()) {
+        auto l = movementPerIteration(sub.getLhs(), forOp, depth + 1);
+        auto r = movementPerIteration(sub.getRhs(), forOp, depth + 1);
+        if (!l || !r) {
+            return std::nullopt;
+        }
+        int64_t result;
+        if (__builtin_sub_overflow(*l, *r, &result)) {
+            return std::nullopt;
+        }
+        return result;
+    }
+    if (auto mul = v.getDefiningOp<arith::MulIOp>()) {
+        return scaledMovement(mul, forOp, depth);
+    }
+    return std::nullopt;
+}
+
+/// The strides of the tensor view a `pto.partition_view` reads, as compile-time
+/// constants, or nullopt when the view is not a `pto.make_tensor_view` with
+/// constant strides of the expected rank.
+static std::optional<SmallVector<int64_t>> viewStrides(Value source, unsigned rank) {
+  auto make = source.getDefiningOp<pto::MakeTensorViewOp>();
+  if (!make || make.getStrides().size() != rank) {
+    return std::nullopt;
+  }
+  SmallVector<int64_t> strides;
+  for (Value stride : make.getStrides()) {
+    auto c = constantIndexOf(stride);
+    if (!c) {
+      return std::nullopt;
+    }
+    strides.push_back(*c);
+  }
+  return strides;
+}
+
+/// Whether the base pointer the `pto.partition_view` ultimately reads is invariant
+/// across the carrying loop.
+/// The disjointness proof below tracks only how the `partition_view`'s OFFSETS move
+/// per iteration, scaled by the view strides. It silently assumes the underlying
+/// `pto.make_tensor_view` base pointer is fixed. If that pointer instead moves with
+/// the induction variable -- e.g. `moving = pto.addptr base, -i*stride` feeding the
+/// view while the offset advances by `+i*stride` -- the two movements cancel and
+/// every iteration lands on the same addresses, yet the offset-only math still
+/// reports a non-zero shift. Dropping the dependence then deletes a real
+/// cross-iteration hazard. Guard against it conservatively: require the base pointer
+/// to be defined outside the loop. When it cannot be proven invariant, the caller
+/// keeps the dependence. (Supporting a dynamic base would mean folding the pointer's
+/// own per-iteration movement into the address-shift proof, which this does not do.)
+static bool viewBaseInvariant(Value source, scf::ForOp forOp) {
+  auto make = source.getDefiningOp<pto::MakeTensorViewOp>();
+  if (!make) {
+    return false;
+  }
+  return forOp.isDefinedOutsideOfLoop(make.getPtr());
+}
+
+/// Locate the single offset dimension that advances with this loop.
+static std::optional<std::pair<unsigned, int64_t>> varyingOffset(ValueRange offsets, scf::ForOp forOp) {
+  unsigned rank = offsets.size();
+  std::optional<unsigned> varyingDim;
+  int64_t coeff = 0;
+  for (unsigned d = 0; d < rank; ++d) {
+    auto c = movementPerIteration(offsets[d], forOp);
+    if (!c) {
+      return std::nullopt; // offset not affine in the induction variable
+    }
+    if (*c == 0) {
+      continue; // affine but loop-invariant
+    }
+    if (varyingDim) {
+      return std::nullopt; // two dimensions moving at once: not modelled
+    }
+    varyingDim = d;
+    coeff = *c;
+  }
+  if (!varyingDim) {
+    return std::nullopt; // nothing moves: every iteration hits the same region
+  }
+  return std::make_pair(*varyingDim, coeff);
+}
+
+static constexpr int64_t kMaxViewFactor = 1LL << 30;
+
+static bool boundedViewFactor(int64_t v) { return v > -kMaxViewFactor && v < kMaxViewFactor; }
+
+static std::optional<int64_t> viewAddressWindow(ValueRange sizes, llvm::ArrayRef<int64_t> strides) {
+  unsigned rank = sizes.size();
+  // Bound each factor and the accumulated address window before using it as proof.
+  int64_t window = 0;
+  for (unsigned d = 0; d < rank; ++d) {
+    auto size = constantIndexOf(sizes[d]);
+    if (!size || *size <= 0) {
+      return std::nullopt;
+    }
+    int64_t stride = strides[d];
+    if (!boundedViewFactor(*size) || !boundedViewFactor(stride)) {
+      return std::nullopt;
+    }
+    window += (*size - 1) * std::abs(stride);
+    if (!boundedViewFactor(window)) {
+      return std::nullopt;
+    }
+  }
+
+  return window;
+}
+
+/// Do two consecutive iterations of `view` touch disjoint memory?
+/// Requires, cumulatively: a constant loop step; exactly one dimension whose offset
+/// varies with the induction variable, with a compile-time constant coefficient, and
+/// every other offset loop-invariant; constant sizes in every dimension; constant
+/// view strides; a base pointer that does not move with the loop; and the separation
+/// itself.
+/// The separation is proven in ADDRESS space, not index space. Disjoint index ranges
+/// imply disjoint addresses only if the layout maps distinct index tuples to
+/// distinct addresses, which a strided view does not promise: two dimensions may
+/// share a stride, and a stride may be zero. So the footprint is bounded directly.
+/// One iteration touches addresses within `window` of its base, and the next
+/// iteration's base sits `shift` away, where a `pto.partition_view` selects a
+/// contiguous box -- it carries offsets and sizes and no strides, so its step within
+/// each dimension is one by construction and the view stride alone gives the
+/// address step. Strictly greater means the two windows cannot overlap whatever the
+/// layout does, and a zero stride on the varying dimension makes `shift` zero, so it
+/// refuses without needing a special case.
+/// The bound is tight rather than slack: an access that walks a tensor with no gap
+/// between iterations has `shift` exactly one greater than `window`, which is the
+/// intended reading -- adjacent is disjoint.
+static bool partitionViewIterationsDisjoint(pto::PartitionViewOp view, scf::ForOp forOp) {
+  if (!view || !forOp) {
+    return false;
+  }
+
+  auto step = constantIndexOf(forOp.getStep());
+  if (!step || *step == 0) {
+    return false;
+  }
+
+  ValueRange offsets = view.getOffsets();
+  ValueRange sizes = view.getSizes();
+  unsigned rank = offsets.size();
+  if (rank == 0 || sizes.size() != rank) {
+    return false;
+  }
+
+  std::optional<SmallVector<int64_t>> strides = viewStrides(view.getSource(), rank);
+  if (!strides) {
+    return false;
+  }
+
+  // The offset math below assumes a fixed base; a base that moves with the loop can
+  // cancel the offset movement and alias the exact same addresses every iteration.
+  if (!viewBaseInvariant(view.getSource(), forOp)) {
+    return false;
+  }
+
+  auto varying = varyingOffset(offsets, forOp);
+  auto window = viewAddressWindow(sizes, *strides);
+  if (!varying || !window) {
+    return false;
+  }
+
+  int64_t indexDelta;
+  int64_t shift;
+  if (__builtin_mul_overflow(varying->second, *step, &indexDelta) ||
+      __builtin_mul_overflow(indexDelta, (*strides)[varying->first], &shift)) {
+    return false;
+  }
+  if (!boundedViewFactor(indexDelta) || !boundedViewFactor(shift)) {
+    return false;
+  }
+  return std::abs(shift) > *window;
+}
+
+/// The carried dependence `pair` claims between `element` and its own next execution
+/// does not exist, because both sides are the same `pto.partition_view` and
+/// consecutive iterations of it touch disjoint memory.
+/// Scoped to a self pair: the general case of two different accesses proven never to
+/// meet at any iteration distance needs a pairwise comparison this does not attempt.
+/// The multi-address refusal below is a precondition rather than a discriminator.
+/// A `pto.partition_view` source is constrained to `TensorViewType`; more than one
+/// base address arises only from a multi-tile argument or `pto.subview`, neither of
+/// which can inhabit that type.
+static bool isCarriedSelfDepAffineDisjoint(const CompoundInstanceElement *nowCompound,
+                                           const CompoundInstanceElement *frontCompound,
+                                           const std::pair<const BaseMemInfo *, const BaseMemInfo *> &pair,
+                                           scf::ForOp carryingFor) {
+  if (nowCompound != frontCompound || !nowCompound) {
+    return false;
+  }
+  if (!pair.first || !pair.second || !(*pair.first == *pair.second)) {
+    return false;
+  }
+  if (pair.first->baseAddresses.size() > 1 || pair.second->baseAddresses.size() > 1) {
+    return false;
+  }
+
+  // The loop under analysis, not the innermost one enclosing the access. Null means
+  // the back edge did not resolve to an `scf.for`, which is never a proof of
+  // disjointness.
+  if (!carryingFor) {
+    return false;
+  }
+
+  auto viewOf = [](const BaseMemInfo *mi) -> pto::PartitionViewOp {
+    if (!mi || !mi->baseBuffer) {
+      return {};
+    }
+    return mi->baseBuffer.getDefiningOp<pto::PartitionViewOp>();
+  };
+  pto::PartitionViewOp a = viewOf(pair.first);
+  pto::PartitionViewOp b = viewOf(pair.second);
+  if (!a || a != b) {
+    return false;
+  }
+
+  return partitionViewIterationsDisjoint(a, carryingFor);
+}
+
+static bool isOutsideLoops(Operation *op) {
+  for (Operation *parent = op; parent; parent = parent->getParentOp()) {
+    if (isa<LoopLikeOpInterface>(parent)) {
+      return false;
+    }
+  }
+  return op != nullptr;
+}
+
 // Returns true if a *same-iter* multi-buffer dep pair can be dropped
 // because the producer's and consumer's slot SSA expressions are provably
 // disjoint modulo N. Only applied to forward (non-back-edge) deps -- the
@@ -477,9 +869,13 @@ void InsertSyncAnalysis::InsertSync(
 // prefetch idiom). When the analysis is inconclusive (kUnknown / kEqual)
 // the dep is kept and the existing conservative path runs.
 static bool isForwardDepDroppableBySlotAffine(const BaseMemInfo *a,
-                                              const BaseMemInfo *b) {
+                                              const BaseMemInfo *b,
+                                              bool allowSubviewSlots) {
   if (!a || !b) {
     return false;
+  }
+  if (allowSubviewSlots && areDisjointSubviewSlots(a->baseBuffer, b->baseBuffer)) {
+    return true;
   }
   size_t aN = a->baseAddresses.size();
   size_t bN = b->baseAddresses.size();
@@ -496,51 +892,382 @@ static bool isForwardDepDroppableBySlotAffine(const BaseMemInfo *a,
          SlotRelation::kDisjoint;
 }
 
+// Drops *same-iteration* (forward) dependency pairs that the affine analysis
+// proves touch disjoint multi-buffer slots in every iteration of the loop.
+// Subviews still use a single conservative memory range on backedges, so
+// pruning their forward edges inside a loop would change event priming
+// without a slot-keyed event model; keep the existing loop behavior.
+static void dropForwardSlotDisjointDeps(
+    const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
+    DepBaseMemInfoPairVec &depVec) {
+  const bool allowSubviewSlots = isOutsideLoops(nowCompound->elementOp) &&
+                                 isOutsideLoops(frontCompound->elementOp);
+  auto isDroppable = [allowSubviewSlots](
+                         const std::pair<const BaseMemInfo *, const BaseMemInfo *>
+                             &pair) {
+    return isForwardDepDroppableBySlotAffine(pair.first, pair.second,
+                                             allowSubviewSlots);
+  };
+  depVec.erase(std::remove_if(depVec.begin(), depVec.end(), isDroppable),
+               depVec.end());
+}
+
+// Drops carried dependency pairs whose two iterations provably touch disjoint
+// memory. This case only arrives on the back-edge pass, which the forward drop
+// deliberately does not look at.
+static void dropCarriedDisjointDeps(
+    const SyncIRs &syncIR, const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
+    DepBaseMemInfoPairVec &depVec,
+    const std::optional<unsigned> &forEndIndex) {
+  scf::ForOp carryingFor = carryingForOf(syncIR, forEndIndex);
+  // InsertBackForSync first scans the copied slice with forEndIndex set, but
+  // those pairs are still in the same iteration. Only its second scan uses an
+  // original syncIR_ consumer to compare different iterations.
+  const bool isCarriedTraversal =
+      syncIR[nowCompound->GetIndex()].get() == nowCompound;
+  auto isDroppableCarried =
+      [&isCarriedTraversal, &carryingFor, &nowCompound,
+       &frontCompound](const std::pair<const BaseMemInfo *, const BaseMemInfo *> &pair) {
+        // Unlike the self-only GM proof, disjoint UB rows may be accessed by
+        // different operations, including mutually exclusive branch writers.
+        // The row proof excludes reuse at every positive iteration distance.
+        if (isCarriedTraversal && pair.first && pair.second &&
+            areSubviewIterationsDisjoint(pair.first->baseBuffer,
+                                         pair.second->baseBuffer,
+                                         carryingFor)) {
+          return true;
+        }
+        return isCarriedSelfDepAffineDisjoint(nowCompound, frontCompound, pair,
+                                              carryingFor);
+      };
+  depVec.erase(std::remove_if(depVec.begin(), depVec.end(), isDroppableCarried),
+               depVec.end());
+}
+
+void InsertSyncAnalysis::DropUFOrderedSelfDeps(
+    const CompoundInstanceElement *compound, DepBaseMemInfoPairVec &depVec) const
+{
+    const bool orderedByUF = ufOrderedCompounds_.count(compound->GetIndex()) != 0;
+    if (!orderedByUF) {
+        return;
+    }
+    // UF orders ACC reuse; preserve scratch and bias dependencies.
+    depVec.erase(std::remove_if(depVec.begin(), depVec.end(), [&](const auto &dependency) {
+        if (!dependency.first || !dependency.second) {
+            return false;
+        }
+        if (dependency.first->scope == AddressSpace::ACC && dependency.second->scope == AddressSpace::ACC) {
+            return true;
+        }
+        // Consecutive drains on FIX issue their GM writes in order. Do not
+        // confuse that WAW with a scratch read or a bias input dependency.
+        return compound->ufInfo.role == UFRole::AccStore &&
+               dependency.first == dependency.second && dependency.first->scope == AddressSpace::GM &&
+               llvm::is_contained(compound->defVec, dependency.first) &&
+               !llvm::is_contained(compound->useVec, dependency.first);
+    }), depVec.end());
+}
+
 void InsertSyncAnalysis::MemAnalyze(
     CompoundInstanceElement *nowCompound, CompoundInstanceElement *frontCompound,
     SyncRecordList &syncRecordList,
-    const std::optional<unsigned> &forEndIndex) {
-  if (isAlreadySync(nowCompound, frontCompound, syncRecordList, 0)) {
-    return;
-  }
+    const std::optional<unsigned> &forEndIndex)
+{
+    if (isAlreadySync(nowCompound, frontCompound, syncRecordList, 0)) {
+        return;
+    }
 
-  DepBaseMemInfoPairVec depVec;
-  if (!IsMemInfoHasDependency(nowCompound, frontCompound, depVec)) {
-    return;
-  }
+    DepBaseMemInfoPairVec depVec;
+    if (!IsMemInfoHasDependency(nowCompound, frontCompound, depVec)) {
+        return;
+    }
 
-  // Same-iter (forward) deps: drop pairs that the affine analysis proves
-  // touch disjoint slots in every iteration of the multi-buffer loop.
-  // Back-edge deps stay untouched -- they still need per-slot syncing
-  // through the dyn-event-id pipeline.
-  if (!forEndIndex.has_value()) {
-    auto isDroppable = [](const std::pair<const BaseMemInfo *,
-                                          const BaseMemInfo *> &pair) {
-      return isForwardDepDroppableBySlotAffine(pair.first, pair.second);
-    };
-    depVec.erase(std::remove_if(depVec.begin(), depVec.end(), isDroppable),
-                 depVec.end());
+    if (nowCompound == frontCompound) {
+        DropUFOrderedSelfDeps(nowCompound, depVec);
+        if (depVec.empty()) {
+            return;
+        }
+    }
+
+    // Same-iter (forward) deps: drop pairs that the affine analysis proves
+    // touch disjoint slots in every iteration of the multi-buffer loop.
+    // THIS drop never looks at back-edge deps: a rotating slot set still needs
+    // per-slot syncing through the dyn-event-id pipeline, so a slot-disjointness
+    // argument does not transfer to the back edge.
+    if (!forEndIndex.has_value()) {
+        dropForwardSlotDisjointDeps(nowCompound, frontCompound, depVec);
+        if (depVec.empty()) {
+            return;
+        }
+    }
+
+    // Carried deps whose two iterations provably touch disjoint memory. Kept separate
+    // from the forward drop above because this case only arrives on the back-edge pass,
+    // which the forward drop deliberately does not look at.
+    if (forEndIndex.has_value()) {
+        dropCarriedDisjointDeps(syncIR_, nowCompound, frontCompound, depVec,
+                                forEndIndex);
+        if (depVec.empty()) {
+            return;
+        }
+    }
+
+    // A UF phase covers only the ACC portion of a dependency. Keep any other
+    // dependency pair in the group so a matmul with additional scratch/bias
+    // accesses still receives the required event synchronization.
+    DropUFCoveredDeps(nowCompound, frontCompound, depVec, forEndIndex);
     if (depVec.empty()) {
-      return;
+        // Record the hand-off before returning. Without this record the next
+        // traversal believes the pair was never synchronized and falls back to a
+        // same-pipe barrier every iteration (issue #1694, phase A3).
+        MarkUFCovered(nowCompound, frontCompound, syncRecordList);
+        return;
+    }
+
+    if (CanPrunePipeVBarrier(nowCompound, frontCompound, depVec, forEndIndex)) {
+        return;
+    }
+
+    // InsertBackForSync reuses the request event ids; stop once any of them is
+    // already recorded for this pair.
+    const bool alreadySynced =
+        forEndIndex.has_value() &&
+        IsAlreadySyncedForAnyEventId(nowCompound, frontCompound, depVec,
+                                     syncRecordList);
+    if (alreadySynced) {
+        return;
+    }
+
+    InsertSyncOperation(nowCompound, frontCompound, depVec, forEndIndex);
+    UpdateSyncRecordInfo(frontCompound, syncRecordList);
+}
+
+// Establish membership from canonical SyncIR before inserting any events.
+// Self comparisons therefore do not depend on which UF pair was visited first.
+void InsertSyncAnalysis::InitializeUFOrderedCompounds() {
+  ufOrderedCompounds_.clear();
+  SmallVector<CompoundInstanceElement *> endpoints;
+  for (const auto &element : syncIR_) {
+    auto *compound = dyn_cast<CompoundInstanceElement>(element.get());
+    if (compound && compound->ufInfo.role != UFRole::None) {
+      endpoints.push_back(compound);
     }
   }
-
-  if (CanPrunePipeVBarrier(nowCompound, frontCompound, depVec, forEndIndex)) {
-    return;
-  }
-
-  if (forEndIndex.has_value()) {
-    int eventIdNum = GetEventIdNum(depVec);
-    for (int i = 1; i < eventIdNum; i++) {
-      if (isAlreadySync(nowCompound, frontCompound, syncRecordList,
-                        static_cast<unsigned>(i))) {
-        return;
+  for (auto *front : endpoints) {
+    for (auto *now : endpoints) {
+      if (front == now || front->ufInfo.role == now->ufInfo.role) {
+        continue;
+      }
+      std::optional<unsigned> loopEnd;
+      const bool wrapsLoop = front->GetIndex() > now->GetIndex();
+      if (wrapsLoop) {
+        loopEnd = ufTokenModel_->enclosingLoopEnd(now->GetIndex());
+        if (!loopEnd) {
+          continue;
+        }
+      }
+      DepBaseMemInfoPairVec dependencies;
+      IsMemInfoHasDependency(now, front, dependencies);
+      if (llvm::any_of(dependencies, [&](const auto &dependency) {
+            return IsUFCoveredDependency(now, front, dependency, loopEnd);
+          })) {
+        ufOrderedCompounds_.insert(front->GetIndex());
+        ufOrderedCompounds_.insert(now->GetIndex());
       }
     }
   }
+}
 
-  InsertSyncOperation(nowCompound, frontCompound, depVec, forEndIndex);
-  UpdateSyncRecordInfo(frontCompound, syncRecordList);
+void InsertSyncAnalysis::DropUFCoveredDeps(
+    CompoundInstanceElement *nowCompound,
+    CompoundInstanceElement *frontCompound,
+    DepBaseMemInfoPairVec &depVec,
+    const std::optional<unsigned> &forEndIndex) const {
+    depVec.erase(
+        std::remove_if(depVec.begin(), depVec.end(), [&](const auto &dependency) {
+          return IsUFCoveredDependency(nowCompound, frontCompound, dependency,
+                                       forEndIndex);
+        }),
+        depVec.end());
+}
+
+void InsertSyncAnalysis::MarkUFCovered(
+    const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
+    SyncRecordList &syncRecordList) const {
+    const PipelineType frontPipe = frontCompound->kPipeValue;
+    if (isValidPipeIndex(frontPipe)) {
+      for (SyncRecord &record : syncRecordList) {
+        record.alreadySyncByUF[static_cast<unsigned>(frontPipe)] = true;
+      }
+    }
+    if (isInsertSyncDebugEnabled(InsertSyncDebugLevel::Trace)) {
+      llvm::errs() << "[UF] covered " << frontCompound->opName.getStringRef()
+                   << " -> " << nowCompound->opName.getStringRef() << " (pipe "
+                   << static_cast<unsigned>(frontPipe) << ")\n";
+    }
+}
+
+bool InsertSyncAnalysis::IsAlreadySyncedForAnyEventId(
+    CompoundInstanceElement *nowCompound,
+    CompoundInstanceElement *frontCompound,
+    const DepBaseMemInfoPairVec &depVec,
+    SyncRecordList &syncRecordList) const {
+    const int eventIdNum = GetEventIdNum(depVec);
+    for (int i = 1; i < eventIdNum; i++) {
+        if (isAlreadySync(nowCompound, frontCompound, syncRecordList,
+                          static_cast<unsigned>(i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool hasUFAccAccess(const CompoundInstanceElement *compound,
+                           const BaseMemInfo *access) {
+  return compound && access &&
+         llvm::is_contained(compound->ufInfo.accAccesses, access);
+}
+
+static bool sameUFAccRegion(const CompoundInstanceElement *nowCompound,
+                            const CompoundInstanceElement *frontCompound,
+                            const BaseMemInfo *nowAccess,
+                            const BaseMemInfo *frontAccess) {
+  if (!nowAccess || !frontAccess ||
+      nowAccess->scope != pto::AddressSpace::ACC ||
+      frontAccess->scope != pto::AddressSpace::ACC ||
+      nowAccess->aliasesUnknownRange || frontAccess->aliasesUnknownRange ||
+      nowAccess->rootBuffer != frontAccess->rootBuffer ||
+      nowAccess->baseAddresses.empty() || frontAccess->baseAddresses.empty() ||
+      nowAccess->allocateSize == 0 || frontAccess->allocateSize == 0 ||
+      !hasUFAccAccess(nowCompound, nowAccess) ||
+      !hasUFAccAccess(frontCompound, frontAccess)) {
+    return false;
+  }
+
+  // The dependency was already established by MemAlias. Requiring the exact
+  // root, a bounded range, and the same access records prevents UF from
+  // masking an imprecise or cross-allocation alias.
+  return true;
+}
+
+// A Final-phase matmul produces the accumulator that a subsequent ACC store
+// writes out: the unit flag orders exactly this PIPE_M -> PIPE_FIX hand-off.
+// Only the ops in the hand-off-eligible set may be removed here; newly visible
+// phased ops still block the token proof but are not optimized yet.
+static bool isUFMatmulToAccStore(const CompoundInstanceElement *matmul,
+                                 const CompoundInstanceElement *store) {
+  return matmul && store &&
+         matmul->kPipeValue == PipelineType::PIPE_M &&
+         store->kPipeValue == PipelineType::PIPE_FIX &&
+         matmul->ufInfo.role == UFRole::MatmulProducer &&
+         store->ufInfo.role == UFRole::AccStore &&
+         matmul->ufInfo.handoffEligible && store->ufInfo.handoffEligible &&
+         matmul->ufInfo.accPhase &&
+         *matmul->ufInfo.accPhase == pto::AccPhase::Final &&
+         store->ufInfo.stPhase &&
+         *store->ufInfo.stPhase != pto::STPhase::Unspecified;
+}
+
+// The symmetric hand-off: a Final-phase ACC store publishes the accumulator
+// that the following matmul consumes.
+static bool isUFAccStoreToMatmul(const CompoundInstanceElement *store,
+                                 const CompoundInstanceElement *matmul) {
+  return store && matmul &&
+         store->kPipeValue == PipelineType::PIPE_FIX &&
+         matmul->kPipeValue == PipelineType::PIPE_M &&
+         store->ufInfo.role == UFRole::AccStore &&
+         matmul->ufInfo.role == UFRole::MatmulProducer &&
+         store->ufInfo.handoffEligible && matmul->ufInfo.handoffEligible &&
+         store->ufInfo.stPhase &&
+         *store->ufInfo.stPhase == pto::STPhase::Final &&
+         matmul->ufInfo.accPhase &&
+         *matmul->ufInfo.accPhase != pto::AccPhase::Unspecified;
+}
+
+// The A5 unit flag is one producer/consumer token per core, not a per-tile
+// state: a MAD with a Final accumulate phase publishes it (check_and_set) and a
+// fixpipe with a Final store phase consumes and clears it (check_and_clear).
+// The phases are only 2-bit control fields on those instructions, so a pairwise
+// role/phase match proves that both ends speak the protocol, not that
+// `frontCompound` is the publication `nowCompound` observes. Two Final matmuls
+// publish the same token, and a store that follows both can pass its check on
+// the first publication while the second producer is still writing.
+// The structural proof lives in UFTokenModel: it bounds both the backward and
+// forward walks to the region the pair actually shares, and wraps the backward
+// walk around a loop body instead of walking out of the loop.
+// No architecture gate is needed here. PTOAS only accepts a2/a3/a5, and
+// pto-isa forwards the phase to the hardware on both the a2a3 and a5 backends
+// (a2a3/TMatmul.hpp and a5/TMatmul.hpp both pass static_cast<uint8_t>(Phase)
+// to mad). Targets that accept a phase but silently drop it (kirin9050, a6)
+// are not supported by PTOAS and must not reach this path.
+
+bool InsertSyncAnalysis::IsUFCoveredDependency(
+    const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
+    const std::pair<const BaseMemInfo *, const BaseMemInfo *> &dependency,
+    const std::optional<unsigned> &forEndIndex) const {
+  if (!nowCompound || !frontCompound) {
+    return false;
+  }
+  const bool eligibleBoundary = frontCompound->ufInfo.handoffEligible &&
+      nowCompound->ufInfo.handoffEligible;
+  if (eligibleBoundary && ufTokenModel_ && !forEndIndex &&
+      ufTokenModel_->isPipelineBoundaryOrdered(frontCompound->GetIndex(), nowCompound->GetIndex())) {
+    return sameUFAccRegion(nowCompound, frontCompound, dependency.first, dependency.second);
+  }
+  if (nowCompound->kPipeValue == frontCompound->kPipeValue) {
+    return false;
+  }
+  const bool matmulThenStore =
+      isUFMatmulToAccStore(frontCompound, nowCompound);
+  const bool storeThenMatmul =
+      isUFAccStoreToMatmul(frontCompound, nowCompound);
+  if (!matmulThenStore && !storeThenMatmul) {
+    return false;
+  }
+
+  // InsertBackForSync runs two scans with forEndIndex set: the copied slice is
+  // still a same-iteration body, while only the original consumer represents
+  // the loop-carried pairing. Distinguishing them keeps the same-iteration
+  // proof (A phase) working inside loops without letting the copied slice pay
+  // the loop-body balance requirement.
+  const bool nowIsOriginal =
+      nowCompound->GetIndex() < syncIR_.size() &&
+      syncIR_[nowCompound->GetIndex()].get() == nowCompound;
+  const bool backEdge = forEndIndex.has_value() && nowIsOriginal;
+  // A publish-first body carries WAR; a consume-first body carries RAW.
+  // The circular token span decides coverage in either direction.
+  // The loop-carried proof is defined for both `scf.for` and `scf.while`; the
+  // token model checks the while body's before/after summaries and the exit
+  // state. An unsupported loop kind keeps the explicit event.
+  if (backEdge && !isUFSupportedCarryingLoop(syncIR_, forEndIndex)) {
+    return false;
+  }
+  if (!ufTokenModel_ || !ufTokenModel_->isBuilt()) {
+    return false;
+  }
+  if (!ufTokenModel_->isHandoffAdjacent(frontCompound->GetIndex(),
+                                        nowCompound->GetIndex(), backEdge,
+                                        forEndIndex.value_or(0))) {
+    return false;
+  }
+  return sameUFAccRegion(nowCompound, frontCompound, dependency.first,
+                         dependency.second);
+}
+
+
+static void collectAccReadReadDependencies(DepBaseMemInfoPairVec &rrDepVec,
+                                           DepBaseMemInfoPairVec &out,
+                                           bool &hasDependency) {
+  for (auto &pair : rrDepVec) {
+    if (pair.first && pair.first->scope == pto::AddressSpace::ACC) {
+      out.push_back(pair);
+      hasDependency = true;
+    }
+  }
 }
 
 bool InsertSyncAnalysis::IsMemInfoHasDependency(
@@ -548,15 +1275,20 @@ bool InsertSyncAnalysis::IsMemInfoHasDependency(
     CompoundInstanceElement *frontCompound,
     DepBaseMemInfoPairVec &depBaseMemInfosVec) {
   bool hasDependency = false;
-  hasDependency |= memAnalyzer_.DepBetween(nowCompound->useVec, frontCompound->defVec,
-                                          depBaseMemInfosVec);
-  hasDependency |= memAnalyzer_.DepBetween(nowCompound->defVec, frontCompound->useVec,
-                                          depBaseMemInfosVec);
-  if (!isTLoadToTLoadWAWExempt(nowCompound, frontCompound)) {
-    hasDependency |= memAnalyzer_.DepBetween(nowCompound->defVec, frontCompound->defVec,
-                                            depBaseMemInfosVec);
+  if (memAnalyzer_.DepBetween(nowCompound->useVec, frontCompound->defVec,
+                              depBaseMemInfosVec)) {
+    hasDependency = true;
   }
-
+  if (memAnalyzer_.DepBetween(nowCompound->defVec, frontCompound->useVec,
+                              depBaseMemInfosVec)) {
+    hasDependency = true;
+  }
+  if (!isTLoadToTLoadWAWExempt(nowCompound, frontCompound)) {
+    if (memAnalyzer_.DepBetween(nowCompound->defVec, frontCompound->defVec,
+                                depBaseMemInfosVec)) {
+      hasDependency = true;
+    }
+  }
   // Special hazard: ACC (L0C) read/read cross-pipe ordering.
   //
   // Some PTO-ISA sequences have semantically "read/read" patterns on ACC, but
@@ -565,19 +1297,10 @@ bool InsertSyncAnalysis::IsMemInfoHasDependency(
     DepBaseMemInfoPairVec rrDepVec;
     if (memAnalyzer_.DepBetween(nowCompound->useVec, frontCompound->useVec,
                                rrDepVec)) {
-      for (auto &pair : rrDepVec) {
-        if (!pair.first) {
-          continue;
-        }
-        if (pair.first->scope != pto::AddressSpace::ACC) {
-          continue;
-        }
-        depBaseMemInfosVec.push_back(pair);
-        hasDependency = true;
-      }
+      collectAccReadReadDependencies(rrDepVec, depBaseMemInfosVec,
+                                      hasDependency);
     }
   }
-
   return hasDependency;
 }
 
@@ -596,7 +1319,6 @@ bool InsertSyncAnalysis::CanPrunePipeVBarrier(
       frontCompound->kPipeValue != PipelineType::PIPE_V) {
     return false;
   }
-
   // The same-access fast path only applies to a producer output consumed by
   // the next op. A read/write non-DPS operand is scratch state; pruning its
   // WAW dependency would allow two vector instructions to use it concurrently.
@@ -606,7 +1328,6 @@ bool InsertSyncAnalysis::CanPrunePipeVBarrier(
                                     depBaseMemInfosVec)) {
     return false;
   }
-
   // PIPE_V has a hardware-safe same-access chain case: exact same-access
   // dependencies from the producer result to the consumer source do not require
   // a vector-pipe barrier once the producer repeat is large enough. Keep the
@@ -617,7 +1338,6 @@ bool InsertSyncAnalysis::CanPrunePipeVBarrier(
     if (!isSameExactAccess(pair.first, pair.second)) {
       return false;
     }
-
     if (containsExactAccess(nowCompound->useVec, pair.first) &&
         containsExactAccess(frontCompound->defVec, pair.second)) {
       if (!llvm::is_contained(producerAccesses, pair.second)) {
@@ -630,7 +1350,6 @@ bool InsertSyncAnalysis::CanPrunePipeVBarrier(
   if (producerAccesses.empty()) {
     return false;
   }
-
   // The caller is analyzing this specific front->now dependency. Do not look
   // for a later text-order writer here; it may belong to a different branch
   // path or a zero-trip loop body.
@@ -640,103 +1359,150 @@ bool InsertSyncAnalysis::CanPrunePipeVBarrier(
       return false;
     }
   }
-
   return true;
 }
 
+void InsertSyncAnalysis::InsertPipeBarrierSync(
+    const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
+    const std::optional<unsigned> &forEndIndex) {
+  unsigned insertBarrierId = nowCompound->GetIndex();
+  PipelineType barrierPipe = frontCompound->kPipeValue;
+  if (barrierPipe == PipelineType::PIPE_V &&
+      isTargetArchA5(func_) &&
+      sync_detail::overwritesColumnBroadcastInput(nowCompound, frontCompound, memAnalyzer_)) {
+    // A5 broadcasts reread the column vector for every output row. Reusing
+    // that storage through a differently shaped tile can overwrite later
+    // reads even when the elementwise output dependency is ordered. PIPE_V
+    // barriers are erased on A5, so drain the vector work before this reuse.
+    barrierPipe = PipelineType::PIPE_ALL;
+  }
+  auto barrierOp = std::make_unique<SyncOperation>(
+      SyncOperation::TYPE::PIPE_BARRIER, barrierPipe,
+      barrierPipe, syncIndex_, insertBarrierId, forEndIndex);
+  barrierOp->SetDepSyncIRIndex(frontCompound->GetIndex());
+  syncIR_[insertBarrierId]->pipeBefore.push_back(barrierOp.get());
+  barrierOp->SetSyncIRIndex(insertBarrierId);
+
+  SmallVector<std::unique_ptr<SyncOperation>> newSync;
+  newSync.emplace_back(std::move(barrierOp));
+  syncOperations_.emplace_back(std::move(newSync));
+}
+
+// Resolve one unambiguous producer/consumer slot SSA pair for the whole
+// dependency group and configure a dynamic set/wait pair with it. Returns the
+// effective event-id count: when the group decomposes into a single slot
+// expression per side, slotSSAExpr/slotCount are filled and `eventIdNum` is
+// kept; otherwise a single static event id is used for the whole group.
+static int configureDynEventSlots(
+    SyncOperation *setOp, SyncOperation *waitOp,
+    const DepBaseMemInfoPairVec &depBaseMemInfosVec, int eventIdNum) {
+  if (eventIdNum <= 1) {
+    return eventIdNum;
+  }
+  Value producerSlot;
+  Value consumerSlot;
+  bool hasAmbiguousSlot = false;
+  for (auto &pair : depBaseMemInfosVec) {
+    Value pairProducerSlot;
+    Value pairConsumerSlot;
+    if (pair.second && pair.second->baseBuffer) {
+      pairProducerSlot = findMultiTileSlotExpr(pair.second->baseBuffer);
+    }
+    if (pair.first && pair.first->baseBuffer) {
+      pairConsumerSlot = findMultiTileSlotExpr(pair.first->baseBuffer);
+    }
+    if (!pairProducerSlot || !pairConsumerSlot) {
+      hasAmbiguousSlot = true;
+      break;
+    }
+    if ((producerSlot && producerSlot != pairProducerSlot) ||
+        (consumerSlot && consumerSlot != pairConsumerSlot)) {
+      hasAmbiguousSlot = true;
+      break;
+    }
+    producerSlot = pairProducerSlot;
+    consumerSlot = pairConsumerSlot;
+  }
+  if (hasAmbiguousSlot || !producerSlot || !consumerSlot) {
+    // Missing or ambiguous slot SSA -- fall back to a single event id. This
+    // also keeps non-multi-buffer codepaths untouched if their baseAddresses
+    // have multiple entries for another reason.
+    return 1;
+  }
+  setOp->slotSSAExpr = producerSlot;
+  setOp->slotCount = static_cast<uint32_t>(eventIdNum);
+  waitOp->slotSSAExpr = consumerSlot;
+  waitOp->slotCount = static_cast<uint32_t>(eventIdNum);
+  return eventIdNum;
+}
+
+void InsertSyncAnalysis::InsertCrossPipeEventSync(
+    const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
+    DepBaseMemInfoPairVec &depBaseMemInfosVec,
+    const std::optional<unsigned> &forEndIndex) {
+  unsigned insertWaitId = nowCompound->GetIndex();
+  unsigned insertSetId = frontCompound->GetIndex();
+  auto setOp = std::make_unique<SyncOperation>(
+      SyncOperation::TYPE::SET_EVENT, frontCompound->kPipeValue,
+      nowCompound->kPipeValue, syncIndex_, insertSetId, forEndIndex);
+  auto waitOp = setOp->GetMatchSync(insertWaitId);
+  SmallVector<Value> depRoots = GetMemInfoBuffers(depBaseMemInfosVec);
+  setOp->depRootBuffers = depRoots;
+  waitOp->depRootBuffers = depRoots;
+  // Keep the BaseMemInfo objects too, not just their roots. The root is the
+  // root ALLOCATION and is far coarser than a buffer -- many tiles share one --
+  // so a consumer that needs to know *which tile* this dependency is on cannot
+  // recover it from `depRoots`. Both halves get the same vector, exactly as
+  // the roots do.
+  SmallVector<const BaseMemInfo *> depMemInfos;
+  for (const auto &memInfoPair : depBaseMemInfosVec) {
+    if (memInfoPair.first) {
+      depMemInfos.push_back(memInfoPair.first);
+    }
+    if (memInfoPair.second) {
+      depMemInfos.push_back(memInfoPair.second);
+    }
+  }
+  setOp->depMemInfos = depMemInfos;
+  waitOp->depMemInfos = depMemInfos;
+  setOp->SetDepSyncIRIndex(frontCompound->GetIndex());
+  waitOp->SetDepSyncIRIndex(frontCompound->GetIndex());
+
+  // Back-edge dependencies may require multi-buffer event IDs. When N
+  // dyn event IDs are warranted, also plumb the per-side slot SSA so
+  // codegen can lower into `pto.set_flag_dyn` / `pto.wait_flag_dyn`.
+  if (forEndIndex.has_value()) {
+    int eventIdNum = configureDynEventSlots(
+        setOp.get(), waitOp.get(), depBaseMemInfosVec,
+        GetEventIdNum(depBaseMemInfosVec));
+    setOp->eventIdNum = eventIdNum;
+    waitOp->eventIdNum = eventIdNum;
+  }
+
+  syncIR_[insertSetId]->pipeAfter.push_back(setOp.get());
+  syncIR_[insertWaitId]->pipeBefore.push_back(waitOp.get());
+
+  SmallVector<std::unique_ptr<SyncOperation>> newSync;
+  newSync.emplace_back(std::move(setOp));
+  newSync.emplace_back(std::move(waitOp));
+  syncOperations_.emplace_back(std::move(newSync));
+}
+
 void InsertSyncAnalysis::InsertSyncOperation(
-    CompoundInstanceElement *nowCompound, CompoundInstanceElement *frontCompound,
+    const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
     DepBaseMemInfoPairVec &depBaseMemInfosVec,
     const std::optional<unsigned> &forEndIndex) {
   PipelineType nowPipe = nowCompound->kPipeValue;
   PipelineType frontPipe = frontCompound->kPipeValue;
-
   if (nowPipe == frontPipe) {
-    unsigned insertBarrierId = nowCompound->GetIndex();
-    auto barrierOp = std::make_unique<SyncOperation>(
-        SyncOperation::TYPE::PIPE_BARRIER, frontPipe, nowPipe, syncIndex_,
-        insertBarrierId, forEndIndex);
-    barrierOp->SetDepSyncIRIndex(frontCompound->GetIndex());
-    syncIR_[insertBarrierId]->pipeBefore.push_back(barrierOp.get());
-    barrierOp->SetSyncIRIndex(insertBarrierId);
-
-    SmallVector<std::unique_ptr<SyncOperation>> newSync;
-    newSync.emplace_back(std::move(barrierOp));
-    syncOperations_.emplace_back(std::move(newSync));
+    InsertPipeBarrierSync(nowCompound, frontCompound, forEndIndex);
   } else {
-    unsigned insertWaitId = nowCompound->GetIndex();
-    unsigned insertSetId = frontCompound->GetIndex();
-    auto setOp = std::make_unique<SyncOperation>(
-        SyncOperation::TYPE::SET_EVENT, frontPipe, nowPipe, syncIndex_,
-        insertSetId, forEndIndex);
-    auto waitOp = setOp->GetMatchSync(insertWaitId);
-    SmallVector<Value> depRoots = GetMemInfoBuffers(depBaseMemInfosVec);
-    setOp->depRootBuffers = depRoots;
-    waitOp->depRootBuffers = depRoots;
-    setOp->SetDepSyncIRIndex(frontCompound->GetIndex());
-    waitOp->SetDepSyncIRIndex(frontCompound->GetIndex());
-
-    // Back-edge dependencies may require multi-buffer event IDs. When N
-    // dyn event IDs are warranted, also plumb the per-side slot SSA so
-    // codegen can lower into `pto.set_flag_dyn` / `pto.wait_flag_dyn`.
-    if (forEndIndex.has_value()) {
-      int eventIdNum = GetEventIdNum(depBaseMemInfosVec);
-      if (eventIdNum > 1) {
-        // Each dep pair has (now=consumer, front=producer). The producer's
-        // slot SSA gates the `set_flag_dyn`; the consumer's gates the
-        // `wait_flag_dyn`. A single dynamic event pair can represent only one
-        // slot expression on each side. If the dependency group contains
-        // multiple expressions, fall back to a static event that guards the
-        // whole group instead of silently synchronizing just the first one.
-        Value producerSlot;
-        Value consumerSlot;
-        bool hasAmbiguousSlot = false;
-        for (auto &pair : depBaseMemInfosVec) {
-          Value pairProducerSlot;
-          Value pairConsumerSlot;
-          if (pair.second && pair.second->baseBuffer) {
-            pairProducerSlot = findMultiTileSlotExpr(pair.second->baseBuffer);
-          }
-          if (pair.first && pair.first->baseBuffer) {
-            pairConsumerSlot = findMultiTileSlotExpr(pair.first->baseBuffer);
-          }
-          if (!pairProducerSlot || !pairConsumerSlot) {
-            hasAmbiguousSlot = true;
-            break;
-          }
-          if ((producerSlot && producerSlot != pairProducerSlot) ||
-              (consumerSlot && consumerSlot != pairConsumerSlot)) {
-            hasAmbiguousSlot = true;
-            break;
-          }
-          producerSlot = pairProducerSlot;
-          consumerSlot = pairConsumerSlot;
-        }
-        if (hasAmbiguousSlot || !producerSlot || !consumerSlot) {
-          // Missing or ambiguous slot SSA -- fall back to a single event id.
-          // This also keeps non-multi-buffer codepaths untouched if their
-          // baseAddresses have multiple entries for another reason.
-          eventIdNum = 1;
-        } else {
-          setOp->slotSSAExpr = producerSlot;
-          setOp->slotCount = static_cast<uint32_t>(eventIdNum);
-          waitOp->slotSSAExpr = consumerSlot;
-          waitOp->slotCount = static_cast<uint32_t>(eventIdNum);
-        }
-      }
-      setOp->eventIdNum = eventIdNum;
-      waitOp->eventIdNum = eventIdNum;
-    }
-
-    syncIR_[insertSetId]->pipeAfter.push_back(setOp.get());
-    syncIR_[insertWaitId]->pipeBefore.push_back(waitOp.get());
-
-    SmallVector<std::unique_ptr<SyncOperation>> newSync;
-    newSync.emplace_back(std::move(setOp));
-    newSync.emplace_back(std::move(waitOp));
-    syncOperations_.emplace_back(std::move(newSync));
+    InsertCrossPipeEventSync(nowCompound, frontCompound, depBaseMemInfosVec,
+                             forEndIndex);
   }
-
   syncIndex_++;
   assert(syncOperations_.size() == syncIndex_);
 }
@@ -746,8 +1512,9 @@ void InsertSyncAnalysis::InsertSyncOperation(
 // ==============================================================================
 
 bool InsertSyncAnalysis::isAlreadySync(
-    CompoundInstanceElement *nowCompound, CompoundInstanceElement *frontCompound,
-    SyncRecordList &syncRecordList, unsigned recordListIndex) {
+    const CompoundInstanceElement *nowCompound,
+    const CompoundInstanceElement *frontCompound,
+    SyncRecordList &syncRecordList, unsigned recordListIndex) const {
   (void)nowCompound;
   const PipelineType frontPipe = frontCompound->kPipeValue;
   if (recordListIndex >= syncRecordList.size()) {
@@ -756,13 +1523,21 @@ bool InsertSyncAnalysis::isAlreadySync(
   if (!isValidPipeIndex(frontPipe)) {
     return false;
   }
-  return syncRecordList[recordListIndex]
-      .alreadySync[static_cast<unsigned>(frontPipe)];
+  if (syncRecordList[recordListIndex]
+          .alreadySync[static_cast<unsigned>(frontPipe)]) {
+    return true;
+  }
+  // Unit-flag coverage is consulted only for the top-level "is this front
+  // already ordered" question. Event-id reuse (recordListIndex >= 1) must not
+  // treat a hardware handshake as an allocated event.
+  return recordListIndex == 0 &&
+         syncRecordList[recordListIndex]
+             .alreadySyncByUF[static_cast<unsigned>(frontPipe)];
 }
 
 void InsertSyncAnalysis::UpdateAlreadySync(const SyncOps &syncVector,
                                            SyncRecordList &syncRecordList,
-                                           const PipelineType nowPipeValue) {
+                                           const PipelineType nowPipeValue) const {
   for (auto *sync : syncVector) {
     // A slot-keyed event orders only the selected physical slot. It must not
     // make later accesses through another slot look globally synchronized.
@@ -777,9 +1552,14 @@ void InsertSyncAnalysis::UpdateAlreadySync(const SyncOps &syncVector,
 
 void InsertSyncAnalysis::UpdateSyncRecord(const SyncOperation *sync,
                                           SyncRecord &syncRecord,
-                                          PipelineType nowPipeValue) {
+                                          PipelineType nowPipeValue) const {
   PipelineType setPipeValue = sync->GetSrcPipe();
   PipelineType waitPipeValue = sync->GetDstPipe();
+  // SyncCodegen erases A5 vector barriers. They cannot cover an earlier
+  // broadcast read whose storage is reused after an intervening vector op.
+  if (isErasedA5VectorBarrier(func_, sync)) {
+    return;
+  }
 
   // Block-sync mode behaves like a global blocking pipe-s wait.
   if (syncAnalysisMode_ == SyncAnalysisMode::BLOCKSYNC) {
@@ -823,13 +1603,17 @@ void InsertSyncAnalysis::UpdateSyncRecord(const SyncOperation *sync,
 }
 
 void InsertSyncAnalysis::UpdateSyncRecordInfo(
-    CompoundInstanceElement *frontCompound, SyncRecordList &syncRecordList) {
+    const CompoundInstanceElement *frontCompound,
+    SyncRecordList &syncRecordList) const {
   (void)frontCompound;
   assert(!syncOperations_.empty());
   auto &syncPair = syncOperations_.back();
   assert(!syncPair.empty());
 
   auto *newSync = syncPair[0].get();
+  if (isErasedA5VectorBarrier(func_, newSync)) {
+    return;
+  }
   // Dynamic event IDs cover one runtime-selected slot, not the complete pipe
   // dependency represented by this record.
   if (isSlotKeyedSync(newSync)) {
@@ -876,7 +1660,7 @@ void InsertSyncAnalysis::InsertLastPipeAll() {
 // ==============================================================================
 
 SmallVector<Value> InsertSyncAnalysis::GetMemInfoBuffers(
-    const DepBaseMemInfoPairVec &depBaseMemInfosVec) {
+    const DepBaseMemInfoPairVec &depBaseMemInfosVec) const {
   llvm::DenseSet<Value> touchedBuffer;
   SmallVector<Value> result;
   for (auto &pair : depBaseMemInfosVec) {
@@ -897,7 +1681,7 @@ SmallVector<Value> InsertSyncAnalysis::GetMemInfoBuffers(
 }
 
 int InsertSyncAnalysis::GetEventIdNum(
-    const DepBaseMemInfoPairVec &depBaseMemInfosVec) {
+    const DepBaseMemInfoPairVec &depBaseMemInfosVec) const {
   // A back-edge dependency benefits from N dynamic event IDs whenever at
   // least one side is a multi-buffer access. We detect that from the
   // BaseMemInfo's `baseAddresses` size, which the translator and alias

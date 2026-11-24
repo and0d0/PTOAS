@@ -17,15 +17,15 @@ module {
       %dst: !pto.ptr<f16, ub>, %off: index) {
     %c16 = arith.constant 16 : index
     %aligned_off = arith.muli %off, %c16 : index
-    %x = pto.vmi.vload %src0[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<f16, ub> -> !pto.vmi.vreg<64xf16>
-    %y = pto.vmi.vload %src1[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<f16, ub> -> !pto.vmi.vreg<64xf16>
+    %x = pto.vmi.vload %src0[%aligned_off]
+        : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16>
+    %y = pto.vmi.vload %src1[%aligned_off]
+        : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16>
     %sum = pto.vmi.vadd %x, %y
         : !pto.vmi.vreg<64xf16>, !pto.vmi.vreg<64xf16>
         -> !pto.vmi.vreg<64xf16>
-    pto.vmi.vstore %sum, %dst[%aligned_off] {dist_mode = "continuous"}
-        : !pto.vmi.vreg<64xf16>, !pto.ptr<f16, ub>
+    pto.vmi.vstore %sum, %dst[%aligned_off]
+        : !pto.vmi.vreg<64xf16>, !pto.ptr<f16, ub>, index
     return
   }
 
@@ -36,16 +36,16 @@ module {
     %c32 = arith.constant 32 : index
     %aligned_off = arith.muli %off, %c16 : index
     %mask = pto.vmi.create_mask %c32 : index -> !pto.vmi.mask<64xpred>
-    %x = pto.vmi.vload %src0[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<f16, ub> -> !pto.vmi.vreg<64xf16>
-    %y = pto.vmi.vload %src1[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<f16, ub> -> !pto.vmi.vreg<64xf16>
+    %x = pto.vmi.vload %src0[%aligned_off]
+        : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16>
+    %y = pto.vmi.vload %src1[%aligned_off]
+        : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16>
     %sum = pto.vmi.vadd %x, %y
         : !pto.vmi.vreg<64xf16>, !pto.vmi.vreg<64xf16>
         -> !pto.vmi.vreg<64xf16>
     pto.vmi.vstore %sum, %dst[%aligned_off], %mask
         : !pto.vmi.vreg<64xf16>, !pto.ptr<f16, ub>,
-          !pto.vmi.mask<64xpred>
+          index, !pto.vmi.mask<64xpred>
     return
   }
 
@@ -54,15 +54,15 @@ module {
       %dst: !pto.ptr<f16, ub>, %off: index) {
     %c16 = arith.constant 16 : index
     %aligned_off = arith.muli %off, %c16 : index
-    %x = pto.vmi.vload %src0[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<f16, ub> -> !pto.vmi.vreg<128xf16>
-    %y = pto.vmi.vload %src1[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<f16, ub> -> !pto.vmi.vreg<128xf16>
+    %x = pto.vmi.vload %src0[%aligned_off]
+        : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<128xf16>
+    %y = pto.vmi.vload %src1[%aligned_off]
+        : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<128xf16>
     %sum = pto.vmi.vadd %x, %y
         : !pto.vmi.vreg<128xf16>, !pto.vmi.vreg<128xf16>
         -> !pto.vmi.vreg<128xf16>
-    pto.vmi.vstore %sum, %dst[%aligned_off] {dist_mode = "continuous"}
-        : !pto.vmi.vreg<128xf16>, !pto.ptr<f16, ub>
+    pto.vmi.vstore %sum, %dst[%aligned_off]
+        : !pto.vmi.vreg<128xf16>, !pto.ptr<f16, ub>, index
     return
   }
 
@@ -71,15 +71,15 @@ module {
       %dst: !pto.ptr<ui8, ub>, %off: index) {
     %c32 = arith.constant 32 : index
     %aligned_off = arith.muli %off, %c32 : index
-    %x = pto.vmi.vload %src0[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<ui8, ub> -> !pto.vmi.vreg<128xui8>
-    %y = pto.vmi.vload %src1[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<ui8, ub> -> !pto.vmi.vreg<128xui8>
+    %x = pto.vmi.vload %src0[%aligned_off]
+        : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<128xui8>
+    %y = pto.vmi.vload %src1[%aligned_off]
+        : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<128xui8>
     %sum = pto.vmi.vadd %x, %y
         : !pto.vmi.vreg<128xui8>, !pto.vmi.vreg<128xui8>
         -> !pto.vmi.vreg<128xui8>
-    pto.vmi.vstore %sum, %dst[%aligned_off] {dist_mode = "continuous"}
-        : !pto.vmi.vreg<128xui8>, !pto.ptr<ui8, ub>
+    pto.vmi.vstore %sum, %dst[%aligned_off]
+        : !pto.vmi.vreg<128xui8>, !pto.ptr<ui8, ub>, index
     return
   }
 
@@ -88,15 +88,15 @@ module {
       %dst: !pto.ptr<ui8, ub>, %off: index) {
     %c32 = arith.constant 32 : index
     %aligned_off = arith.muli %off, %c32 : index
-    %x = pto.vmi.vload %src0[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<ui8, ub> -> !pto.vmi.vreg<64xui8>
-    %y = pto.vmi.vload %src1[%aligned_off] {dist_mode = "continuous"}
-        : !pto.ptr<ui8, ub> -> !pto.vmi.vreg<64xui8>
+    %x = pto.vmi.vload %src0[%aligned_off]
+        : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<64xui8>
+    %y = pto.vmi.vload %src1[%aligned_off]
+        : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<64xui8>
     %sum = pto.vmi.vadd %x, %y
         : !pto.vmi.vreg<64xui8>, !pto.vmi.vreg<64xui8>
         -> !pto.vmi.vreg<64xui8>
-    pto.vmi.vstore %sum, %dst[%aligned_off] {dist_mode = "continuous"}
-        : !pto.vmi.vreg<64xui8>, !pto.ptr<ui8, ub>
+    pto.vmi.vstore %sum, %dst[%aligned_off]
+        : !pto.vmi.vreg<64xui8>, !pto.ptr<ui8, ub>, index
     return
   }
 
@@ -106,8 +106,8 @@ module {
     %c0 = arith.constant 0 : index
     %c64 = arith.constant 64 : index
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<128xpred>
-    %x = pto.vmi.vload %src[%c0] {dist_mode = "continuous"}
-        : memref<256xf16, #pto.address_space<vec>> -> !pto.vmi.vreg<128xf16>
+    %x = pto.vmi.vload %src[%c0]
+        : memref<256xf16, #pto.address_space<vec>>, index -> !pto.vmi.vreg<128xf16>
     %lo, %hi = "pto.vmi.channel_split"(%x)
         : (!pto.vmi.vreg<128xf16>)
         -> (!pto.vmi.vreg<64xf16>, !pto.vmi.vreg<64xf16>)
@@ -116,94 +116,199 @@ module {
         -> !pto.vmi.vreg<128xf16>
     pto.vmi.vstore %merged, %dst[%c0], %mask
         : !pto.vmi.vreg<128xf16>, !pto.ptr<f16, ub>,
-          !pto.vmi.mask<128xpred>
+          index, !pto.vmi.mask<128xpred>
     return
   }
 }
 
-// ASSIGN-LABEL: func.func @f16_store_prefers_lane_stride
-// ASSIGN: %[[X:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: %[[Y:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: %[[SUM:.*]] = pto.vmi.addf %[[X]], %[[Y]]
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: pto.vmi.store %[[SUM]]
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
+// ASSIGN-LABEL: func.func @f16_store_prefers_lane_stride(
+// ASSIGN-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// ASSIGN-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 16 : index
+// ASSIGN-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_4]] : index
+// ASSIGN-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_0]]{{\[}}%[[VAL_5]]] : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_1]]{{\[}}%[[VAL_5]]] : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.vmi.vadd %[[VAL_6]], %[[VAL_7]] : !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>, !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>> -> !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: pto.vmi.store %[[VAL_8]], %[[VAL_2]]{{\[}}%[[VAL_5]]] : !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>, !pto.ptr<f16, ub>, index
+// ASSIGN-NEXT: return
+// ASSIGN-NEXT: }
+// ASSIGN-LABEL: func.func @f16_masked_store_prefers_lane_stride(
+// ASSIGN-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// ASSIGN-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 16 : index
+// ASSIGN-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.constant 32 : index
+// ASSIGN-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_4]] : index
+// ASSIGN-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vmi.create_mask %[[VAL_5]] : index -> !pto.vmi.mask<64xb32, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_0]]{{\[}}%[[VAL_6]]] : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_1]]{{\[}}%[[VAL_6]]] : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = pto.vmi.vadd %[[VAL_8]], %[[VAL_9]] : !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>, !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>> -> !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_11:[a-zA-Z0-9_.$-]+]] = pto.vmi.create_mask %[[VAL_5]] : index -> !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: pto.vmi.masked_store %[[VAL_10]], %[[VAL_2]]{{\[}}%[[VAL_6]]], %[[VAL_11]] : !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>, !pto.ptr<f16, ub>, index, !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: return
+// ASSIGN-NEXT: }
+// ASSIGN-LABEL: func.func @f16_full_width_store_stays_contiguous(
+// ASSIGN-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// ASSIGN-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 16 : index
+// ASSIGN-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_4]] : index
+// ASSIGN-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_0]]{{\[}}%[[VAL_5]]] : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_1]]{{\[}}%[[VAL_5]]] : !pto.ptr<f16, ub>, index -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.vmi.vadd %[[VAL_6]], %[[VAL_7]] : !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>, !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>> -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: pto.vmi.store %[[VAL_8]], %[[VAL_2]]{{\[}}%[[VAL_5]]] : !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>, !pto.ptr<f16, ub>, index
+// ASSIGN-NEXT: return
+// ASSIGN-NEXT: }
+// ASSIGN-LABEL: func.func @ui8_half_width_store_prefers_lane_stride2(
+// ASSIGN-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// ASSIGN-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// ASSIGN-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// ASSIGN-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// ASSIGN-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 32 : index
+// ASSIGN-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_4]] : index
+// ASSIGN-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_0]]{{\[}}%[[VAL_5]]] : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_1]]{{\[}}%[[VAL_5]]] : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.vmi.vadd %[[VAL_6]], %[[VAL_7]] : !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous>>, !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous>> -> !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: pto.vmi.store %[[VAL_8]], %[[VAL_2]]{{\[}}%[[VAL_5]]] : !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous>>, !pto.ptr<ui8, ub>, index
+// ASSIGN-NEXT: return
+// ASSIGN-NEXT: }
+// ASSIGN-LABEL: func.func @ui8_quarter_width_store_prefers_lane_stride4(
+// ASSIGN-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// ASSIGN-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// ASSIGN-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// ASSIGN-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// ASSIGN-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 32 : index
+// ASSIGN-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_4]] : index
+// ASSIGN-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_0]]{{\[}}%[[VAL_5]]] : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_1]]{{\[}}%[[VAL_5]]] : !pto.ptr<ui8, ub>, index -> !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.vmi.vadd %[[VAL_6]], %[[VAL_7]] : !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous>>, !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous>> -> !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: pto.vmi.store %[[VAL_8]], %[[VAL_2]]{{\[}}%[[VAL_5]]] : !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous>>, !pto.ptr<ui8, ub>, index
+// ASSIGN-NEXT: return
+// ASSIGN-NEXT: }
+// ASSIGN-LABEL: func.func @f16_store_does_not_override_channel_merge(
+// ASSIGN-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: memref<256xf16, #pto.address_space<vec>>,
+// ASSIGN-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// ASSIGN-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: index) {
+// ASSIGN-NEXT: %[[VAL_3:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : index
+// ASSIGN-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 64 : index
+// ASSIGN-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = pto.vmi.create_mask %[[VAL_4]] : index -> !pto.vmi.mask<128xb32, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vmi.load %[[VAL_0]]{{\[}}%[[VAL_3]]] : memref<256xf16, #pto.address_space<vec>>, index -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vmi.ensure_layout %[[VAL_6]] : !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>> -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<deinterleaved = 2>>
+// ASSIGN-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]]:2 = "pto.vmi.channel_split"(%[[VAL_7]]) : (!pto.vmi.vreg<128xf16, #pto.vmi.layout<deinterleaved = 2>>) -> (!pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>, !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>)
+// ASSIGN-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = "pto.vmi.channel_merge"(%[[VAL_8]]#0, %[[VAL_8]]#1) : (!pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>, !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous>>) -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<deinterleaved = 2>>
+// ASSIGN-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = pto.vmi.create_mask %[[VAL_4]] : index -> !pto.vmi.mask<128xb16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: %[[VAL_11:[a-zA-Z0-9_.$-]+]] = pto.vmi.ensure_layout %[[VAL_9]] : !pto.vmi.vreg<128xf16, #pto.vmi.layout<deinterleaved = 2>> -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: pto.vmi.masked_store %[[VAL_11]], %[[VAL_1]]{{\[}}%[[VAL_3]]], %[[VAL_10]] : !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>, !pto.ptr<f16, ub>, index, !pto.vmi.mask<128xb16, #pto.vmi.layout<contiguous>>
+// ASSIGN-NEXT: return
+// ASSIGN-NEXT: }
 
-// ASSIGN-LABEL: func.func @f16_masked_store_prefers_lane_stride
-// ASSIGN: %[[MASK:.*]] = pto.vmi.create_mask
-// ASSIGN-SAME: !pto.vmi.mask<64xb32, #pto.vmi.layout<contiguous>>
-// ASSIGN: %[[X:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: %[[Y:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: %[[SUM:.*]] = pto.vmi.addf %[[X]], %[[Y]]
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: %[[STORE_MASK:.*]] = pto.vmi.create_mask
-// ASSIGN-SAME: !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: pto.vmi.masked_store %[[SUM]]
-// ASSIGN-SAME: !pto.vmi.vreg<64xf16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN-SAME: !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous, lane_stride = 2>>
-
-// ASSIGN-LABEL: func.func @f16_full_width_store_stays_contiguous
-// ASSIGN: %[[X:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
-// ASSIGN: %[[Y:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
-// ASSIGN: %[[SUM:.*]] = pto.vmi.addf %[[X]], %[[Y]]
-// ASSIGN-SAME: !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
-// ASSIGN: pto.vmi.store %[[SUM]]
-// ASSIGN-SAME: !pto.vmi.vreg<128xf16, #pto.vmi.layout<contiguous>>
-
-// ASSIGN-LABEL: func.func @ui8_half_width_store_prefers_lane_stride2
-// ASSIGN: %[[X:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: %[[Y:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: %[[SUM:.*]] = pto.vmi.addi %[[X]], %[[Y]]
-// ASSIGN-SAME: !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous, lane_stride = 2>>
-// ASSIGN: pto.vmi.store %[[SUM]]
-// ASSIGN-SAME: !pto.vmi.vreg<128xui8, #pto.vmi.layout<contiguous, lane_stride = 2>>
-
-// ASSIGN-LABEL: func.func @ui8_quarter_width_store_prefers_lane_stride4
-// ASSIGN: %[[X:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous, lane_stride = 4>>
-// ASSIGN: %[[Y:.*]] = pto.vmi.load
-// ASSIGN-SAME: !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous, lane_stride = 4>>
-// ASSIGN: %[[SUM:.*]] = pto.vmi.addi %[[X]], %[[Y]]
-// ASSIGN-SAME: !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous, lane_stride = 4>>
-// ASSIGN: pto.vmi.store %[[SUM]]
-// ASSIGN-SAME: !pto.vmi.vreg<64xui8, #pto.vmi.layout<contiguous, lane_stride = 4>>
-
-// ASSIGN-LABEL: func.func @f16_store_does_not_override_channel_merge
-// ASSIGN: "pto.vmi.channel_merge"
-// ASSIGN-SAME: -> !pto.vmi.vreg<128xf16, #pto.vmi.layout<deinterleaved = 2>>
-// ASSIGN: pto.vmi.masked_store
-// ASSIGN-SAME: !pto.vmi.vreg<128xf16, #pto.vmi.layout<deinterleaved = 2>>
-// ASSIGN-SAME: !pto.vmi.mask<128xb16, #pto.vmi.layout<deinterleaved = 2>>
-
-// LOWER-LABEL: func.func @f16_store_prefers_lane_stride
-// LOWER: pto.vlds {{.*}} {dist = "UNPK_B16"} : !pto.ptr<f16, ub> -> !pto.vreg<128xf16>
-// LOWER: pto.vsts {{.*}} {dist = "PK_B32"} : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, !pto.mask<b32>
-
-// LOWER-LABEL: func.func @f16_masked_store_prefers_lane_stride
-// LOWER: pto.vlds {{.*}} {dist = "UNPK_B16"} : !pto.ptr<f16, ub> -> !pto.vreg<128xf16>
-// LOWER: pto.vsts {{.*}} {dist = "PK_B32"} : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, !pto.mask<b32>
-
-// LOWER-LABEL: func.func @f16_full_width_store_stays_contiguous
-// LOWER: pto.vsts {{.*}} : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, !pto.mask<b16>
-
-// LOWER-LABEL: func.func @ui8_half_width_store_prefers_lane_stride2
-// LOWER: pto.vlds {{.*}} {dist = "UNPK_B8"}
-// LOWER: pto.vsts {{.*}} {dist = "PK_B16"}
-
-// LOWER-LABEL: func.func @ui8_quarter_width_store_prefers_lane_stride4
-// LOWER: pto.vlds {{.*}} {dist = "UNPK4"} : !pto.ptr<ui8, ub> -> !pto.vreg<256xui8>
-// LOWER: pto.vsts {{.*}} {dist = "PK4_B32"} : !pto.vreg<256xui8>, !pto.ptr<ui8, ub>, !pto.mask<b32>
-
-// LOWER-LABEL: func.func @f16_store_does_not_override_channel_merge
-// LOWER: %[[LOAD:.*]] = pto.vlds
-// LOWER: %[[LOW:.*]], %[[HIGH:.*]] = pto.vdintlv %[[LOAD]], %[[LOAD]]
-// LOWER: pto.vintlv
-// LOWER: pto.vsts
+// LOWER-LABEL: func.func @f16_store_prefers_lane_stride(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 64 : i32
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.constant 16 : index
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_5]] : index
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_0]]{{\[}}%[[VAL_6]]] : !pto.ptr<f16, ub>, index -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_1]]{{\[}}%[[VAL_6]]] : !pto.ptr<f16, ub>, index -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_VL64" : !pto.mask<b16>
+// LOWER-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = pto.vadd %[[VAL_7]], %[[VAL_8]], %[[VAL_9]] : !pto.vreg<128xf16>, !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_11:[a-zA-Z0-9_.$-]+]], %[[VAL_12:[a-zA-Z0-9_.$-]+]] = pto.plt_b16 %[[VAL_4]] : i32 -> !pto.mask<b16>, i32
+// LOWER-NEXT: pto.vsts %[[VAL_10]], %[[VAL_2]]{{\[}}%[[VAL_6]]], %[[VAL_11]] : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, index, !pto.mask<b16>
+// LOWER-NEXT: return
+// LOWER-NEXT: }
+// LOWER-LABEL: func.func @f16_masked_store_prefers_lane_stride(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 64 : i32
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.constant 16 : index
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_5]] : index
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_0]]{{\[}}%[[VAL_6]]] : !pto.ptr<f16, ub>, index -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_1]]{{\[}}%[[VAL_6]]] : !pto.ptr<f16, ub>, index -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_VL64" : !pto.mask<b16>
+// LOWER-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = pto.vadd %[[VAL_7]], %[[VAL_8]], %[[VAL_9]] : !pto.vreg<128xf16>, !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_11:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_VL32" : !pto.mask<b16>
+// LOWER-NEXT: %[[VAL_12:[a-zA-Z0-9_.$-]+]], %[[VAL_13:[a-zA-Z0-9_.$-]+]] = pto.plt_b16 %[[VAL_4]] : i32 -> !pto.mask<b16>, i32
+// LOWER-NEXT: %[[VAL_14:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
+// LOWER-NEXT: %[[VAL_15:[a-zA-Z0-9_.$-]+]] = pto.pand %[[VAL_11]], %[[VAL_12]], %[[VAL_14]] : !pto.mask<b16>, !pto.mask<b16>, !pto.mask<b16> -> !pto.mask<b16>
+// LOWER-NEXT: pto.vsts %[[VAL_10]], %[[VAL_2]]{{\[}}%[[VAL_6]]], %[[VAL_15]] : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, index, !pto.mask<b16>
+// LOWER-NEXT: return
+// LOWER-NEXT: }
+// LOWER-LABEL: func.func @f16_full_width_store_stays_contiguous(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 16 : index
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_4]] : index
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_0]]{{\[}}%[[VAL_5]]] : !pto.ptr<f16, ub>, index -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_1]]{{\[}}%[[VAL_5]]] : !pto.ptr<f16, ub>, index -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
+// LOWER-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.vadd %[[VAL_6]], %[[VAL_7]], %[[VAL_8]] : !pto.vreg<128xf16>, !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
+// LOWER-NEXT: pto.vsts %[[VAL_9]], %[[VAL_2]]{{\[}}%[[VAL_5]]], %[[VAL_10]] : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, index, !pto.mask<b16>
+// LOWER-NEXT: return
+// LOWER-NEXT: }
+// LOWER-LABEL: func.func @ui8_half_width_store_prefers_lane_stride2(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 128 : i32
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.constant 1 : i16
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : i16
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = arith.constant 32 : index
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_7]] : index
+// LOWER-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL128" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = pto.addptr %[[VAL_0]], %[[VAL_8]] : <ui8, ub>, index -> <ui8, ub>
+// LOWER-NEXT: %[[VAL_11:[a-zA-Z0-9_.$-]+]] = pto.vsldb %[[VAL_10]], %[[VAL_5]], %[[VAL_6]], %[[VAL_9]] : !pto.ptr<ui8, ub>, i16, i16, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_12:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL128" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_13:[a-zA-Z0-9_.$-]+]] = pto.addptr %[[VAL_1]], %[[VAL_8]] : <ui8, ub>, index -> <ui8, ub>
+// LOWER-NEXT: %[[VAL_14:[a-zA-Z0-9_.$-]+]] = pto.vsldb %[[VAL_13]], %[[VAL_5]], %[[VAL_6]], %[[VAL_12]] : !pto.ptr<ui8, ub>, i16, i16, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_15:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL128" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_16:[a-zA-Z0-9_.$-]+]] = pto.vadd %[[VAL_11]], %[[VAL_14]], %[[VAL_15]] : !pto.vreg<256xui8>, !pto.vreg<256xui8>, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_17:[a-zA-Z0-9_.$-]+]], %[[VAL_18:[a-zA-Z0-9_.$-]+]] = pto.plt_b8 %[[VAL_4]] : i32 -> !pto.mask<b8>, i32
+// LOWER-NEXT: pto.vsts %[[VAL_16]], %[[VAL_2]]{{\[}}%[[VAL_8]]], %[[VAL_17]] : !pto.vreg<256xui8>, !pto.ptr<ui8, ub>, index, !pto.mask<b8>
+// LOWER-NEXT: return
+// LOWER-NEXT: }
+// LOWER-LABEL: func.func @ui8_quarter_width_store_prefers_lane_stride4(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: !pto.ptr<ui8, ub>,
+// LOWER-SAME: %[[VAL_3:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = arith.constant 64 : i32
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]] = arith.constant 1 : i16
+// LOWER-NEXT: %[[VAL_6:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : i16
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = arith.constant 32 : index
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]] = arith.muli %[[VAL_3]], %[[VAL_7]] : index
+// LOWER-NEXT: %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL64" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_10:[a-zA-Z0-9_.$-]+]] = pto.addptr %[[VAL_0]], %[[VAL_8]] : <ui8, ub>, index -> <ui8, ub>
+// LOWER-NEXT: %[[VAL_11:[a-zA-Z0-9_.$-]+]] = pto.vsldb %[[VAL_10]], %[[VAL_5]], %[[VAL_6]], %[[VAL_9]] : !pto.ptr<ui8, ub>, i16, i16, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_12:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL64" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_13:[a-zA-Z0-9_.$-]+]] = pto.addptr %[[VAL_1]], %[[VAL_8]] : <ui8, ub>, index -> <ui8, ub>
+// LOWER-NEXT: %[[VAL_14:[a-zA-Z0-9_.$-]+]] = pto.vsldb %[[VAL_13]], %[[VAL_5]], %[[VAL_6]], %[[VAL_12]] : !pto.ptr<ui8, ub>, i16, i16, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_15:[a-zA-Z0-9_.$-]+]] = pto.pset_b8 "PAT_VL64" : !pto.mask<b8>
+// LOWER-NEXT: %[[VAL_16:[a-zA-Z0-9_.$-]+]] = pto.vadd %[[VAL_11]], %[[VAL_14]], %[[VAL_15]] : !pto.vreg<256xui8>, !pto.vreg<256xui8>, !pto.mask<b8> -> !pto.vreg<256xui8>
+// LOWER-NEXT: %[[VAL_17:[a-zA-Z0-9_.$-]+]], %[[VAL_18:[a-zA-Z0-9_.$-]+]] = pto.plt_b8 %[[VAL_4]] : i32 -> !pto.mask<b8>, i32
+// LOWER-NEXT: pto.vsts %[[VAL_16]], %[[VAL_2]]{{\[}}%[[VAL_8]]], %[[VAL_17]] : !pto.vreg<256xui8>, !pto.ptr<ui8, ub>, index, !pto.mask<b8>
+// LOWER-NEXT: return
+// LOWER-NEXT: }
+// LOWER-LABEL: func.func @f16_store_does_not_override_channel_merge(
+// LOWER-SAME: %[[VAL_0:[a-zA-Z0-9_.$-]+]]: memref<256xf16, #pto.address_space<vec>>,
+// LOWER-SAME: %[[VAL_1:[a-zA-Z0-9_.$-]+]]: !pto.ptr<f16, ub>,
+// LOWER-SAME: %[[VAL_2:[a-zA-Z0-9_.$-]+]]: index) {
+// LOWER-NEXT: %[[VAL_3:[a-zA-Z0-9_.$-]+]] = arith.constant 0 : index
+// LOWER-NEXT: %[[VAL_4:[a-zA-Z0-9_.$-]+]] = pto.vlds %[[VAL_0]]{{\[}}%[[VAL_3]]] : memref<256xf16, #pto.address_space<vec>>, index -> !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_5:[a-zA-Z0-9_.$-]+]], %[[VAL_6:[a-zA-Z0-9_.$-]+]] = pto.vdintlv %[[VAL_4]], %[[VAL_4]] : !pto.vreg<128xf16>, !pto.vreg<128xf16> -> !pto.vreg<128xf16>, !pto.vreg<128xf16>
+// LOWER-NEXT: %[[VAL_7:[a-zA-Z0-9_.$-]+]] = pto.pset_b16 "PAT_VL64" : !pto.mask<b16>
+// LOWER-NEXT: %[[VAL_8:[a-zA-Z0-9_.$-]+]], %[[VAL_9:[a-zA-Z0-9_.$-]+]] = pto.vintlv %[[VAL_5]], %[[VAL_6]] : !pto.vreg<128xf16>, !pto.vreg<128xf16> -> !pto.vreg<128xf16>, !pto.vreg<128xf16>
+// LOWER-NEXT: pto.vsts %[[VAL_8]], %[[VAL_1]]{{\[}}%[[VAL_3]]], %[[VAL_7]] : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, index, !pto.mask<b16>
+// LOWER-NEXT: return
+// LOWER-NEXT: }

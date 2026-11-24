@@ -9,9 +9,31 @@ Vector loads move data from Unified Buffer (UB) to vector registers (`vreg`). Ve
 
 - `%source` / `%dest` is the base address operand in SSA form. The base pointer
   MUST address the Vector tile buffer / UB space.
-- `%offset` is the displacement operand in SSA form. The exact encoding is
-  instruction-specific, but the effective address and any post-update behavior
-  MUST match the selected instruction form.
+- `%offset` is the displacement operand in SSA form. Its unit and sign are
+  part of each instruction's contract:
+  - `pto.vlds`, `pto.vldsx2`, `pto.vsts`, `pto.vstsx2` and `pto.uvld`
+    count **elements** and take a **signed** displacement: positive values
+    advance the base pointer, negative values move it toward lower addresses.
+  - `pto.plds` / `pto.psts` count **bytes** and `pto.pldi` / `pto.psti`
+    count **alignment units**, both signed.
+  - `pto.vstas` and `pto.vstus` take an **unsigned** byte count: a length in
+    bytes to write, never a displacement toward lower addresses.
+  - **Type:** an offset is written either with the platform `index` type or
+    with a 32/64-bit signless integer (`i32`, `i64`), declared in the type
+    list right after the base operand's type, as in
+    `%src[%off] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>`. The declared
+    type selects the interpretation, so an unsigned instruction takes an
+    unsigned integer offset. Narrower widths (`i1`/`i8`/`i16`) and widths
+    above 64 bits are rejected because this is the width contract the offset
+    shares with `pto.vmi`: VMI memory operations derive per-chunk and per-group
+    offsets in the offset's own type, so a narrow offset would wrap silently
+    there. VPTO itself widens the offset once when it forms the address and
+    derives nothing from it, so the hazard is VMI-specific.
+  - **Post-update:** the updated base advances by the displacement the
+    instruction applied, in the same unit and sign.
+  - **Bounds:** these ops perform no bounds checking. A displacement that
+    leaves the object addressed by the base pointer is undefined at this level
+    and is the caller's responsibility.
 - `%mask` is the predicate operand for predicated memory families. For memory
   families,
   inactive lanes or inactive blocks MUST NOT issue memory requests unless the
@@ -111,11 +133,11 @@ DMA **`TLOAD` / `TSTORE`** (global memory ↔ UB) use **MTE** pipes, not `RV_VLD
 
 ### `pto.vlds`
 
-- **syntax:** `%result = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>`
+- **syntax:** `%result = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub>, index -> !pto.vreg<NxT>`
 
   Post-update form:
 
-  `%result, %updated_base = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>, !pto.ptr<T, ub>`
+  `%result, %updated_base = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub>, index -> !pto.vreg<NxT>, !pto.ptr<T, ub>`
 - **semantics:** Vector load with distribution mode.
 - **inputs:**
   `%source` is the UB base address, `%offset` is the load displacement, and
@@ -156,12 +178,12 @@ deinterleave forms.
 
 **Example — Contiguous load:**
 ```mlir
-%v = pto.vlds %ub[%offset] {dist = "NORM"} : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+%v = pto.vlds %ub[%offset] {dist = "NORM"} : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
 ```
 
 **Example — Broadcast scalar to all lanes:**
 ```mlir
-%v = pto.vlds %ub[%c0] {dist = "BRC_B32"} : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+%v = pto.vlds %ub[%c0] {dist = "BRC_B32"} : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
 ```
 
 ---
@@ -287,15 +309,22 @@ for (int i = 0; i < 64; i++) {
   `%result` is the loaded vector. If requested, `%updated_base` is the source
   pointer advanced by `%repeat_stride` 32-byte blocks.
 - **constraints and limitations:**
+  The effective source address MUST be 32-byte aligned, including when only
+  one block is enabled or `block_stride = 0`. Each enabled block requires its
+  entire 32-byte interval to be readable. The mask controls participating
+  blocks and does not relax address alignment or shorten an enabled block.
   PTO surface does not expose the packed control word directly. If a block is
   masked off, the corresponding destination block is zeroed and MUST NOT raise
   an address overflow exception for that block.
+- **Block predicate:** the predicate at the first element of each 32B block
+  enables that whole block. For B32 this is logical lane `blk * 8`; for B16
+  `blk * 16`; for B8 `blk * 32`. A prefix of 2 bits does not enable 2 blocks.
 - **Latency:** **9** cycles.
 
 ```c
 // Block-strided load on 32-bit elements: one 32B block = 8 lanes.
 for (int blk = 0; blk < 8; ++blk) {
-    if (pg_b32[blk])
+    if (pg_b32[blk * 8])
         dst_block[blk] = UB_block[base + repeat_stride + blk * block_stride];
     else
         dst_block[blk] = 0;
@@ -414,8 +443,8 @@ for (int blk = 0; blk < VL / 32; ++blk) {
 
 ### `pto.vsts`
 
-- **syntax:** `pto.vsts %value, %dest[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, !pto.mask<G>`
-- **post-update syntax:** `%updated_dest = pto.vsts %value, %dest[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, !pto.mask<G> -> !pto.ptr<T, ub>`
+- **syntax:** `pto.vsts %value, %dest[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, index, !pto.mask<G>`
+- **post-update syntax:** `%updated_dest = pto.vsts %value, %dest[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, index, !pto.mask<G> -> !pto.ptr<T, ub>`
 - **semantics:** Vector store with distribution mode.
 - **inputs:**
   `%value` is the source vector, `%dest` is the UB base pointer, `%offset` is
@@ -448,7 +477,7 @@ for (int blk = 0; blk < VL / 32; ++blk) {
 
 **Example — Contiguous store:**
 ```mlir
-pto.vsts %v, %ub[%offset], %mask {dist = "NORM_B32"} : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<G>
+pto.vsts %v, %ub[%offset], %mask {dist = "NORM_B32"} : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.mask<G>
 ```
 
 ---
@@ -714,8 +743,16 @@ These ops make reference-updated state explicit as SSA results.
   begin from `AR = 0`; if the surrounding program does not already guarantee
   that, the hardware sequence should clear `SPR AR` before the first dependent
   `pto.vstur`. The first `%align_in` in the stream should come from
-  `pto.init_align`. `pto.vstur` also consumes the fixed `SPR SQZN` state, so a
-  preceding squeeze producer such as `pto.vsqz` / `pto.vusqz` MUST establish
-  the byte count before the store. `MODE` MUST be one of `POST_UPDATE` or
-  `NO_POST_UPDATE`.
+  `pto.init_align`. `pto.vstur` also consumes the fixed `SPR SQZN` state.
+  Only `pto.vsqz` writes `SQZN`, and only when its `#st` hint is 1; the
+  VSQZ result MUST reach this store's value operand directly or through
+  `pto.vbitcast` in the same function. `pto.init_align` does not initialize
+  `SQZN` (its reset value is Undefined), and the AR-only `SPRCLR` /
+  `SPRSTI` / `SPRSTS` ops do not write it. A `pto.vstur` without such a
+  value-chain producer is invalid: `SQZN` is Undefined, so the store length —
+  and therefore whether and what it writes — is undefined. The ISA also
+  requires `#VSTUR == #(VSQZ with #st=1)` and a `VSTUR` between two such
+  `VSQZ` (`visa.txt:311`-`:312`, `:5662`-`:5663`); the verifier checks
+  only the local value-chain producer. Use `pto.vstus` when the store is not
+  squeezed. `MODE` MUST be one of `POST_UPDATE` or `NO_POST_UPDATE`.
 - **Latency:** **9** cycles.

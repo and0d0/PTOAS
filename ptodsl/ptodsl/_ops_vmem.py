@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,83 +6,19 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Vector memory ops: loads/stores, cvt/pack contracts, gather/scatter."""
 
-from functools import wraps
-import warnings
-from ._diagnostics import (
-    PTODSLDeprecationWarning,
-    explicit_mode_required_with_context_error,
-    make_tensor_view_invalid_layout_error,
-    make_tensor_view_missing_metadata_error,
-    tile_row_alignment_error,
-)
-from ._host_tensors import resolve_tensor_data_entry
-from ._scalar_coercion import coerce_scalar_to_type, materialize_scalar_literal
-from ._scalar_adaptation import (
-    classify_runtime_scalar_type,
-    coerce_runtime_i1_value,
-    coerce_runtime_index_value,
-    coerce_runtime_integer_value,
-)
-from ._runtime_scalar_ops import emit_runtime_binary_op
-from ._surface_values import (
-    AllocatedBufferValue,
-    MaskResultValue,
-    PartitionTensorViewValue,
-    TensorViewValue,
-    TileSliceValue,
-    TileValue,
-    _coerce_index_value,
-    _static_index_dims,
-    _unwrap_sequence,
-    compose_partition_spec,
-    emit_as_ptr,
-    infer_tile_element_type,
-    is_runtime_scalar_ir_type,
-    parse_tile_type_metadata,
-    resolve_address_access,
-    unwrap_surface_value,
-    wrap_surface_value,
-)
-from ._types import (
-    _is_struct_type,
-    _isinstance_pto_type,
-    _materialize_integer_literal,
-    _normalize_address_space,
-    _resolve,
-    _strip_integer_signedness,
-    mask_type,
-    part_tensor_view_type,
-    part_tensor_view_type_from_dims,
-    ptr,
-    tensor_view_type,
-    tensor_view_type_from_dims,
-    vreg_type,
-)
-from ptoas.mlir.dialects import arith, pto as _pto
-from ptoas.mlir.ir import (
-    Attribute,
-    BF16Type,
-    F16Type,
-    F32Type,
-    Float8E4M3FNType,
-    Float8E5M2Type,
-    FloatAttr,
-    IndexType,
-    IntegerAttr,
-    IntegerType,
-    MemRefType,
-    Operation,
-    Type,
-    TypeAttr,
-    UnitAttr,
-    VectorType,
-)
+from __future__ import annotations
+
+# Shared import surface consolidated in _ops_imports to avoid repeating the
+# identical block across the sibling _ops modules. See _ops_imports.__all__.
+from ._ops_imports import *  # noqa: F401,F403
 
 from ._ops_common import (
-    _coerce_index,
+    _coerce_element_offset,
     _coerce_scalar_like_vector_element,
+    _coerce_vunpack_part,
     _element_bytewidth,
     _infer_vreg_metadata,
     _infer_vreg_type_from_address_source,
@@ -144,7 +81,7 @@ def _vlds_tile_slice(src_ptr, *, dist, post_mode):
 def _vlds_pointer(src_ptr, offset, result_vreg_type, *, dist, post_mode):
     raw_source = unwrap_surface_value(src_ptr)
     result_type = _resolve(result_vreg_type)
-    raw_offset = _coerce_index(offset, context="vlds(ptr, offset)")
+    raw_offset = _coerce_element_offset(offset, context="vlds(ptr, offset)")
     kwargs = _vector_memory_dist_kwargs(
         dist,
         allowed=_VLOAD_DIST_TOKENS,
@@ -274,7 +211,7 @@ def vldsx2(source, offset_or_dist, dist=None, *, result_vreg_type=None):
         result_type,
         None,
         unwrap_surface_value(source),
-        _coerce_index(offset_or_dist, context="vldsx2(ptr, offset, dist)"),
+        _coerce_element_offset(offset_or_dist, context="vldsx2(ptr, offset, dist)"),
         _normalize_dist_token(
             dist,
             allowed=_DEINTERLEAVE_DIST_TOKENS,
@@ -380,6 +317,7 @@ _VCVT_CONTRACTS = {
     ("f16", "f8e4m3"): _vcvt_contract(True, True, True, allowed_rnd="RAFZC"),
     ("f16", "f8e5m2"): _vcvt_contract(True, True, True, allowed_rnd="RAFZC"),
     ("f16", "hif8"): _vcvt_contract(True, True, True, allowed_rnd="AH"),
+    ("f16", "bf16"): _vcvt_contract(True, False, False, allowed_rnd="RAFZC"),
     ("f16", "f32"): _vcvt_contract(False, False, True),
     ("f16", "s32"): _vcvt_contract(True, False, True),
     ("f16", "s16"): _vcvt_contract(True, True, False),
@@ -583,6 +521,36 @@ def _infer_vpack_result_type(src):
     return result_type
 
 
+def _infer_vunpack_result_type(src):
+    lanes, elem_type = _infer_vreg_metadata(src)
+    if not IntegerType.isinstance(elem_type):
+        raise TypeError(f"vunpack(src, part) expects an integer source vreg, got {elem_type}")
+    src_int_type = IntegerType(elem_type)
+    src_width = src_int_type.width
+    if src_width not in {8, 16}:
+        raise TypeError(
+            "vunpack(src, part) currently supports only the source/result shape pairs "
+            "s8/u8 -> s16/u16 and s16/u16 -> s32/u32"
+        )
+    if lanes % 2 != 0:
+        raise TypeError("vunpack(src, part) requires an even source lane count")
+
+    result_width = src_width * 2
+    if src_int_type.is_signed:
+        result_elem_type = IntegerType.get_signed(result_width)
+        op_ctor = _pto.VsunpackOp
+    elif src_int_type.is_unsigned:
+        result_elem_type = IntegerType.get_unsigned(result_width)
+        op_ctor = _pto.VzunpackOp
+    else:
+        # Match vpack's convention for signless integer carriers: the result
+        # is explicitly unsigned because this path performs zero extension.
+        result_elem_type = IntegerType.get_unsigned(result_width)
+        op_ctor = _pto.VzunpackOp
+
+    return _resolve(vreg_type(lanes // 2, result_elem_type)), op_ctor
+
+
 def vcvt(src, to_dtype, mask, *, rnd=None, sat=None, part=None):
     """``pto.vcvt`` – explicit vector type conversion."""
     kwargs = {}
@@ -616,6 +584,22 @@ def vpack(src, part):
             _infer_vpack_result_type(src),
             unwrap_surface_value(src),
             _normalize_vpack_part(part, context="vpack(src, part)"),
+        ).result
+    )
+
+
+def vunpack(src, part):
+    """``pto.vunpack`` – widen one vector half using signedness-aware extension.
+
+    Signless integer inputs follow ``vpack``'s convention: they are zero-
+    extended and produce an unsigned result element type.
+    """
+    result_type, op_ctor = _infer_vunpack_result_type(src)
+    return wrap_surface_value(
+        op_ctor(
+            result_type,
+            unwrap_surface_value(src),
+            _coerce_vunpack_part(part, context="vunpack(src, part)"),
         ).result
     )
 
@@ -678,7 +662,7 @@ def _vsts_tile_slice(val, dst_ptr, mask_value, *, extra_mask, dist, post_mode):
 def _vsts_pointer(val, dst_ptr, offset, mask_value, *, dist, post_mode):
     raw_destination = unwrap_surface_value(dst_ptr)
     raw_value = unwrap_surface_value(val)
-    raw_offset = _coerce_index(offset, context="vsts(ptr, offset, mask)")
+    raw_offset = _coerce_element_offset(offset, context="vsts(ptr, offset, mask)")
     raw_mask = unwrap_surface_value(mask_value)
     kwargs = _vector_memory_dist_kwargs(
         dist,
@@ -754,7 +738,7 @@ def vstsx2(low, high, dst_ptr, offset_or_dist, dist_or_mask=None, mask=None):
         unwrap_surface_value(low),
         unwrap_surface_value(high),
         unwrap_surface_value(dst_ptr),
-        _coerce_index(offset_or_dist, context="vstsx2(ptr, offset, dist, mask)"),
+        _coerce_element_offset(offset_or_dist, context="vstsx2(ptr, offset, dist, mask)"),
         _normalize_dist_token(
             dist_or_mask,
             allowed=_INTERLEAVE_DIST_TOKENS,

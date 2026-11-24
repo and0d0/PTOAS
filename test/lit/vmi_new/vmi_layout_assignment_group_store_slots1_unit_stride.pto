@@ -22,17 +22,16 @@ module {
         : !pto.vmi.vreg<512xf32>, !pto.vmi.mask<512xpred>
         -> !pto.vmi.vreg<8xf32>
     pto.vmi.vstore %sum, %dst[%aligned_off], %c1 {group = 8}
-        : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>
+        : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>, index
     return
   }
 }
 
 // CHECK-LABEL: func.func @vmi_layout_assignment_group_store_slots1_unit_stride(
 // CHECK-COUNT-8: pto.vcadd
-// CHECK-COUNT-8: pto.vdup
-// CHECK: pto.vsts
+// CHECK-COUNT-8: pto.vsts {{.*}} {dist = "1PT_B32"}
+// CHECK-NOT: pto.vdup
 // CHECK-NOT: pto.vstus
-// CHECK-NOT: dist = "1PT_B32"
 // CHECK-NOT: pto.vmi.
 // CHECK-NOT: !pto.vmi.
 // CHECK-NOT: unrealized_conversion_cast

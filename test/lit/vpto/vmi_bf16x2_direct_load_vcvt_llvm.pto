@@ -7,7 +7,7 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=VPTO --implicit-check-not=pto.vor
-// RUN: ptoas --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s --check-prefix=LLVM
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s --check-prefix=LLVM
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @bf16x2_direct_load_vcvt(
@@ -16,14 +16,14 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     %c0 = arith.constant 0 : index
     pto.vecscope {
       %wide = pto.vmi.vload %src[%c0]
-          : !pto.ptr<!pto.bf16x2, ub>
+          : !pto.ptr<!pto.bf16x2, ub>, index
          -> !pto.vmi.vreg<256x!pto.bf16x2>
       %packed = pto.vmi.vcvt %wide {rounding = "R"}
           : !pto.vmi.vreg<256x!pto.bf16x2>
          -> !pto.vmi.vreg<256x!pto.f4E1M2x2>
       pto.vmi.vstore %packed, %dst[%c0]
           : !pto.vmi.vreg<256x!pto.f4E1M2x2>,
-            !pto.ptr<!pto.f4E1M2x2, ub>
+            !pto.ptr<!pto.f4E1M2x2, ub>, index
     }
     return
   }
@@ -34,21 +34,21 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     %c0 = arith.constant 0 : index
     pto.vecscope {
       %wide = pto.vmi.vload %src[%c0]
-          : !pto.ptr<!pto.bf16x2, ub>
+          : !pto.ptr<!pto.bf16x2, ub>, index
          -> !pto.vmi.vreg<64x!pto.bf16x2>
       %packed = pto.vmi.vcvt %wide {rounding = "A"}
           : !pto.vmi.vreg<64x!pto.bf16x2>
          -> !pto.vmi.vreg<64x!pto.f4E2M1x2>
       pto.vmi.vstore %packed, %dst[%c0]
           : !pto.vmi.vreg<64x!pto.f4E2M1x2>,
-            !pto.ptr<!pto.f4E2M1x2, ub>
+            !pto.ptr<!pto.f4E2M1x2, ub>, index
     }
     return
   }
 }
 
 // VPTO-LABEL: func.func @bf16x2_direct_load_vcvt
-// VPTO-COUNT-4: pto.vlds {{.*}} : !pto.ptr<!pto.bf16x2, ub> -> !pto.vreg<64x!pto.bf16x2>
+// VPTO-COUNT-4: pto.vlds {{.*}} : !pto.ptr<!pto.bf16x2, ub>, index -> !pto.vreg<64x!pto.bf16x2>
 // VPTO-COUNT-4: pto.vcvt {{.*}} {part = "P0", rnd = "R"}
 // VPTO-NOT: pto.vmi.
 // VPTO-NOT: !pto.vmi.
@@ -58,7 +58,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // LLVM-COUNT-4: call <256 x float4e1m2x2> @llvm.hivm.vcvtff2.bf162f4e1m2x2.x
 
 // VPTO-LABEL: func.func @bf16x2_direct_load_vcvt_e2m1
-// VPTO: pto.vlds {{.*}} : !pto.ptr<!pto.bf16x2, ub> -> !pto.vreg<64x!pto.bf16x2>
+// VPTO: pto.vlds {{.*}} : !pto.ptr<!pto.bf16x2, ub>, index -> !pto.vreg<64x!pto.bf16x2>
 // VPTO: pto.vcvt {{.*}} {part = "P0", rnd = "A"}
 // VPTO: pto.vsts
 // VPTO-NOT: pto.vmi.

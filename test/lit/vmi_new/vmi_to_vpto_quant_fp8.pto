@@ -17,7 +17,7 @@ module {
     %c32 = arith.constant 32 : index
     %aligned_offset = arith.muli %offset, %c32 : index
     %wide = pto.vmi.vload %src[%aligned_offset]
-        : !pto.ptr<f32, ub> -> !pto.vmi.vreg<256xf32>
+        : !pto.ptr<f32, ub>, index -> !pto.vmi.vreg<256xf32>
     %scale_vec = pto.vmi.vbrc %inv_scale
         : f32 -> !pto.vmi.vreg<256xf32>
     %scaled = pto.vmi.vmul %wide, %scale_vec
@@ -26,7 +26,7 @@ module {
     %packed = pto.vmi.vcvt %scaled {saturate = "SAT"}
         : !pto.vmi.vreg<256xf32> -> !pto.vmi.vreg<256xf8E4M3FN>
     pto.vmi.vstore %packed, %dst[%aligned_offset]
-        : !pto.vmi.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>
+        : !pto.vmi.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, index
     return
   }
 }
@@ -38,7 +38,7 @@ module {
 // CHECK-NOT: part = "P2"
 // CHECK-NOT: part = "P3"
 // CHECK-NOT: pto.vor
-// CHECK-COUNT-4: pto.vsts {{.*}} {dist = "PK4_B32"} : !pto.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, !pto.mask<b32>
+// CHECK-COUNT-4: pto.vsts {{.*}} {dist = "PK4_B32"} : !pto.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, index, !pto.mask<b32>
 // CHECK-NOT: pto.vmi.
 // CHECK-NOT: !pto.vmi.
 // CHECK-NOT: unrealized_conversion_cast

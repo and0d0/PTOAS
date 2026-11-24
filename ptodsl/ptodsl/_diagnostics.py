@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -5,17 +6,29 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
 """Shared user-facing diagnostics for PTODSL tracing misuse."""
 
 from __future__ import annotations
 
 import warnings
 from functools import wraps
-from typing import Callable, ParamSpec, TypeVar
+from typing import Callable, TypeVar
+
+try:  # ParamSpec entered the stdlib ``typing`` in Python 3.10.
+    from typing import ParamSpec
+except ImportError:  # Python 3.8 / 3.9
+    try:
+        from typing_extensions import ParamSpec
+    except ImportError:
+        ParamSpec = None
 
 
-P = ParamSpec("P")
 R = TypeVar("R")
+# Annotations in this module are lazy strings (see ``from __future__`` above),
+# so ``P`` only needs to exist as a name; on interpreters without ParamSpec a
+# plain TypeVar keeps the annotation references resolvable enough for tooling.
+P = ParamSpec("P") if ParamSpec is not None else TypeVar("P")
 
 
 class PTODSLDeprecationWarning(UserWarning):
@@ -221,6 +234,44 @@ def kernel_module_launch_error(function_name: str | None = None) -> RuntimeError
     )
 
 
+def jit_sched_mode_type_error(value: object) -> TypeError:
+    """Return one diagnostic for a non-integer ``@pto.jit(sched_mode=...)``."""
+    return TypeError(
+        "@pto.jit(sched_mode=...) must be an int holding the CCE kernel scheduling "
+        f"mode (0 = normal mode, 1 = batch mode); got {value!r} of type "
+        f"{type(value).__name__}. bool is rejected even though True == 1, because "
+        "the scheduling mode is a mode selector, not a flag."
+    )
+
+
+def jit_sched_mode_range_error(value: int) -> ValueError:
+    """Return one diagnostic for a ``@pto.jit(sched_mode=...)`` that cannot fit i32."""
+    return ValueError(
+        f"@pto.jit(sched_mode={value}) does not fit in the signless-i32 "
+        "`pto.sched_mode` attribute: it would wrap around, and a wrapped value can "
+        "land on a valid mode. Pass 0 (normal mode) or 1 (batch mode) instead."
+    )
+
+
+def jit_sched_mode_entry_false_error() -> TypeError:
+    """Return one diagnostic for unsupported ``@pto.jit(entry=False, sched_mode=...)``."""
+    return TypeError(
+        "@pto.jit(entry=False) kernel modules do not support sched_mode. "
+        "`pto.sched_mode` is the CCE kernel scheduling mode, which only applies to "
+        "launchable kernel entries, and PTOAS rejects it on a non-entry function."
+    )
+
+
+def jit_sched_mode_source_error(source: object) -> TypeError:
+    """Return one diagnostic for unsupported ``@pto.jit(source=..., sched_mode=...)``."""
+    return TypeError(
+        f"@pto.jit(source=...) kernels do not support sched_mode while source={source!r}. "
+        "Source-backed JIT takes the function body and its attributes from the PTO IR "
+        "file, so the argument would be dropped; put the signless-i32 `pto.sched_mode` "
+        "attribute on the entry function in the source IR instead."
+    )
+
+
 def jit_source_entry_false_error(
     source: object,
     *,
@@ -409,6 +460,16 @@ def subkernel_kernel_kind_mismatch_error(role: str, kernel_kind: str) -> Runtime
         f"@pto.{role} cannot be lowered inside an explicit @pto.jit(kernel_kind={kernel_kind!r}) "
         "module. Remove the explicit kernel_kind so PTOAS can split cube/vector sections, "
         "or keep subkernel scopes in the same physical kind."
+    )
+
+
+def init_core_physical_section_required_error() -> RuntimeError:
+    """Return a diagnostic for an unscoped init_core call in a mixed kernel."""
+    return RuntimeError(
+        "pto.init_core() cannot be called outside pto.section(...) when the "
+        "kernel uses explicit physical sections. Call pto.init_core() once "
+        "inside each physical section so PTODSL can select the matching Cube "
+        "or Vector initialization."
     )
 
 
@@ -602,6 +663,7 @@ __all__ = [
     "jit_missing_annotation_error",
     "jit_non_gm_ptr_entry_error",
     "inline_subkernel_value_escape_error",
+    "init_core_physical_section_required_error",
     "physical_section_value_escape_error",
     "make_tensor_view_missing_metadata_error",
     "illegal_inline_subkernel_placement_error",
@@ -612,6 +674,10 @@ __all__ = [
     "kernel_module_compile_error",
     "kernel_module_launch_error",
     "kernel_module_return_value_error",
+    "jit_sched_mode_entry_false_error",
+    "jit_sched_mode_range_error",
+    "jit_sched_mode_source_error",
+    "jit_sched_mode_type_error",
     "jit_source_abi_error",
     "jit_source_compile_constexpr_error",
     "jit_source_constexpr_error",

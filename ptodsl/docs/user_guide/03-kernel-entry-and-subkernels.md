@@ -21,6 +21,7 @@ Decorator overview:
   backend="emitc"           EmitC backend — mode="auto" only
   mode="auto"               tile-first authoring, compiler-managed staging (default)
   mode="explicit"           micro-instruction authoring, user-managed staging
+  sched_mode=1              CCE kernel scheduling mode: 0 normal, 1 batch (entries)
 
 @pto.tileop                 Single-core Tile/scalar compute helper with inferred Vector/Cube kind
 @pto.func                   Reusable PTODSL helper with AST-rewritten control flow
@@ -56,6 +57,31 @@ build level and enables sync insertion by default, while `mode="explicit"` uses
 `--pto-level=level3` and disables sync insertion by default. This matches the
 manual-address, user-managed staging contract of explicit kernels.
 
+The **`sched_mode`** parameter is available on `entry=True` kernels. It sets
+the CCE kernel scheduling mode: `0` selects normal mode (the compiler default)
+and `1` selects batch mode, which only dispatches the kernel once every core it
+needs is free, so concurrently launched kernels do not overlap. Batch mode is
+not free -- it trades concurrency for that all-at-once dispatch -- so keep the
+default unless the kernel needs it. PTODSL stamps the value as the signless-i32
+`pto.sched_mode` attribute on the generated entry function and leaves the
+accepted value set and the entry-placement rule to PTOAS, which rejects
+anything outside `{0, 1}` and any non-entry placement with its own diagnostics
+(they mirror the compiler's rules, not its wording). The argument itself must
+be an int in the signless-i32 range: `bool`, floats, strings and values that
+would wrap into a legal mode are rejected at decoration, and so is combining
+it with `source=` or `entry=False`, because neither path can carry the
+attribute to the IR. EmitC emits the attribute as `__schedmode__(n)` ahead of
+`__global__`; VPTO records it as the `launch-schedule-mode` HIVM kernel
+annotation. Omitting `sched_mode` leaves the attribute off the function
+entirely.
+
+```python
+@pto.jit(target="a5", sched_mode=1)
+def batch_kernel(x_ptr: pto.ptr(pto.f32, "gm")):
+    # ... kernel body ...
+    return
+```
+
 `@pto.jit` owns compilation (tracing + lowering), caching, and — for
 `entry=True` — runtime launch binding. The compute helper decorators
 (`@pto.tileop` and `@pto.simt`) define sub-kernels that
@@ -70,6 +96,14 @@ values via a tuple. Every `@pto.func` helper must declare its return type with
 `returns=...` or a Python return annotation; use `returns=None` or `-> None` for
 helpers that do not return values.
 
+Each specialization of an `@pto.func` helper belongs to the backend child
+module that calls it. PTODSL emits these definitions with private symbol
+visibility, so equal specializations may appear independently in different
+children without exporting duplicate fatobj symbols. Decorated and outlined
+TileOp helpers follow the same module-local rule. Named SIMT helpers use their
+dedicated `pto.simt_entry` linkage policy. A callable that must be exported
+across child modules must use the `@pto.jit(entry=False)` kernel-module path.
+
 ```python
 @pto.func(returns=pto.i32)
 def add_rows(total: pto.i32, rows: pto.i32):
@@ -83,6 +117,46 @@ def add_rows(total: pto.i32, rows: pto.i32):
 def kernel(rows: pto.i32):
     total = add_rows(pto.const(0, dtype=pto.i32), rows)
     _ = total
+```
+
+
+### 3.1.1 Standard library — `pto.init_core()`
+
+PTODSL ships a first-party standard library so that kernels call common
+core-state initialization through the normal `pto.*` surface without any
+extra import or registration. Its first entry is `pto.init_core()`, a
+`@pto.func` helper that emits the canonical A5 VPTO core-state initialization
+sequence in source order:
+
+1. `pto.get_ctrl` → `arith.andi` → `arith.ori` → `pto.set_ctrl` – preserve
+   selected running CTRL bits and force the default preset bits.
+2. Vector kernels: `pto.set_loop_size_ubtoout(1, 1)` /
+   `pto.set_loop_size_outtoub(1, 1)` to restore default DMA loop sizes.
+   Explicit `kernel_kind="cube"` kernels receive `pto.set_mov_pad_val(0)`
+   instead, mirroring the reference `__DAV_CUBE__` / `__DAV_VEC__` split.
+3. `pto.set_store_atomic_cfg(0b00100100)` – restore the default scalar
+   store-atomic configuration.
+
+`pto.init_core()` behaves like a normal PTODSL traced callable: it may only be
+called while tracing a compatible kernel, and the VPTO pipeline inlines the
+helper body at the call site before VMI layout assignment and scheduling so
+the initialization operations participate in later semantic, layout,
+scheduling, and code-generation passes. V1 targets A5 + VPTO + `mode="explicit"`;
+calls under any other backend (e.g. EmitC) are rejected.
+
+For a mixed explicit kernel, call `pto.init_core()` once inside each physical
+section. PTODSL specializes the helper from the lexical section: the Cube
+section receives `set_mov_pad_val(0)`, while the Vector section receives the
+DMA loop-size initialization. An unscoped `pto.init_core()` combined with
+`pto.section(...)` is rejected, including when the call appears before the
+first section, because a mixed kernel has no single physical initialization.
+
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"init_core_example","compile":{}} -->
+```python
+@pto.jit(target="a5", mode="explicit")
+def init_core_example(inp: pto.ptr(pto.f32, "gm"), out: pto.ptr(pto.f32, "gm")):
+    pto.init_core()
+    # ... main computation ...
 ```
 
 
@@ -250,6 +324,73 @@ compiled[grid, stream](A.ctypes.data, O.ctypes.data, 4, 128)
 
 **Only `entry=True` kernels support `.compile()` and `[grid, stream]` launch.**
 Calling `.compile()` on an `entry=False` module raises an error.
+
+### Host C++ in the kernel's library: `native_options`
+
+PTODSL builds a kernel into a shared library from two inputs it generates itself:
+the launch code and the ptoas-produced kernel object. When a kernel's host side
+already exists in C++ — a resource setup helper, an ABI the device code shares
+with a host header — that closed set leaves only bad options: reimplement the C++
+in Python, or ship it as a second library the caller loads separately and keeps
+in step by hand.
+
+`native_options` opens the build up. It names host C++ sources to compile and
+link into the same library:
+
+```python
+@pto.jit(
+    name="my_kernel",
+    target="a3",
+    mode="explicit",
+    native_options={
+        # Compiled as host C++ and linked into this kernel's library.
+        "host_sources": ["MyHostHelper.cpp"],
+        # Include directories for those sources.
+        "include_dirs": [".", "../../include"],
+        # Extra link inputs; bare library names, as for -l.
+        "link_libraries": ["dl"],
+        "library_dirs": ["/opt/mylib/lib"],
+    },
+)
+def my_kernel(buf: pto.ptr(pto.f32, "gm")):
+    ...
+```
+
+Then reach the host entry points through the library the build produced:
+
+```python
+compiled = my_kernel.compile()
+lib = compiled.native_library()      # a ctypes.CDLL
+lib.my_host_setup()                  # a symbol from MyHostHelper.cpp
+compiled[grid, stream](buf)
+```
+
+Rules worth knowing:
+
+- **Relative paths resolve against the declaring file**, not the working
+  directory, so a kernel keeps building wherever it is invoked from. This is the
+  same rule `source=` uses.
+- **Host sources are part of the build's identity.** Their contents are digested
+  into the cache key, so editing one rebuilds the library instead of silently
+  reusing the old one.
+- **Host sources are compiled as host code**, with `-xc++` and no AI-core arch —
+  not as device code. They cannot contain kernel code.
+- **`link_libraries` takes bare names.** Pass `"dl"`, not `"-ldl"` or a path to a
+  `.so`; directories belong in `library_dirs`, which also become rpath entries so
+  the library is found again at load time. Host sources also pull `-lstdc++`,
+  because `bisheng --cce-fatobj-link` does not add the C++ runtime by itself.
+- **Undefined symbols remain an error.** The link keeps `-Wl,--no-undefined`, so a
+  library you forgot to name fails the build rather than the first launch.
+- **`include_dirs` requires `host_sources`.** On its own it would apply to
+  nothing, so it is rejected rather than quietly ignored.
+- Unknown keys are rejected when the decorator runs, not at build time.
+
+`native_library()` and `native_library_path()` are only for reaching host symbols;
+launching needs neither. Both build the specialization if it is not built yet, and
+both share one loaded library with every launch handle over that specialization.
+
+For a worked example, see `test/comm/` in the repository: a host helper that owns
+an ABI shared with the device code, linked into the kernel that uses it.
 
 ### Loading an existing PTO file
 
@@ -779,7 +920,10 @@ doesn't fuse as aggressively as you need.
   need C++ codegen.
 - **`backend="emitc"`** generates C++ through the EmitC pipeline. It only
   works with `mode="auto"` — if you try `mode="explicit"` with it, PTODSL
-  raises an error at decoration time.
+  raises an error at decoration time. Register-level `pto.mad` and `pto.vmi.*`
+  operations have no EmitC lowering and are rejected during tracing/compile,
+  before a native build. Use VPTO for those operations, or supported Tile
+  operations for an EmitC compute module.
 
 ### Choosing a backend
 
@@ -805,6 +949,14 @@ constrain the callee. Common patterns:
 The compiler resolves cross-backend calls automatically — when an `emitc`
 entry calls a `vpto` module, the linker wires them together into the final
 binary. You just write the Python call; the toolchain handles the rest.
+
+Cube/Vector `entry=False` modules retain their physical `kernel_kind` on the
+imported function for both backends, so local-pipe initialization can verify
+the function's placement. With multiple child modules, the compiler builds
+and links fat objects even when every child uses EmitC. An output filename
+ending in `.cpp` does not request textual C++ for that container: native-build
+integrations must consume its object output rather than compile ELF bytes as
+C++ source.
 
 ### Mixed-backend: compilation model and current limitations
 
@@ -862,6 +1014,12 @@ merged = pto.merge_jit_modules(
 All handles in the merge must share the same target architecture. Backend and
 mode can differ per handle — the merge appends the functions together and
 preserves each one's compilation settings.
+
+Every merged child remains an independent symbol table and backend object.
+Its entry or kernel-module primary function remains externally visible, while
+ordinary `@pto.func` and TileOp helper specializations remain private to that
+child. Consequently, two children may contain the same private helper symbol;
+the final fatobj link does not treat either definition as an exported symbol.
 
 
 ## 3.7 Sub-kernels — custom tile operations
@@ -1010,7 +1168,7 @@ materializes the corresponding section after tracing.
 **Role**: `@pto.simt` is the custom tile op for per-element scalar-parallel
 compute on the SIMT unit. SIMT (Single Instruction, Multiple Threads) is a
 programming model where you write instructions in scalar syntax
-(`scalar.load`, `scalar.store`, `a + b`), and the hardware executes them in
+(`pto.load`, `pto.store`, `a + b`), and the hardware executes them in
 parallel across many threads — analogous to how a GPU SM runs a CUDA kernel.
 Parameters are `Tile` references, typed UB pointers, and PTO scalars. The
 sub-kernel reads and writes individual elements through tile handles; results
@@ -1041,13 +1199,13 @@ def blend_output_rows(
     row_start: pto.i32, row_stop: pto.i32, valid_dim: pto.i32,
 ):
     for row in range(row_start, row_stop, 1):
-        alpha = scalar.load(alpha_tile[row, 0])
-        beta = scalar.load(beta_tile[row, 0])
+        alpha = pto.load(alpha_tile[row, 0])
+        beta = pto.load(beta_tile[row, 0])
         for col in range(0, valid_dim, 1):
-            o_prev = scalar.load(o_prev_tile[row, col])
-            pv_val = scalar.load(pv_tile[row, col])
+            o_prev = pto.load(o_prev_tile[row, col])
+            pv_val = pto.load(pv_tile[row, col])
             o_next = alpha * o_prev + beta * pv_val
-            scalar.store(o_next, o_next_tile[row, col])
+            pto.store(o_next, o_next_tile[row, col])
 ```
 
 SIMT kernels read and write individual scalar elements from tiles or typed
@@ -1083,7 +1241,7 @@ resource partition.
 @pto.simt(max_threads=256)
 def write_tid(dst: pto.ptr(pto.i32, "gm")):
     tid = pto.get_tid_x()
-    idx = scalar.index_cast(tid)
+    idx = tid
     pto.stg(tid, dst, idx)
 
 
@@ -1128,7 +1286,7 @@ pto.simt_launch(body, *args, dims=(dim_x, dim_y, dim_z), **static_kwargs)
 @pto.simt
 def fill_tid(dst: pto.ptr(pto.i32, "gm")):
     tid = pto.get_tid_x()
-    pto.stg(tid, dst, scalar.index_cast(tid))
+    pto.stg(tid, dst, tid)
 
 
 @pto.jit(target="a5")
@@ -1166,16 +1324,16 @@ with pto.tileop():
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.inline_simt_scope","symbol":"kernel_entry_inline_simt_scope_probe","compile":{"BLOCK":8}} -->
 ```python
 with pto.simt():
-    alpha = scalar.load(alpha_tile[row, 0])
-    beta = scalar.load(beta_tile[row, 0])
+    alpha = pto.load(alpha_tile[row, 0])
+    beta = pto.load(beta_tile[row, 0])
     o_next = alpha * o_prev + beta * pv_val
-    scalar.store(o_next, o_next_tile[row, col])
+    pto.store(o_next, o_next_tile[row, col])
 ```
 
 ```python
 with pto.simt(128, 1, 1):
     tid = pto.get_tid_x()
-    scalar.store(tid, scratch_ub, scalar.index_cast(tid))
+    pto.store(tid, scratch_ub, tid)
 ```
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.inline_cube_scope","symbol":"kernel_entry_inline_cube_scope_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->

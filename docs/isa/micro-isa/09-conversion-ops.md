@@ -30,20 +30,27 @@ Cycle-accurate simulator **popped→retire** latency (cycles). Only representati
 ## `pto.vci`
 
 - **syntax:** `%result = pto.vci %index {order = "ASC|DESC"} : T -> !pto.vreg<NxT>`
-- **semantics:** Generate a lane-index vector from a scalar base value.
+- **semantics:** Generate a lane-index vector from a scalar base value: `ASC`
+  produces `base + lane_id`, and `DESC` ramps down from the scalar's upper end,
+  `(base + N - 1) - lane_id`.
 - **inputs:**
   `%index` is the scalar base value. Supported scalar types are `i8/i16/i32`,
   `f16`, and `f32`.
 - **outputs:**
   `%result` is the generated index vector.
 - **constraints and limitations:**
-  This is an index-generation family, not a numeric conversion. `order` and
-  the result element type together determine whether lanes are generated as
-  `base + lane_id` or `base - lane_id`. Supported result types are
+  This is an index-generation family, not a numeric conversion. `order` selects
+  the ramp described above; the `DESC` form is the measured hardware behavior —
+  on the A5 camodel, `f16` with `N = 128` and `base = 7` produces `134..7` — and
+  is *not* `base - lane_id`, which is the contract of the VMI-level
+  `pto.vmi.vci` (that op materializes `DESC` as `pto.vci 0 {ASC}` plus a
+  negation and one `vadds` per chunk). Supported result types are
   `!pto.vreg<256xsi8>`, `!pto.vreg<128xsi16>`, `!pto.vreg<64xsi32>`,
-  `!pto.vreg<128xf16>`, and `!pto.vreg<64xf32>`. `%index` must use the
-  matching scalar type for `f16`/`f32`; for integer results, `%index` must use
-  the same bit width and may be signless or signed.
+  `!pto.vreg<128xf16>`, and `!pto.vreg<64xf32>`; these are the hardware VCI
+  element types, so there is no `bf16` form and both verifiers reject one.
+  `%index` must use the matching scalar type for `f16`/`f32`; for integer
+  results, `%index` must use the same bit width and may be signless or signed.
+  See `13-dsa-sfu-ops.md` for the same entry with its per-direction notes.
 
 ---
 
@@ -51,11 +58,16 @@ Cycle-accurate simulator **popped→retire** latency (cycles). Only representati
 
 - **syntax:** `%result = pto.vcvt %input, %mask {rnd = "RND", sat = "SAT", part = "PART"} : !pto.vreg<NxT0>, !pto.mask<G> -> !pto.vreg<MxT1>`
 - **semantics:** Type conversion between float/int types with rounding control.
+  The predicate is zero-inactive: every lane with a cleared predicate bit is
+  written with zero, not left untouched.
 
 ```c
-for (int i = 0; i < min(N, M); i++)
+for (int i = 0; i < min(N, M); i++) {
     if (mask[i])
         dst[i] = convert(src[i], T0, T1, rnd);
+    else
+        dst[i] = 0;
+}
 ```
 
 - **inputs:**
@@ -70,6 +82,10 @@ for (int i = 0; i < min(N, M); i++)
   to the selected conversion kind should be provided. The execution mask must
   use the typed-mask granularity that matches the source vector family on the
   current surface; there is no `!pto.mask<b64>` form in VPTO.
+  The inactive-lane rule is why a masked VMI conversion needs no explicit
+  source clearing or result merge: the VMI cast family has the same
+  zero-inactive contract, so the predicate is forwarded straight to the
+  `pto.vcvt` that implements it.
 
 ---
 
@@ -78,7 +94,7 @@ for (int i = 0; i < min(N, M); i++)
 | Mode | Description |
 |------|-------------|
 | `R` | Round to nearest, ties to even (default) |
-| `A` | Round away from zero |
+| `A` | Round to nearest, ties away from zero |
 | `F` | Round toward negative infinity (floor) |
 | `C` | Round toward positive infinity (ceil) |
 | `Z` | Round toward zero (truncate) |
@@ -130,7 +146,10 @@ destination lane group.
 - `mask`
   - Use to select which source lanes participate in the conversion. In
     width-changing conversions, `mask` works together with `part` / `pp` to
-    determine which logical lane positions are produced.
+    determine which logical lane positions are produced. A cleared bit writes
+    zero to the corresponding destination lane; it does not preserve the
+    previous destination value, so a masked conversion cannot be turned into a
+    merge by dropping the predicate.
 - `sat`
   - Use when the conversion may overflow the destination range and hardware
     exposes a saturating form.
@@ -304,7 +323,7 @@ for (int i = 0; i < N; i++)
 **Example: Reinterpreting float as integer for bit manipulation**
 ```mlir
 // Prepare a vector of float values
-%fvec = pto.vlds %ub[%lane] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+%fvec = pto.vlds %ub[%lane] : !pto.ptr<f32, ub>, index -> !pto.vreg<64xf32>
 
 // Reinterpret as integer for bitwise operations
 %ivec = pto.vbitcast %fvec : !pto.vreg<64xf32> -> !pto.vreg<64xi32>
@@ -319,7 +338,7 @@ for (int i = 0; i < N; i++)
 **Example: Type punning between signed and unsigned integer**
 ```mlir
 // Convert signed to unsigned without changing bits
-%signed = pto.vlds %ub[%lane] : !pto.ptr<si32, ub> -> !pto.vreg<64xsi32>
+%signed = pto.vlds %ub[%lane] : !pto.ptr<si32, ub>, index -> !pto.vreg<64xsi32>
 %unsigned = pto.vbitcast %signed : !pto.vreg<64xsi32> -> !pto.vreg<64xui32>
 // Bits are identical; interpretation changes from signed to unsigned
 ```

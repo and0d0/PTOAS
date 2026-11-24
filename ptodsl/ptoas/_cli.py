@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
@@ -26,9 +27,9 @@ def _resolve_wrapper_path(argv0: str | None = None) -> Path:
 
 
 def _load_native_module():
-    from ptoas import _core
+    from ptoas._loader import ensure_core
 
-    return _core
+    return ensure_core()
 
 
 def _resolve_tileops_dir(native_module) -> Path:
